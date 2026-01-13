@@ -1,0 +1,7 @@
+ripser>=0.6.0
+tensorflow>=2.16.0
+backtrader>=1.9.78
+ccxt>=4.4.0
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.5.0

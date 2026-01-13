@@ -1,0 +1,10 @@
+{
+  "sharpe_ratio": 3.1875,
+  "max_drawdown": 0.0038,
+  "total_return": 0.0293,
+  "num_trades": 5,
+  "win_rate": 0.4,
+  "avg_win_loss": 7.936,
+  "final_value": 102925.27,
+  "initial_cash": 100000.0
+}

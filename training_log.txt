@@ -1,0 +1,296 @@
+/usr/local/python/3.12.1/lib/python3.12/site-packages/keras/src/export/tf2onnx_lib.py:8: FutureWarning: In the future `np.object` will be defined as the corresponding NumPy scalar.
+  if not hasattr(np, "object"):
+2026-01-13 17:36:22.429717: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+============================================================
+STEP 1: Downloading SPY Data (2022-2025)
+============================================================
+  Downloading SPY data from 2022-01-01 to 2025-12-31...
+  Downloaded 1002 bars from 2022-01-03 to 2025-12-30
+
+Data splits:
+  2022: 251 bars
+  2023: 250 bars
+  2024: 252 bars
+  2025: 249 bars
+  2023_2024: 502 bars
+  2023_2025: 751 bars
+
+============================================================
+STEP 2: Training Neural Network (2022 Data Only)
+============================================================
+  Training period: 2022-01-03 to 2022-12-30 (251 bars)
+  Generating TDA features...
+  Training samples: 215
+  X_train shape: (215, 15, 6), dtype: float32
+  y_train class balance: 44.2% up, 55.8% down
+
+  [A] Training with STANDARD binary crossentropy (baseline)...
+    Using standard binary crossentropy loss
+      Baseline output: mean=0.4344, std=0.1289, extreme=81.9%
+
+  [B] Training with ENTROPY PENALTY loss (experimental)...
+    Using entropy penalty loss (weight=0.05)
+      Tracking output spread per epoch:
+    Epoch 10: mean=0.4747, std=0.0226, extreme=20.9% (>0.55:0.0%, <0.45:20.9%)
+    Epoch 20: mean=0.4904, std=0.0468, extreme=34.9% (>0.55:11.6%, <0.45:23.3%)
+    Epoch 30: mean=0.5066, std=0.0822, extreme=62.8% (>0.55:32.6%, <0.45:30.2%)
+      Entropy output: mean=0.4460, std=0.0854, extreme=65.6%
+
+══════════════════════════════════════════════════════════════════════
+ENTROPY PENALTY ANALYSIS: BEFORE vs AFTER
+══════════════════════════════════════════════════════════════════════
+
+Metric                    Baseline (BCE)       Entropy Penalty      Change         
+----------------------------------------------------------------------
+mean                      0.4344               0.4460               +0.0116
+std                       0.1289               0.0854               -0.0435
+min                       0.1250               0.2259               +0.1009
+max                       0.7824               0.6332               -0.1492
+----------------------------------------------------------------------
+% above 055               17.2               % 12.6               % -4.7%
+% below 045               64.7               % 53.0               % -11.6%
+% extreme                 81.9               % 65.6               % -16.3%
+% above 060               13.5               % 2.3                % -11.2%
+% below 040               44.7               % 33.5               % -11.2%
+----------------------------------------------------------------------
+
+[VERDICT]:
+❌ MINIMAL EFFECT: Entropy penalty did not significantly spread outputs.
+   This suggests the financial data itself lacks predictive signal.
+   Consider: adding more features, or accepting NN as secondary filter.
+✅ TRADEABLE: 65.6% of predictions are in extreme zones (>0.55 or <0.45)
+══════════════════════════════════════════════════════════════════════
+
+  → Using BASELINE model (entropy penalty didn't help)
+  Model saved to /workspaces/Algebraic-Topology-Neural-Net-Strategy/results/model_weights.weights.h5
+
+============================================================
+STEP 2.5: NN Training Diagnostics
+============================================================
+
+════════════════════════════════════════════════════════════
+NN TRAINING DIAGNOSTICS
+════════════════════════════════════════════════════════════
+
+[1] TRAINING DATA:
+    X_train shape: (215, 15, 6)
+    X_train dtype: float32
+    X_train mean:  0.015942
+    X_train std:   1.012850
+    X_train min:   -3.519399
+    X_train max:   4.471611
+    X_train NaN:   0
+    X_train Inf:   0
+
+    y_train shape: (215,)
+    y_train dtype: float32
+    y_train mean:  0.4419 (should be ~0.5 for balanced)
+    y_train sum:   95.0 (class 1 count)
+    y_train class balance: 44.2% up, 55.8% down
+
+[2] TRAINING HISTORY:
+    Epochs completed: 48
+    Initial loss:    0.691887
+    Final loss:      0.559353
+    Loss reduction:  0.132534
+    ✓ Loss decreased during training
+    Initial val_loss: 0.691552
+    Final val_loss:   0.669954
+    Initial accuracy: 51.16%
+    Final accuracy:   72.67%
+    Final val_acc:    55.81%
+
+[3] MODEL WEIGHTS (Post-Training):
+    Total params:    31137
+    Weights mean:    0.003623
+    Weights std:     0.104334
+    Weights min:     -0.608248
+    Weights max:     1.065535
+    Zero weights:    0 (0.0%)
+    LSTM weight sample: [-0.003073, 0.125231, -0.083927, 0.075856, 0.005757, -0.000679, -0.029432, 0.098667, -0.140642, -0.166942]
+    ✓ Weights have reasonable variance
+
+[4] MODEL CHECKPOINT:
+    Path: /workspaces/Algebraic-Topology-Neural-Net-Strategy/results/model_weights.weights.h5
+    Size: 0.39 MB (405,560 bytes)
+    ✓ Checkpoint file size looks reasonable
+
+[5] POST-TRAINING INFERENCE TEST:
+    10 random inputs → outputs:
+      Test 1: 0.563077
+      Test 2: 0.610910
+      Test 3: 0.384682
+      Test 4: 0.508286
+      Test 5: 0.716228
+      Test 6: 0.523434
+      Test 7: 0.341573
+      Test 8: 0.480173
+      Test 9: 0.505068
+      Test 10: 0.420538
+
+    Output mean: 0.505397
+    Output std:  0.104159
+    ✓ Outputs vary across different inputs (model is trained)
+
+[6] INFERENCE ON ACTUAL TRAINING DATA:
+    20 training samples → outputs:
+      Sample   0: output=0.3987, actual=1, pred=0 ✗
+      Sample  11: output=0.3524, actual=0, pred=0 ✓
+      Sample  22: output=0.7585, actual=1, pred=1 ✓
+      Sample  33: output=0.3485, actual=0, pred=0 ✓
+      Sample  45: output=0.6514, actual=0, pred=1 ✗
+      Sample  56: output=0.4541, actual=0, pred=0 ✓
+      Sample  67: output=0.5209, actual=0, pred=1 ✗
+      Sample  78: output=0.5152, actual=0, pred=1 ✗
+      Sample  90: output=0.6749, actual=1, pred=1 ✓
+      Sample 101: output=0.4439, actual=1, pred=0 ✗
+      Sample 112: output=0.3607, actual=0, pred=0 ✓
+      Sample 123: output=0.3230, actual=0, pred=0 ✓
+      Sample 135: output=0.5016, actual=1, pred=1 ✓
+      Sample 146: output=0.2850, actual=0, pred=0 ✓
+      Sample 157: output=0.1662, actual=0, pred=0 ✓
+      Sample 168: output=0.5319, actual=1, pred=1 ✓
+      Sample 180: output=0.4320, actual=1, pred=0 ✗
+      Sample 191: output=0.3625, actual=0, pred=0 ✓
+      Sample 202: output=0.4239, actual=1, pred=0 ✗
+      Sample 214: output=0.5024, actual=0, pred=1 ✗
+
+    Training data output mean: 0.450382
+    Training data output std:  0.136144
+
+════════════════════════════════════════════════════════════
+DIAGNOSTIC VERDICT:
+════════════════════════════════════════════════════════════
+✓ No obvious issues detected. Model appears trained.
+  If outputs are still ~0.5 during backtest, check:
+  1. Is the correct model being loaded?
+  2. Are features computed the same way during inference?
+════════════════════════════════════════════════════════════
+
+Full diagnostics saved to: /workspaces/Algebraic-Topology-Neural-Net-Strategy/results/nn_training_debug.txt
+
+============================================================
+STEP 3: Running Backtests (3 Separate Periods)
+============================================================
+
+[1/3] Backtest: 2023-2024 (Original Period)
+  Running 2023-2024 (502 bars: 2023-01-03 to 2024-12-31)...
+
+
+════════════════════════════════════════════════════════════
+SIGNAL DIAGNOSTIC SUMMARY
+════════════════════════════════════════════════════════════
+Total bars analyzed: 502
+------------------------------------------------------------
+  Warming up (insufficient data)               39 (  7.8%)
+  Order pending                                 0 (  0.0%)
+  Already positioned (holding)                159 ( 31.7%)
+  NN signal too low for buy                     0 (  0.0%)
+  NN signal too high for sell (no pos)        288 ( 57.4%)
+  Turbulence blocking                           0 (  0.0%)
+  Insufficient cash                             0 (  0.0%)
+  Trade executed (BUY)                          1 (  0.2%)
+  Trade executed (SELL)                         0 (  0.0%)
+  No signal (neutral zone)                     15 (  3.0%)
+------------------------------------------------------------
+  TOTAL TRADES                                  1
+════════════════════════════════════════════════════════════
+
+Current Thresholds:
+  NN Buy Threshold:        0.52
+  NN Sell Threshold:       0.48
+  Position Size Pct:       0.15
+  TDA Regime Min Mult:     0.4
+════════════════════════════════════════════════════════════
+    Sharpe: 0.7964, Trades: 0, Return: 1.79%
+
+[2/3] Backtest: 2025 Only (Out-of-Sample)
+  Running 2025 Only (249 bars: 2025-01-02 to 2025-12-30)...
+
+
+════════════════════════════════════════════════════════════
+SIGNAL DIAGNOSTIC SUMMARY
+════════════════════════════════════════════════════════════
+Total bars analyzed: 249
+------------------------------------------------------------
+  Warming up (insufficient data)               39 ( 15.7%)
+  Order pending                                 0 (  0.0%)
+  Already positioned (holding)                 24 (  9.6%)
+  NN signal too low for buy                     0 (  0.0%)
+  NN signal too high for sell (no pos)        175 ( 70.3%)
+  Turbulence blocking                           0 (  0.0%)
+  Insufficient cash                             0 (  0.0%)
+  Trade executed (BUY)                          3 (  1.2%)
+  Trade executed (SELL)                         3 (  1.2%)
+  No signal (neutral zone)                      5 (  2.0%)
+------------------------------------------------------------
+  TOTAL TRADES                                  6
+════════════════════════════════════════════════════════════
+
+Current Thresholds:
+  NN Buy Threshold:        0.52
+  NN Sell Threshold:       0.48
+  Position Size Pct:       0.15
+  TDA Regime Min Mult:     0.4
+════════════════════════════════════════════════════════════
+    Sharpe: -0.1213, Trades: 3, Return: -0.16%
+
+[3/3] Backtest: 2023-2025 Combined (Full Period)
+  Running 2023-2025 (751 bars: 2023-01-03 to 2025-12-30)...
+
+
+════════════════════════════════════════════════════════════
+SIGNAL DIAGNOSTIC SUMMARY
+════════════════════════════════════════════════════════════
+Total bars analyzed: 751
+------------------------------------------------------------
+  Warming up (insufficient data)               39 (  5.2%)
+  Order pending                                 0 (  0.0%)
+  Already positioned (holding)                223 ( 29.7%)
+  NN signal too low for buy                     0 (  0.0%)
+  NN signal too high for sell (no pos)        463 ( 61.7%)
+  Turbulence blocking                           0 (  0.0%)
+  Insufficient cash                             0 (  0.0%)
+  Trade executed (BUY)                          3 (  0.4%)
+  Trade executed (SELL)                         3 (  0.4%)
+  No signal (neutral zone)                     20 (  2.7%)
+------------------------------------------------------------
+  TOTAL TRADES                                  6
+════════════════════════════════════════════════════════════
+
+Current Thresholds:
+  NN Buy Threshold:        0.52
+  NN Sell Threshold:       0.48
+  Position Size Pct:       0.15
+  TDA Regime Min Mult:     0.4
+════════════════════════════════════════════════════════════
+    Sharpe: 0.3385, Trades: 3, Return: 1.31%
+
+============================================================
+STEP 4: Saving Results
+============================================================
+  Results saved to: /workspaces/Algebraic-Topology-Neural-Net-Strategy/results/backtest_2025_validation.json
+
+
+════════════════════════════════════════════════════════════
+OUT-OF-SAMPLE VALIDATION: 2025 TEST
+════════════════════════════════════════════════════════════
+2023-2024 (Original):    Sharpe = 0.80
+2025 Only (New OOS):     Sharpe = -0.12
+2023-2025 (Full):        Sharpe = 0.34
+------------------------------------------------------------
+Sharpe Change (2025 vs 2023-2024): -0.92 (-115.2%)
+------------------------------------------------------------
+
+Verdict: [OVERFIT]
+❌ OVERFIT - Model failed on out-of-sample 2025 data
+════════════════════════════════════════════════════════════
+
+DETAILED METRICS:
+------------------------------------------------------------
+Period                 Sharpe     Return    MaxDD   Trades  WinRate
+------------------------------------------------------------
+2023-2024                0.80      1.79%    1.29%        0     0.0%
+2025 Only               -0.12     -0.16%    1.44%        3    66.7%
+2023-2025                0.34      1.31%    2.38%        3   100.0%
+------------------------------------------------------------

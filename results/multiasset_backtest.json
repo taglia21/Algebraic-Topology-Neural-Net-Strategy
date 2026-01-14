@@ -1,0 +1,182 @@
+{
+  "metadata": {
+    "timestamp": "2026-01-14T03:10:15.481902",
+    "engine_version": "V1.3",
+    "mode": "baseline",
+    "data_provider": "yfinance",
+    "timeframe": "1d",
+    "tickers": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "XLF",
+      "XLK"
+    ],
+    "tda_feature_mode": "v1.3",
+    "tda_features": {
+      "version": "v1.3",
+      "n_tda_features": 20,
+      "n_total_features": 22,
+      "description": "H0/H1 persistence (max, mean, sum, entropy, top_k, count_large, wasserstein)"
+    },
+    "train_period": "2022-01-01 to 2023-12-31",
+    "test_period": "2024-01-01 to 2025-12-31",
+    "thresholds": {
+      "nn_buy_threshold": 0.52,
+      "nn_sell_threshold": 0.48
+    },
+    "cost_model": {
+      "cost_bp_per_side": 5
+    }
+  },
+  "per_asset": {
+    "SPY": {
+      "ticker": "SPY",
+      "sharpe_ratio": 1.3222,
+      "total_return": 0.0131,
+      "max_drawdown": 0.0029,
+      "num_trades": 19,
+      "win_rate": 0.7368,
+      "final_value": 20262.52,
+      "initial_cash": 20000.0,
+      "total_notional_traded": 43012.98,
+      "turnover": 2.1506,
+      "extra_costs": 21.51,
+      "sharpe_ratio_net": 1.2139,
+      "total_return_net": 0.0121,
+      "final_value_net": 20241.01
+    },
+    "QQQ": {
+      "ticker": "QQQ",
+      "sharpe_ratio": 0.0657,
+      "total_return": 0.0007,
+      "max_drawdown": 0.0078,
+      "num_trades": 21,
+      "win_rate": 0.5714,
+      "final_value": 20014.62,
+      "initial_cash": 20000.0,
+      "total_notional_traded": 44945.4,
+      "turnover": 2.2473,
+      "extra_costs": 22.47,
+      "sharpe_ratio_net": -0.0353,
+      "total_return_net": -0.0004,
+      "final_value_net": 19992.15
+    },
+    "IWM": {
+      "ticker": "IWM",
+      "sharpe_ratio": 0.9789,
+      "total_return": 0.0131,
+      "max_drawdown": 0.0064,
+      "num_trades": 20,
+      "win_rate": 0.6,
+      "final_value": 20262.28,
+      "initial_cash": 20000.0,
+      "total_notional_traded": 47114.21,
+      "turnover": 2.3557,
+      "extra_costs": 23.56,
+      "sharpe_ratio_net": 0.891,
+      "total_return_net": 0.0119,
+      "final_value_net": 20238.72
+    },
+    "XLF": {
+      "ticker": "XLF",
+      "sharpe_ratio": 0.1127,
+      "total_return": 0.001,
+      "max_drawdown": 0.0062,
+      "num_trades": 17,
+      "win_rate": 0.5294,
+      "final_value": 20020.45,
+      "initial_cash": 20000.0,
+      "total_notional_traded": 44896.58,
+      "turnover": 2.2448,
+      "extra_costs": 22.45,
+      "sharpe_ratio_net": -0.011,
+      "total_return_net": -0.0001,
+      "final_value_net": 19998.0
+    },
+    "XLK": {
+      "ticker": "XLK",
+      "sharpe_ratio": 0.579,
+      "total_return": 0.0106,
+      "max_drawdown": 0.0148,
+      "num_trades": 21,
+      "win_rate": 0.619,
+      "final_value": 20212.92,
+      "initial_cash": 20000.0,
+      "total_notional_traded": 52884.11,
+      "turnover": 2.6442,
+      "extra_costs": 26.44,
+      "sharpe_ratio_net": 0.5071,
+      "total_return_net": 0.0093,
+      "final_value_net": 20186.47
+    }
+  },
+  "portfolio_equal_weight": {
+    "sharpe_ratio": 0.8707,
+    "sharpe_ratio_net": 0.7395,
+    "total_return": 0.0077,
+    "total_return_net": 0.0066,
+    "max_drawdown": 0.0148,
+    "num_trades": 98,
+    "win_rate": 0.6122,
+    "turnover": 2.3285,
+    "final_value": 100772.79,
+    "final_value_net": 100656.36,
+    "initial_cash": 100000.0,
+    "n_assets": 5
+  },
+  "portfolio_performance_weighted": {
+    "sharpe_ratio": 1.2659,
+    "sharpe_ratio_net": 1.1432,
+    "total_return": 0.0119,
+    "total_return_net": 0.0108,
+    "max_drawdown": 0.0148,
+    "num_trades": 98,
+    "win_rate": 0.6122,
+    "turnover": 2.3152,
+    "final_value": 101194.04,
+    "final_value_net": 101078.27,
+    "initial_cash": 100000.0,
+    "n_assets": 5,
+    "risk_scale": 1.0,
+    "cash_weight": 0.0
+  },
+  "weights": {
+    "SPY": 0.4323,
+    "QQQ": 0.0215,
+    "IWM": 0.3201,
+    "XLF": 0.0368,
+    "XLK": 0.1893
+  },
+  "risk_scale": 1.0,
+  "cash_weight": 0.0,
+  "threshold_sensitivity": {
+    "conservative": {
+      "buy_threshold": 0.53,
+      "sell_threshold": 0.47,
+      "buy_signals": 228,
+      "sell_signals": 140,
+      "neutral": 97,
+      "pct_buy": 49.0,
+      "pct_sell": 30.1
+    },
+    "baseline": {
+      "buy_threshold": 0.52,
+      "sell_threshold": 0.48,
+      "buy_signals": 251,
+      "sell_signals": 151,
+      "neutral": 63,
+      "pct_buy": 54.0,
+      "pct_sell": 32.5
+    },
+    "aggressive": {
+      "buy_threshold": 0.51,
+      "sell_threshold": 0.49,
+      "buy_signals": 265,
+      "sell_signals": 162,
+      "neutral": 38,
+      "pct_buy": 57.0,
+      "pct_sell": 34.8
+    }
+  }
+}

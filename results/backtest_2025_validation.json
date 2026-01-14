@@ -1,0 +1,32 @@
+{
+  "backtest_2023_2024": {
+    "sharpe_ratio": 0.7964,
+    "max_drawdown": 0.0129,
+    "total_return": 0.0179,
+    "num_trades": 0,
+    "win_rate": 0.0,
+    "avg_win_loss": 0.0,
+    "final_value": 101792.67,
+    "initial_cash": 100000.0
+  },
+  "backtest_2025_only": {
+    "sharpe_ratio": -0.1213,
+    "max_drawdown": 0.0144,
+    "total_return": -0.0016,
+    "num_trades": 3,
+    "win_rate": 0.6667,
+    "avg_win_loss": 0.4427,
+    "final_value": 99842.53,
+    "initial_cash": 100000.0
+  },
+  "backtest_2023_2025": {
+    "sharpe_ratio": 0.3385,
+    "max_drawdown": 0.0238,
+    "total_return": 0.0131,
+    "num_trades": 3,
+    "win_rate": 1.0,
+    "avg_win_loss": 436.7264,
+    "final_value": 101310.18,
+    "initial_cash": 100000.0
+  }
+}

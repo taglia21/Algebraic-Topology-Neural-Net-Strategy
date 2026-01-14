@@ -1,0 +1,19 @@
+Multi-Asset NN Training Diagnostics - 2026-01-14T03:06:36.487709
+============================================================
+
+Training Data:
+  train_X shape: (2325, 15, 22)
+  train_y shape: (2325,)
+  train_y distribution: 50.8% up
+
+Training Results:
+  Epochs completed: 28
+  Final loss: 0.6071
+  Final val_loss: 0.7498
+
+Prediction Statistics on Training Data:
+  Mean: 0.4721
+  Std: 0.1068
+  % > 0.55: 23.3%
+  % < 0.45: 40.6%
+  % in extreme zones: 63.9%

@@ -1,0 +1,152 @@
+/usr/local/python/3.12.1/lib/python3.12/site-packages/keras/src/export/tf2onnx_lib.py:8: FutureWarning: In the future `np.object` will be defined as the corresponding NumPy scalar.
+  if not hasattr(np, "object"):
+2026-01-13 03:15:21.945916: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+============================================================
+STEP 1: Downloading SPY Data (2022-2025)
+============================================================
+  Downloading SPY data from 2022-01-01 to 2025-12-31...
+  Downloaded 1002 bars from 2022-01-03 to 2025-12-30
+
+Data splits:
+  2022: 251 bars
+  2023: 250 bars
+  2024: 252 bars
+  2025: 249 bars
+  2023_2024: 502 bars
+  2023_2025: 751 bars
+
+============================================================
+STEP 2: Training Neural Network (2022 Data Only)
+============================================================
+  Training period: 2022-01-03 to 2022-12-30 (251 bars)
+  Generating TDA features...
+  Training samples: 215
+  Training neural network...
+  Training complete!
+  Model saved to /workspaces/Algebraic-Topology-Neural-Net-Strategy/results/model_weights.weights.h5
+
+============================================================
+STEP 3: Running Backtests (3 Separate Periods)
+============================================================
+
+[1/3] Backtest: 2023-2024 (Original Period)
+  Running 2023-2024 (502 bars: 2023-01-03 to 2024-12-31)...
+
+
+════════════════════════════════════════════════════════════
+SIGNAL DIAGNOSTIC SUMMARY
+════════════════════════════════════════════════════════════
+Total bars analyzed: 502
+------------------------------------------------------------
+  Warming up (insufficient data)               39 (  7.8%)
+  Order pending                                 0 (  0.0%)
+  Already positioned (holding)                 28 (  5.6%)
+  NN signal too low for buy                     0 (  0.0%)
+  NN signal too high for sell (no pos)        430 ( 85.7%)
+  Turbulence blocking                           0 (  0.0%)
+  Insufficient cash                             0 (  0.0%)
+  Trade executed (BUY)                          1 (  0.2%)
+  Trade executed (SELL)                         1 (  0.2%)
+  No signal (neutral zone)                      3 (  0.6%)
+------------------------------------------------------------
+  TOTAL TRADES                                  2
+════════════════════════════════════════════════════════════
+
+Current Thresholds:
+  NN Buy Threshold:        0.52
+  NN Sell Threshold:       0.48
+  Position Size Pct:       0.15
+  TDA Regime Min Mult:     0.4
+════════════════════════════════════════════════════════════
+    Sharpe: 0.9469, Trades: 1, Return: 0.98%
+
+[2/3] Backtest: 2025 Only (Out-of-Sample)
+  Running 2025 Only (249 bars: 2025-01-02 to 2025-12-30)...
+
+
+════════════════════════════════════════════════════════════
+SIGNAL DIAGNOSTIC SUMMARY
+════════════════════════════════════════════════════════════
+Total bars analyzed: 249
+------------------------------------------------------------
+  Warming up (insufficient data)               39 ( 15.7%)
+  Order pending                                 0 (  0.0%)
+  Already positioned (holding)                 15 (  6.0%)
+  NN signal too low for buy                     0 (  0.0%)
+  NN signal too high for sell (no pos)        188 ( 75.5%)
+  Turbulence blocking                           0 (  0.0%)
+  Insufficient cash                             0 (  0.0%)
+  Trade executed (BUY)                          2 (  0.8%)
+  Trade executed (SELL)                         2 (  0.8%)
+  No signal (neutral zone)                      3 (  1.2%)
+------------------------------------------------------------
+  TOTAL TRADES                                  4
+════════════════════════════════════════════════════════════
+
+Current Thresholds:
+  NN Buy Threshold:        0.52
+  NN Sell Threshold:       0.48
+  Position Size Pct:       0.15
+  TDA Regime Min Mult:     0.4
+════════════════════════════════════════════════════════════
+    Sharpe: 1.9961, Trades: 2, Return: 1.08%
+
+[3/3] Backtest: 2023-2025 Combined (Full Period)
+  Running 2023-2025 (751 bars: 2023-01-03 to 2025-12-30)...
+
+
+════════════════════════════════════════════════════════════
+SIGNAL DIAGNOSTIC SUMMARY
+════════════════════════════════════════════════════════════
+Total bars analyzed: 751
+------------------------------------------------------------
+  Warming up (insufficient data)               39 (  5.2%)
+  Order pending                                 0 (  0.0%)
+  Already positioned (holding)                 43 (  5.7%)
+  NN signal too low for buy                     0 (  0.0%)
+  NN signal too high for sell (no pos)        653 ( 87.0%)
+  Turbulence blocking                           0 (  0.0%)
+  Insufficient cash                             0 (  0.0%)
+  Trade executed (BUY)                          3 (  0.4%)
+  Trade executed (SELL)                         3 (  0.4%)
+  No signal (neutral zone)                     10 (  1.3%)
+------------------------------------------------------------
+  TOTAL TRADES                                  6
+════════════════════════════════════════════════════════════
+
+Current Thresholds:
+  NN Buy Threshold:        0.52
+  NN Sell Threshold:       0.48
+  Position Size Pct:       0.15
+  TDA Regime Min Mult:     0.4
+════════════════════════════════════════════════════════════
+    Sharpe: 1.3017, Trades: 3, Return: 2.06%
+
+============================================================
+STEP 4: Saving Results
+============================================================
+  Results saved to: /workspaces/Algebraic-Topology-Neural-Net-Strategy/results/backtest_2025_validation.json
+
+
+════════════════════════════════════════════════════════════
+OUT-OF-SAMPLE VALIDATION: 2025 TEST
+════════════════════════════════════════════════════════════
+2023-2024 (Original):    Sharpe = 0.95
+2025 Only (New OOS):     Sharpe = 2.00
+2023-2025 (Full):        Sharpe = 1.30
+------------------------------------------------------------
+Sharpe Change (2025 vs 2023-2024): +1.05 (+110.8%)
+------------------------------------------------------------
+
+Verdict: [ROBUST]
+✅ ROBUST - Model generalized well to unseen 2025 data!
+════════════════════════════════════════════════════════════
+
+DETAILED METRICS:
+------------------------------------------------------------
+Period                 Sharpe     Return    MaxDD   Trades  WinRate
+------------------------------------------------------------
+2023-2024                0.95      0.98%    0.64%        1   100.0%
+2025 Only                2.00      1.08%    0.20%        2   100.0%
+2023-2025                1.30      2.06%    0.64%        3   100.0%
+------------------------------------------------------------

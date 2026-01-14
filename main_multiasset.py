@@ -32,6 +32,8 @@ from src.nn_predictor import NeuralNetPredictor, DataPreprocessor, train_model
 from src.ensemble_strategy import EnsembleStrategy, PerformanceAnalyzer
 from src.data.data_provider import get_ohlcv_data, validate_provider
 from src.regime_labeler import RegimeLabeler, label_regimes
+from src.risk_management import RiskManager, TradeJournal, calculate_atr
+from src.transaction_costs import CostModel, CostScenario, estimate_roundtrip_cost
 
 # Set random seeds for reproducibility
 import tensorflow as tf
@@ -122,6 +124,17 @@ MAX_POSITION_PCT = 0.25
 
 # Cost model parameters (V1.1+)
 COST_BP_PER_SIDE = 5  # 0.05% per side (slippage + market impact estimate)
+
+# V4.0: Risk Management Configuration - OPTIMIZED for 60%+ win rate strategies
+USE_RISK_MANAGEMENT = True  # Enable risk management framework
+RISK_PER_TRADE = 0.02       # 2% risk per trade (up from 1%, justified by strong win rates)
+STOP_ATR_MULTIPLIER = 2.0   # ATR multiplier for stop-losses
+RISK_REWARD_RATIO = 2.0     # Take-profit R:R ratio
+MAX_PORTFOLIO_HEAT = 0.35   # Maximum 35% portfolio heat (up from 20%, allows 2-3 concurrent positions)
+
+# V4.0: Transaction Cost Configuration
+USE_ENHANCED_COST_MODEL = True  # Enable detailed transaction cost tracking
+COST_SCENARIO = 'baseline'      # 'low_cost', 'baseline', 'high_cost', 'extreme'
 
 # Paths
 RESULTS_DIR = '/workspaces/Algebraic-Topology-Neural-Net-Strategy/results'
@@ -450,9 +463,13 @@ def run_single_asset_backtest(ticker: str,
                                tda_gen: TDAFeatureGenerator,
                                preprocessor: DataPreprocessor,
                                initial_cash: float = 20000,  # Per-asset allocation
-                               enable_diagnostics: bool = False) -> Dict[str, Any]:
+                               enable_diagnostics: bool = False,
+                               risk_manager: RiskManager = None,
+                               trade_journal: TradeJournal = None) -> Dict[str, Any]:
     """
     Run backtest for a single asset.
+    
+    V4.0: Now includes risk management metrics.
     
     Returns metrics dictionary.
     """
@@ -467,6 +484,20 @@ def run_single_asset_backtest(ticker: str,
     # Add strategy with ticker-specific CSV path
     csv_path = f'{RESULTS_DIR}/diagnostics_{ticker}.csv' if enable_diagnostics else None
     
+    # V4.0: Create risk manager for this asset if not provided
+    if risk_manager is None and USE_RISK_MANAGEMENT:
+        risk_manager = RiskManager(
+            initial_capital=initial_cash,
+            risk_per_trade=RISK_PER_TRADE,
+            log_path=f'{RESULTS_DIR}/risk_log_{ticker}.csv'
+        )
+    
+    # V4.0: Create trade journal for this asset if not provided
+    if trade_journal is None and USE_RISK_MANAGEMENT:
+        trade_journal = TradeJournal(
+            journal_path=f'{RESULTS_DIR}/trade_journal_{ticker}.csv'
+        )
+    
     cerebro.addstrategy(
         EnsembleStrategy,
         nn_model=model,
@@ -479,6 +510,15 @@ def run_single_asset_backtest(ticker: str,
         use_confidence_sizing=USE_CONFIDENCE_SIZING,
         min_position_pct=MIN_POSITION_PCT,
         max_position_pct=MAX_POSITION_PCT,
+        # V4.0: Risk management parameters
+        use_risk_management=USE_RISK_MANAGEMENT,
+        initial_capital=initial_cash,
+        risk_per_trade=RISK_PER_TRADE,
+        stop_atr_multiplier=STOP_ATR_MULTIPLIER,
+        risk_reward_ratio=RISK_REWARD_RATIO,
+        max_portfolio_heat=MAX_PORTFOLIO_HEAT,
+        risk_manager=risk_manager,
+        trade_journal=trade_journal,
         verbose=False,
         diagnostic_csv_path=csv_path if csv_path else '',
         enable_diagnostics=enable_diagnostics,
@@ -557,6 +597,21 @@ def run_single_asset_backtest(ticker: str,
         # Daily returns for portfolio aggregation
         'daily_returns': daily_returns
     }
+    
+    # V4.0: Add risk management metrics
+    if USE_RISK_MANAGEMENT and hasattr(strat, 'get_risk_metrics'):
+        risk_metrics = strat.get_risk_metrics()
+        metrics['risk_management'] = {
+            'num_stopped_out': risk_metrics.get('num_stopped_out', 0),
+            'num_take_profit_hits': risk_metrics.get('num_take_profit_hits', 0),
+            'max_portfolio_heat_reached': risk_metrics.get('max_portfolio_heat_reached', 0),
+            'avg_r_multiple': risk_metrics.get('avg_r_multiple', 0),
+            'profit_factor': risk_metrics.get('profit_factor', 0),
+            'expectancy_per_trade': risk_metrics.get('expectancy_per_trade', 0),
+        }
+        print(f"      Risk: stops={risk_metrics.get('num_stopped_out', 0)}, "
+              f"targets={risk_metrics.get('num_take_profit_hits', 0)}, "
+              f"heat={risk_metrics.get('max_portfolio_heat_reached', 0)*100:.1f}%")
     
     print(f"    {ticker}: Sharpe={sharpe_gross:.2f} (net:{sharpe_net:.2f}), Return={total_return_gross*100:.2f}% (net:{total_return_net*100:.2f}%), Trades={num_trades}")
     

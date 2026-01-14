@@ -1,6 +1,10 @@
 """Ensemble Strategy combining TDA regime filter with LSTM predictor for Backtrader.
 
-Version 3.0: Multi-asset support with confidence-based position sizing.
+Version 4.0: Multi-asset support with risk management framework.
+- Fractional Kelly position sizing
+- ATR-based stop-losses with min/max bounds  
+- Take-profit targets based on risk-reward ratio
+- Portfolio heat limits
 """
 
 import csv
@@ -8,6 +12,9 @@ import os
 import numpy as np
 import pandas as pd
 import backtrader as bt
+
+from src.risk_management import RiskManager, TradeJournal, calculate_atr
+from src.signal_filters import SignalFilter
 
 
 class EnsembleStrategy(bt.Strategy):
@@ -39,6 +46,21 @@ class EnsembleStrategy(bt.Strategy):
         ('use_confidence_sizing', False),
         ('min_position_pct', 0.05),
         ('max_position_pct', 0.20),
+        # V4.0: Risk Management Parameters
+        ('use_risk_management', True),  # Enable risk management framework
+        ('initial_capital', 100000.0),   # Starting capital for risk calcs
+        ('risk_per_trade', 0.02),        # 2% risk per trade (optimized)
+        ('stop_atr_multiplier', 2.0),    # ATR multiplier for stops
+        ('risk_reward_ratio', 2.0),      # Take-profit R:R ratio
+        ('max_portfolio_heat', 0.35),    # Max 35% portfolio heat (optimized)
+        ('risk_manager', None),          # External RiskManager instance
+        ('trade_journal', None),         # External TradeJournal instance
+        # V4.1: Signal Quality Filters
+        ('use_signal_filter', True),     # Enable RSI/volatility filtering
+        ('rsi_period', 14),              # RSI calculation period
+        ('rsi_oversold', 45),            # Buy below this RSI (relaxed from 35)
+        ('rsi_overbought', 55),          # Sell above this RSI (relaxed from 65)
+        ('vol_threshold', 0.35),         # Pause if vol > 35% (relaxed from 30%)
         # Logging
         ('verbose', False),
         ('diagnostic_csv_path', '/workspaces/Algebraic-Topology-Neural-Net-Strategy/results/signal_diagnostics.csv'),
@@ -62,6 +84,45 @@ class EnsembleStrategy(bt.Strategy):
         self.feature_index = 0
         self.use_precomputed = self.params.precomputed_features is not None
         
+        # V4.0: Risk Management Initialization
+        self.open_positions = {}  # {ticker: {entry, stop, target, size, date}}
+        self.account_balance = self.params.initial_capital
+        
+        # Use external risk manager if provided, otherwise create new one
+        if self.params.risk_manager is not None:
+            self.risk_manager = self.params.risk_manager
+        elif self.params.use_risk_management:
+            self.risk_manager = RiskManager(
+                initial_capital=self.params.initial_capital,
+                risk_per_trade=self.params.risk_per_trade
+            )
+        else:
+            self.risk_manager = None
+        
+        # Use external trade journal if provided, otherwise create new one
+        if self.params.trade_journal is not None:
+            self.trade_journal = self.params.trade_journal
+        elif self.params.use_risk_management:
+            self.trade_journal = TradeJournal()
+        else:
+            self.trade_journal = None
+        
+        # V4.0: Risk metrics tracking
+        self.num_stopped_out = 0
+        self.num_take_profit_hits = 0
+        self.max_portfolio_heat_reached = 0.0
+        
+        # V4.1: Signal Filter Initialization
+        if self.params.use_signal_filter:
+            self.signal_filter = SignalFilter(
+                rsi_period=self.params.rsi_period,
+                rsi_oversold=self.params.rsi_oversold,
+                rsi_overbought=self.params.rsi_overbought,
+                vol_threshold=self.params.vol_threshold
+            )
+        else:
+            self.signal_filter = None
+        
         # Diagnostic tracking
         self.diagnostic_counts = {
             'ALREADY_POSITIONED': 0,
@@ -74,6 +135,8 @@ class EnsembleStrategy(bt.Strategy):
             'NO_SIGNAL': 0,
             'WARMING_UP': 0,
             'ORDER_PENDING': 0,
+            'RSI_FILTERED': 0,           # V4.1: RSI filter blocked
+            'VOLATILITY_FILTERED': 0,    # V4.1: Volatility filter blocked
         }
         
         # CSV logging setup
@@ -134,6 +197,277 @@ class EnsembleStrategy(bt.Strategy):
         position_pct = min_pct + (max_pct - min_pct) * (confidence / 0.5)
         return position_pct
 
+    def _calculate_current_atr(self) -> float:
+        """Calculate current ATR from price history."""
+        if len(self.price_history) < 14:
+            return 0.0
+        
+        recent = self.price_history[-14:]
+        df = pd.DataFrame(recent)
+        
+        if 'high' not in df.columns or 'low' not in df.columns or 'close' not in df.columns:
+            return 0.0
+        
+        atr_series = calculate_atr(df, period=14)
+        return float(atr_series.iloc[-1]) if len(atr_series) > 0 and not pd.isna(atr_series.iloc[-1]) else 0.0
+
+    def generate_signal(self) -> dict:
+        """
+        Generate trading signal with full risk management parameters.
+        
+        V4.0 Enhanced Return:
+        {
+            'signal': 'buy'/'sell'/'neutral',
+            'confidence': float (0-1),
+            'position_size': int,
+            'stop_loss': float,
+            'take_profit': float,
+            'atr': float,
+            'reason': str
+        }
+        """
+        result = {
+            'signal': 'neutral',
+            'confidence': 0.0,
+            'position_size': 0,
+            'stop_loss': 0.0,
+            'take_profit': 0.0,
+            'atr': 0.0,
+            'reason': 'Insufficient data'
+        }
+        
+        # Check warmup
+        if len(self.price_history) < self.params.sequence_length + 25:
+            return result
+        
+        # Get current price and signals
+        current_price = self.data.close[0]
+        nn_signal = self._get_nn_signal()
+        turbulence = self._get_turbulence_index()
+        regime_multiplier = self._calculate_position_scale(turbulence)
+        
+        # Calculate ATR for stops
+        atr = self._calculate_current_atr()
+        if atr <= 0:
+            atr = current_price * 0.02  # Default 2% if ATR unavailable
+        
+        result['atr'] = atr
+        result['confidence'] = abs(nn_signal - 0.5) * 2  # Scale to 0-1
+        
+        # Determine signal direction
+        if nn_signal > self.params.nn_buy_threshold:
+            result['signal'] = 'buy'
+            result['reason'] = f'NN signal {nn_signal:.4f} > buy threshold {self.params.nn_buy_threshold}'
+            
+            # Check turbulence gating
+            if regime_multiplier < self.params.tda_regime_min_multiplier:
+                result['signal'] = 'neutral'
+                result['reason'] = f'Turbulence blocking: multiplier {regime_multiplier:.3f}'
+                return result
+            
+            # Use risk manager for position sizing if available
+            if self.risk_manager is not None and self.params.use_risk_management:
+                # Calculate stop and target
+                stop_loss = self.risk_manager.set_stop_loss(
+                    entry_price=current_price,
+                    direction='long',
+                    atr_value=atr,
+                    multiplier=self.params.stop_atr_multiplier
+                )
+                take_profit = self.risk_manager.set_take_profit(
+                    entry_price=current_price,
+                    stop_price=stop_loss,
+                    risk_reward_ratio=self.params.risk_reward_ratio
+                )
+                
+                # Check portfolio heat
+                can_open, current_heat = self.risk_manager.check_portfolio_heat(
+                    self.open_positions,
+                    max_heat=self.params.max_portfolio_heat
+                )
+                self.max_portfolio_heat_reached = max(self.max_portfolio_heat_reached, current_heat)
+                
+                if not can_open:
+                    result['signal'] = 'neutral'
+                    result['reason'] = f'Portfolio heat {current_heat:.1%} exceeds max {self.params.max_portfolio_heat:.1%}'
+                    return result
+                
+                # Calculate position size
+                position_size = self.risk_manager.calculate_position_size(
+                    account_balance=self.account_balance,
+                    risk_per_trade=self.params.risk_per_trade,
+                    entry_price=current_price,
+                    stop_price=stop_loss,
+                    volatility=atr,
+                    ticker=self.ticker
+                )
+                
+                result['position_size'] = position_size
+                result['stop_loss'] = stop_loss
+                result['take_profit'] = take_profit
+            else:
+                # Fallback to simple position sizing
+                cash = self.broker.getcash()
+                position_pct = self._compute_position_size_pct(nn_signal)
+                potential_value = cash * position_pct * regime_multiplier
+                result['position_size'] = int(potential_value / current_price) if current_price > 0 else 0
+                result['stop_loss'] = current_price * 0.97  # Default 3% stop
+                result['take_profit'] = current_price * 1.06  # Default 6% target
+                
+        elif nn_signal < self.params.nn_sell_threshold:
+            result['signal'] = 'sell'
+            result['reason'] = f'NN signal {nn_signal:.4f} < sell threshold {self.params.nn_sell_threshold}'
+        else:
+            result['signal'] = 'neutral'
+            result['reason'] = f'NN signal {nn_signal:.4f} in neutral zone'
+        
+        return result
+
+    def check_exits(self, current_prices: dict, current_date: str) -> list:
+        """
+        Check if any open positions hit stop-loss or take-profit.
+        
+        Args:
+            current_prices: Dict of {ticker: current_price}
+            current_date: Current date string
+            
+        Returns:
+            List of closed position dicts
+        """
+        closed_positions = []
+        
+        if not self.open_positions:
+            return closed_positions
+        
+        positions_to_close = []
+        
+        for ticker, pos in self.open_positions.items():
+            current_price = current_prices.get(ticker, pos.get('entry', 0))
+            stop_loss = pos.get('stop', 0)
+            take_profit = pos.get('target', float('inf'))
+            entry_price = pos.get('entry', 0)
+            size = pos.get('size', 0)
+            entry_date = pos.get('date', '')
+            
+            exit_reason = None
+            exit_price = current_price
+            
+            # Check stop-loss (long position)
+            if current_price <= stop_loss and stop_loss > 0:
+                exit_reason = 'stop_loss'
+                exit_price = stop_loss
+                self.num_stopped_out += 1
+            
+            # Check take-profit (long position)
+            elif current_price >= take_profit and take_profit > 0:
+                exit_reason = 'take_profit'
+                exit_price = take_profit
+                self.num_take_profit_hits += 1
+            
+            if exit_reason:
+                positions_to_close.append({
+                    'ticker': ticker,
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'size': size,
+                    'entry_date': entry_date,
+                    'exit_date': current_date,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'exit_reason': exit_reason
+                })
+        
+        # Close positions and update tracking
+        for close_info in positions_to_close:
+            ticker = close_info['ticker']
+            
+            # Record trade in journal
+            if self.trade_journal is not None:
+                self.trade_journal.log_trade(
+                    ticker=ticker,
+                    direction='long',
+                    entry_date=close_info['entry_date'],
+                    entry_price=close_info['entry_price'],
+                    exit_date=close_info['exit_date'],
+                    exit_price=close_info['exit_price'],
+                    size=close_info['size'],
+                    stop_loss=close_info['stop_loss'],
+                    take_profit=close_info['take_profit'],
+                    exit_reason=close_info['exit_reason']
+                )
+            
+            # Update account balance
+            pnl = (close_info['exit_price'] - close_info['entry_price']) * close_info['size']
+            self.account_balance += pnl
+            
+            # Record in risk manager
+            if self.risk_manager is not None:
+                self.risk_manager.record_trade(
+                    ticker=ticker,
+                    entry_price=close_info['entry_price'],
+                    exit_price=close_info['exit_price'],
+                    size=close_info['size'],
+                    direction='long',
+                    entry_date=close_info['entry_date'],
+                    exit_date=close_info['exit_date'],
+                    exit_reason=close_info['exit_reason']
+                )
+            
+            # Remove from open positions
+            del self.open_positions[ticker]
+            closed_positions.append(close_info)
+            
+            self.log(f'EXIT {close_info["exit_reason"].upper()}: {ticker} @ {close_info["exit_price"]:.2f}, PnL: ${pnl:.2f}')
+        
+        return closed_positions
+
+    def register_position(self, ticker: str, entry_price: float, stop_loss: float,
+                         take_profit: float, size: int, entry_date: str):
+        """
+        Register a new open position for exit monitoring.
+        
+        Args:
+            ticker: Symbol
+            entry_price: Entry price
+            stop_loss: Stop-loss price
+            take_profit: Take-profit target
+            size: Position size (shares)
+            entry_date: Entry date string
+        """
+        self.open_positions[ticker] = {
+            'entry': entry_price,
+            'stop': stop_loss,
+            'target': take_profit,
+            'size': size,
+            'date': entry_date
+        }
+        self.log(f'REGISTERED: {ticker} @ {entry_price:.2f}, Stop: {stop_loss:.2f}, Target: {take_profit:.2f}')
+
+    def get_risk_metrics(self) -> dict:
+        """
+        Get current risk management metrics.
+        
+        Returns:
+            Dict with risk metrics for reporting
+        """
+        journal_stats = {}
+        if self.trade_journal:
+            journal_stats = self.trade_journal.get_summary_stats()
+        
+        risk_stats = {}
+        if self.risk_manager:
+            risk_stats = self.risk_manager.get_risk_metrics(self.open_positions)
+        
+        return {
+            'num_stopped_out': self.num_stopped_out,
+            'num_take_profit_hits': self.num_take_profit_hits,
+            'max_portfolio_heat_reached': round(self.max_portfolio_heat_reached, 4),
+            'open_positions_count': len(self.open_positions),
+            'account_balance': self.account_balance,
+            **journal_stats,
+            **risk_stats
+        }
+
     def notify_order(self, order):
         """Handle order status notifications."""
         if order.status in [order.Completed]:
@@ -183,18 +517,29 @@ class EnsembleStrategy(bt.Strategy):
         turbulence = self._get_turbulence_index()
         regime_multiplier = self._calculate_position_scale(turbulence)
         
-        # Compute potential position size (with optional confidence-based sizing)
         cash = self.broker.getcash()
         price = self.data.close[0]
-        position_pct = self._compute_position_size_pct(nn_signal)
-        potential_position_value = cash * position_pct * regime_multiplier
-        potential_size = int(potential_position_value / price) if price > 0 else 0
+        
+        # V4.0: Use risk-aware position sizing if enabled
+        if self.params.use_risk_management and self.risk_manager is not None:
+            # Use generate_signal for risk-aware sizing
+            signal_result = self.generate_signal()
+            potential_size = signal_result.get('position_size', 0)
+            stop_loss = signal_result.get('stop_loss', price * 0.97)
+            take_profit = signal_result.get('take_profit', price * 1.06)
+        else:
+            # Fallback to simple position sizing
+            position_pct = self._compute_position_size_pct(nn_signal)
+            potential_position_value = cash * position_pct * regime_multiplier
+            potential_size = int(potential_position_value / price) if price > 0 else 0
+            stop_loss = price * 0.97
+            take_profit = price * 1.06
         
         # Execute trading logic with diagnostic logging
-        self._execute_trading_logic_with_diagnostics(
+        self._execute_trading_logic_with_risk(
             nn_signal, turbulence, regime_multiplier,
             has_position, current_date, portfolio_value,
-            potential_size, cash, price
+            potential_size, cash, price, stop_loss, take_profit
         )
 
     def _update_history(self):
@@ -328,6 +673,138 @@ class EnsembleStrategy(bt.Strategy):
                     False, 'NO_SIGNAL', position_value, portfolio_value
                 )
 
+    def _execute_trading_logic_with_risk(self, nn_signal: float, turbulence: float,
+                                          regime_multiplier: float, has_position: bool,
+                                          current_date, portfolio_value: float,
+                                          potential_size: int, cash: float, price: float,
+                                          stop_loss: float, take_profit: float):
+        """Execute buy/sell logic with risk management integration."""
+        
+        position_value = potential_size * price if potential_size > 0 else 0.0
+        
+        if has_position:
+            # Check stop-loss and take-profit exits first
+            current_pos = self.open_positions.get(self.ticker, {})
+            pos_stop = current_pos.get('stop', 0)
+            pos_target = current_pos.get('target', float('inf'))
+            
+            # Stop-loss hit
+            if pos_stop > 0 and price <= pos_stop:
+                self.order = self.close()
+                self.num_trades += 1
+                self.log(f'STOP-LOSS HIT: price {price:.2f} <= stop {pos_stop:.2f}')
+                self._log_diagnostic(
+                    current_date, nn_signal, turbulence, regime_multiplier,
+                    True, 'STOP_LOSS_EXIT', position_value, portfolio_value
+                )
+                # Clear tracked position
+                if self.ticker in self.open_positions:
+                    del self.open_positions[self.ticker]
+                return
+            
+            # Take-profit hit
+            if pos_target < float('inf') and price >= pos_target:
+                self.order = self.close()
+                self.num_trades += 1
+                self.log(f'TAKE-PROFIT HIT: price {price:.2f} >= target {pos_target:.2f}')
+                self._log_diagnostic(
+                    current_date, nn_signal, turbulence, regime_multiplier,
+                    True, 'TAKE_PROFIT_EXIT', position_value, portfolio_value
+                )
+                # Clear tracked position
+                if self.ticker in self.open_positions:
+                    del self.open_positions[self.ticker]
+                return
+            
+            # Check for NN sell signal
+            if nn_signal < self.params.nn_sell_threshold:
+                self.order = self.close()
+                self.num_trades += 1
+                self.log(f'SELL SIGNAL: {nn_signal:.3f}')
+                self._log_diagnostic(
+                    current_date, nn_signal, turbulence, regime_multiplier,
+                    True, 'TRADE_EXECUTED_SELL', position_value, portfolio_value
+                )
+                # Clear tracked position
+                if self.ticker in self.open_positions:
+                    del self.open_positions[self.ticker]
+            else:
+                # Holding position
+                self._log_diagnostic(
+                    current_date, nn_signal, turbulence, regime_multiplier,
+                    True, 'ALREADY_POSITIONED', position_value, portfolio_value
+                )
+        else:
+            # Not in position - check for buy signal
+            if nn_signal > self.params.nn_buy_threshold:
+                # V4.1: Apply signal quality filter before buying
+                signal_passes_filter = True
+                filter_reason = None
+                
+                if self.signal_filter is not None and len(self.price_history) >= 20:
+                    # Build price dataframe for filter
+                    price_df = pd.DataFrame(self.price_history[-50:])
+                    filter_result = self.signal_filter.filter_signal('buy', price_df)
+                    
+                    if filter_result['filtered']:
+                        signal_passes_filter = False
+                        filter_reason = filter_result['filter_reason']
+                        
+                        # Track filtered signals
+                        if 'RSI' in filter_reason:
+                            self.diagnostic_counts['RSI_FILTERED'] += 1
+                        elif 'VOL' in filter_reason:
+                            self.diagnostic_counts['VOLATILITY_FILTERED'] += 1
+                        
+                        self.log(f'SIGNAL FILTERED: {filter_reason}')
+                        self._log_diagnostic(
+                            current_date, nn_signal, turbulence, regime_multiplier,
+                            False, 'SIGNAL_FILTERED', position_value, portfolio_value
+                        )
+                
+                if not signal_passes_filter:
+                    pass  # Already logged above
+                elif regime_multiplier < self.params.tda_regime_min_multiplier:
+                    self._log_diagnostic(
+                        current_date, nn_signal, turbulence, regime_multiplier,
+                        False, 'TURBULENCE_BLOCKING', position_value, portfolio_value
+                    )
+                elif potential_size <= 0:
+                    self._log_diagnostic(
+                        current_date, nn_signal, turbulence, regime_multiplier,
+                        False, 'INSUFFICIENT_CASH', position_value, portfolio_value
+                    )
+                else:
+                    # Execute BUY with risk-managed size
+                    self.order = self.buy(size=potential_size)
+                    self.num_trades += 1
+                    
+                    # Track position for stop/target management
+                    self.open_positions[self.ticker] = {
+                        'entry': price,
+                        'stop': stop_loss,
+                        'target': take_profit,
+                        'size': potential_size,
+                        'date': str(current_date)
+                    }
+                    
+                    self.log(f'BUY SIGNAL: {nn_signal:.3f}, size: {potential_size}, '
+                            f'stop: {stop_loss:.2f}, target: {take_profit:.2f}')
+                    self._log_diagnostic(
+                        current_date, nn_signal, turbulence, regime_multiplier,
+                        False, 'TRADE_EXECUTED_BUY', position_value, portfolio_value
+                    )
+            elif nn_signal < self.params.nn_sell_threshold:
+                self._log_diagnostic(
+                    current_date, nn_signal, turbulence, regime_multiplier,
+                    False, 'NN_SIGNAL_TOO_HIGH_SELL', position_value, portfolio_value
+                )
+            else:
+                self._log_diagnostic(
+                    current_date, nn_signal, turbulence, regime_multiplier,
+                    False, 'NO_SIGNAL', position_value, portfolio_value
+                )
+
     def stop(self):
         """Called at end of backtest - print diagnostic summary and close CSV."""
         if self.csv_file:
@@ -359,9 +836,13 @@ class EnsembleStrategy(bt.Strategy):
             ('NN_SIGNAL_TOO_LOW_BUY', 'NN signal too low for buy'),
             ('NN_SIGNAL_TOO_HIGH_SELL', 'NN signal too high for sell (no pos)'),
             ('TURBULENCE_BLOCKING', 'Turbulence blocking'),
+            ('RSI_FILTERED', 'RSI filter blocked signal'),
+            ('VOLATILITY_FILTERED', 'Volatility filter blocked signal'),
             ('INSUFFICIENT_CASH', 'Insufficient cash'),
             ('TRADE_EXECUTED_BUY', 'Trade executed (BUY)'),
             ('TRADE_EXECUTED_SELL', 'Trade executed (SELL)'),
+            ('STOP_LOSS_EXIT', 'Stop-loss exit'),
+            ('TAKE_PROFIT_EXIT', 'Take-profit exit'),
             ('NO_SIGNAL', 'No signal (neutral zone)'),
         ]
         
@@ -372,7 +853,9 @@ class EnsembleStrategy(bt.Strategy):
         
         print("-" * 60)
         total_trades = self.diagnostic_counts.get('TRADE_EXECUTED_BUY', 0) + \
-                       self.diagnostic_counts.get('TRADE_EXECUTED_SELL', 0)
+                       self.diagnostic_counts.get('TRADE_EXECUTED_SELL', 0) + \
+                       self.diagnostic_counts.get('STOP_LOSS_EXIT', 0) + \
+                       self.diagnostic_counts.get('TAKE_PROFIT_EXIT', 0)
         print(f"  {'TOTAL TRADES':<40} {total_trades:>6}")
         print("═" * 60)
         

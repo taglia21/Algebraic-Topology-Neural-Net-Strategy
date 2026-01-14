@@ -1,0 +1,222 @@
+{
+  "metadata": {
+    "timestamp": "2026-01-14T20:54:03.997948",
+    "engine_version": "V1.3",
+    "mode": "baseline",
+    "data_provider": "yfinance",
+    "timeframe": "1d",
+    "tickers": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "XLF",
+      "XLK"
+    ],
+    "tda_feature_mode": "v1.3",
+    "tda_features": {
+      "version": "v1.3",
+      "n_tda_features": 20,
+      "n_total_features": 22,
+      "description": "H0/H1 persistence (max, mean, sum, entropy, top_k, count_large, wasserstein)"
+    },
+    "train_period": "2022-01-01 to 2023-12-31",
+    "test_period": "2024-01-01 to 2025-12-31",
+    "thresholds": {
+      "nn_buy_threshold": 0.52,
+      "nn_sell_threshold": 0.48
+    },
+    "cost_model": {
+      "cost_bp_per_side": 5
+    }
+  },
+  "per_asset": {
+    "SPY": {
+      "ticker": "SPY",
+      "sharpe_ratio": 0.8418,
+      "total_return": 0.012,
+      "max_drawdown": 0.0091,
+      "num_trades": 33,
+      "win_rate": 0.6061,
+      "final_value": 20239.95,
+      "initial_cash": 20000.0,
+      "total_notional_traded": 117421.15,
+      "turnover": 5.8711,
+      "extra_costs": 58.71,
+      "sharpe_ratio_net": 0.6358,
+      "total_return_net": 0.0091,
+      "final_value_net": 20181.24,
+      "risk_management": {
+        "num_stopped_out": 0,
+        "num_take_profit_hits": 0,
+        "max_portfolio_heat_reached": 0.0034,
+        "avg_r_multiple": 0,
+        "profit_factor": 0,
+        "expectancy_per_trade": 0
+      }
+    },
+    "QQQ": {
+      "ticker": "QQQ",
+      "sharpe_ratio": 0.1654,
+      "total_return": 0.0044,
+      "max_drawdown": 0.0181,
+      "num_trades": 32,
+      "win_rate": 0.5938,
+      "final_value": 20087.2,
+      "initial_cash": 20000.0,
+      "total_notional_traded": 112222.15,
+      "turnover": 5.6111,
+      "extra_costs": 56.11,
+      "sharpe_ratio_net": 0.059,
+      "total_return_net": 0.0016,
+      "final_value_net": 20031.09,
+      "risk_management": {
+        "num_stopped_out": 0,
+        "num_take_profit_hits": 0,
+        "max_portfolio_heat_reached": 0.0038,
+        "avg_r_multiple": 0,
+        "profit_factor": 0,
+        "expectancy_per_trade": 0
+      }
+    },
+    "IWM": {
+      "ticker": "IWM",
+      "sharpe_ratio": 0.5717,
+      "total_return": 0.0115,
+      "max_drawdown": 0.0106,
+      "num_trades": 27,
+      "win_rate": 0.5926,
+      "final_value": 20230.74,
+      "initial_cash": 20000.0,
+      "total_notional_traded": 103407.58,
+      "turnover": 5.1704,
+      "extra_costs": 51.7,
+      "sharpe_ratio_net": 0.4436,
+      "total_return_net": 0.009,
+      "final_value_net": 20179.04,
+      "risk_management": {
+        "num_stopped_out": 0,
+        "num_take_profit_hits": 0,
+        "max_portfolio_heat_reached": 0.004,
+        "avg_r_multiple": 0,
+        "profit_factor": 0,
+        "expectancy_per_trade": 0
+      }
+    },
+    "XLF": {
+      "ticker": "XLF",
+      "sharpe_ratio": 0.7581,
+      "total_return": 0.0135,
+      "max_drawdown": 0.005,
+      "num_trades": 23,
+      "win_rate": 0.5217,
+      "final_value": 20269.69,
+      "initial_cash": 20000.0,
+      "total_notional_traded": 93180.25,
+      "turnover": 4.659,
+      "extra_costs": 46.59,
+      "sharpe_ratio_net": 0.6272,
+      "total_return_net": 0.0112,
+      "final_value_net": 20223.1,
+      "risk_management": {
+        "num_stopped_out": 0,
+        "num_take_profit_hits": 0,
+        "max_portfolio_heat_reached": 0.0039,
+        "avg_r_multiple": 0,
+        "profit_factor": 0,
+        "expectancy_per_trade": 0
+      }
+    },
+    "XLK": {
+      "ticker": "XLK",
+      "sharpe_ratio": -0.0038,
+      "total_return": -0.0003,
+      "max_drawdown": 0.0207,
+      "num_trades": 33,
+      "win_rate": 0.5758,
+      "final_value": 19994.04,
+      "initial_cash": 20000.0,
+      "total_notional_traded": 128769.82,
+      "turnover": 6.4385,
+      "extra_costs": 64.38,
+      "sharpe_ratio_net": -0.0445,
+      "total_return_net": -0.0035,
+      "final_value_net": 19929.65,
+      "risk_management": {
+        "num_stopped_out": 0,
+        "num_take_profit_hits": 0,
+        "max_portfolio_heat_reached": 0.004,
+        "avg_r_multiple": 0,
+        "profit_factor": 0,
+        "expectancy_per_trade": 0
+      }
+    }
+  },
+  "portfolio_equal_weight": {
+    "sharpe_ratio": 0.5797,
+    "sharpe_ratio_net": 0.3839,
+    "total_return": 0.0082,
+    "total_return_net": 0.0054,
+    "max_drawdown": 0.0207,
+    "num_trades": 148,
+    "win_rate": 0.5811,
+    "turnover": 5.55,
+    "final_value": 100821.62,
+    "final_value_net": 100544.13,
+    "initial_cash": 100000.0,
+    "n_assets": 5
+  },
+  "portfolio_performance_weighted": {
+    "sharpe_ratio": 0.9926,
+    "sharpe_ratio_net": 0.7707,
+    "total_return": 0.0118,
+    "total_return_net": 0.0092,
+    "max_drawdown": 0.0207,
+    "num_trades": 148,
+    "win_rate": 0.5811,
+    "turnover": 5.2881,
+    "final_value": 101182.67,
+    "final_value_net": 100918.27,
+    "initial_cash": 100000.0,
+    "n_assets": 5,
+    "risk_scale": 1.0,
+    "cash_weight": 0.0
+  },
+  "weights": {
+    "SPY": 0.3602,
+    "QQQ": 0.0708,
+    "IWM": 0.2446,
+    "XLF": 0.3244,
+    "XLK": 0.0
+  },
+  "risk_scale": 1.0,
+  "cash_weight": 0.0,
+  "threshold_sensitivity": {
+    "conservative": {
+      "buy_threshold": 0.53,
+      "sell_threshold": 0.47,
+      "buy_signals": 215,
+      "sell_signals": 156,
+      "neutral": 94,
+      "pct_buy": 46.2,
+      "pct_sell": 33.5
+    },
+    "baseline": {
+      "buy_threshold": 0.52,
+      "sell_threshold": 0.48,
+      "buy_signals": 233,
+      "sell_signals": 170,
+      "neutral": 62,
+      "pct_buy": 50.1,
+      "pct_sell": 36.6
+    },
+    "aggressive": {
+      "buy_threshold": 0.51,
+      "sell_threshold": 0.49,
+      "buy_signals": 244,
+      "sell_signals": 187,
+      "neutral": 34,
+      "pct_buy": 52.5,
+      "pct_sell": 40.2
+    }
+  }
+}

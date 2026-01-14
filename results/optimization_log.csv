@@ -1,0 +1,1 @@
+iteration,timestamp,weighted_score,sharpe_ratio,total_return,profit_factor,max_drawdown,num_trades,sequence_length,lstm_units,learning_rate,batch_size,epochs,buy_threshold,sell_threshold,risk_per_trade,stop_atr_multiplier,risk_reward_ratio

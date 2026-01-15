@@ -1,0 +1,80 @@
+{
+  "phase": "Phase 12 v3",
+  "strategy": "All-Weather Regime-Switching",
+  "description": "Bidirectional alpha using long/inverse 3x ETFs based on trend-following regime detection",
+  "test_period": {
+    "full": "2022-01-03 to 2025-05-30",
+    "bull_only": "2023-01-03 to 2025-05-30",
+    "bear_only": "2022-01-03 to 2022-12-30"
+  },
+  "results": {
+    "full_2022_2025": {
+      "total_return": 4.44,
+      "cagr": 0.647,
+      "max_drawdown": 0.101,
+      "sharpe": 2.49,
+      "spy_cagr": 0.079,
+      "alpha": 0.569,
+      "score": "4/4"
+    },
+    "2023_2025_bull": {
+      "total_return": 2.895,
+      "cagr": 0.763,
+      "max_drawdown": 0.101,
+      "sharpe": 2.96,
+      "alpha": 0.548,
+      "score": "4/4"
+    },
+    "2022_bear": {
+      "total_return": 0.397,
+      "cagr": 0.399,
+      "max_drawdown": 0.077,
+      "sharpe": 1.54,
+      "alpha": 0.586,
+      "tqqq_return": -0.797,
+      "advantage_vs_tqqq": 1.194,
+      "score": "4/4"
+    }
+  },
+  "targets": {
+    "cagr": {
+      "target": 0.28,
+      "achieved": 0.647,
+      "passed": true
+    },
+    "max_dd": {
+      "target": 0.22,
+      "achieved": 0.101,
+      "passed": true
+    },
+    "sharpe": {
+      "target": 1.5,
+      "achieved": 2.49,
+      "passed": true
+    },
+    "alpha": {
+      "target": 0.05,
+      "achieved": 0.569,
+      "passed": true
+    }
+  },
+  "etfs": {
+    "long_3x": [
+      "TQQQ",
+      "SPXL",
+      "SOXL"
+    ],
+    "inverse_3x": [
+      "SQQQ",
+      "SPXU",
+      "SOXS"
+    ]
+  },
+  "key_innovations": [
+    "Bidirectional alpha (profit in both bull and bear)",
+    "Trend-following regime detection with SMA alignment",
+    "Cash as neutral position",
+    "5% stop-loss on all positions",
+    "Aggressive drawdown protection"
+  ]
+}

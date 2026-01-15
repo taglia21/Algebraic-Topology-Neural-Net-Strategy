@@ -2,12 +2,18 @@
 
 Phase 4 Optimization: Replace conservative fixed-fractional with optimal Kelly sizing.
 Uses Half-Kelly for safety with volatility-based position scaling.
+
+Phase 7 Enhancement: Added portfolio heat tracking, adaptive Kelly, and signal-based sizing.
 """
 
+import logging
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple, Optional
-from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass, field
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -343,6 +349,235 @@ class VolatilityTargeting:
         return scalar, reason
 
 
+@dataclass
+class PositionRisk:
+    """Risk info for a single position."""
+    ticker: str
+    shares: int
+    entry_price: float
+    current_price: float
+    stop_loss: float
+    position_value: float
+    risk_amount: float  # Max loss if stopped out
+    risk_pct: float  # Risk as pct of position value
+
+
+class PortfolioHeatTracker:
+    """
+    Portfolio heat (risk exposure) tracking for Phase 7.
+    
+    Heat = Sum of risk amounts (position value * distance to stop) / portfolio value
+    
+    Key features:
+    - Track individual position risks
+    - Monitor total portfolio heat
+    - Prevent adding positions when heat limit reached
+    - Report risk concentration
+    """
+    
+    def __init__(
+        self,
+        max_heat: float = 0.40,  # Maximum 40% of capital at risk
+        default_stop_pct: float = 0.10,  # Default 10% stop if not specified
+        warning_threshold: float = 0.30,  # Warn at 30% heat
+    ):
+        self.max_heat = max_heat
+        self.default_stop_pct = default_stop_pct
+        self.warning_threshold = warning_threshold
+        
+        self.positions: Dict[str, PositionRisk] = {}
+        
+        logger.info(f"PortfolioHeatTracker initialized: max_heat={max_heat:.0%}")
+    
+    def add_position(
+        self,
+        ticker: str,
+        shares: int,
+        current_price: float,
+        stop_loss: float = None,
+        entry_price: float = None,
+    ) -> PositionRisk:
+        """Add or update a position."""
+        entry_price = entry_price or current_price
+        
+        if stop_loss is None:
+            stop_loss = current_price * (1 - self.default_stop_pct)
+        
+        position_value = shares * current_price
+        risk_amount = shares * (current_price - stop_loss)
+        risk_pct = (current_price - stop_loss) / current_price if current_price > 0 else 0
+        
+        position = PositionRisk(
+            ticker=ticker,
+            shares=shares,
+            entry_price=entry_price,
+            current_price=current_price,
+            stop_loss=stop_loss,
+            position_value=position_value,
+            risk_amount=max(0, risk_amount),
+            risk_pct=max(0, risk_pct),
+        )
+        
+        self.positions[ticker] = position
+        return position
+    
+    def remove_position(self, ticker: str) -> None:
+        """Remove a position."""
+        if ticker in self.positions:
+            del self.positions[ticker]
+    
+    def update_price(self, ticker: str, current_price: float) -> None:
+        """Update current price for a position."""
+        if ticker in self.positions:
+            pos = self.positions[ticker]
+            self.add_position(
+                ticker=ticker,
+                shares=pos.shares,
+                current_price=current_price,
+                stop_loss=pos.stop_loss,
+                entry_price=pos.entry_price,
+            )
+    
+    def calculate_heat(self, portfolio_value: float) -> Dict[str, Any]:
+        """
+        Calculate current portfolio heat.
+        
+        Returns:
+            Dict with heat metrics
+        """
+        if not self.positions:
+            return {
+                'total_heat': 0,
+                'heat_pct': 0,
+                'invested_capital': 0,
+                'invested_pct': 0,
+                'position_count': 0,
+                'largest_risk': 0,
+                'heat_budget_remaining': self.max_heat,
+                'can_add_position': True,
+                'warning': False,
+            }
+        
+        total_heat = sum(p.risk_amount for p in self.positions.values())
+        invested = sum(p.position_value for p in self.positions.values())
+        heat_pct = total_heat / portfolio_value if portfolio_value > 0 else 0
+        invested_pct = invested / portfolio_value if portfolio_value > 0 else 0
+        
+        largest_risk = max(p.risk_amount for p in self.positions.values())
+        
+        return {
+            'total_heat': total_heat,
+            'heat_pct': heat_pct,
+            'invested_capital': invested,
+            'invested_pct': invested_pct,
+            'position_count': len(self.positions),
+            'largest_risk': largest_risk,
+            'heat_budget_remaining': max(0, self.max_heat - heat_pct),
+            'can_add_position': heat_pct < self.max_heat,
+            'warning': heat_pct >= self.warning_threshold,
+        }
+    
+    def get_max_new_position_heat(self, portfolio_value: float) -> float:
+        """Get maximum heat available for a new position."""
+        report = self.calculate_heat(portfolio_value)
+        return report['heat_budget_remaining'] * portfolio_value
+    
+    def get_position_summary(self) -> List[Dict[str, Any]]:
+        """Get summary of all positions."""
+        return [
+            {
+                'ticker': p.ticker,
+                'shares': p.shares,
+                'value': p.position_value,
+                'risk': p.risk_amount,
+                'risk_pct': p.risk_pct,
+                'stop': p.stop_loss,
+            }
+            for p in sorted(self.positions.values(), key=lambda x: -x.risk_amount)
+        ]
+
+
+class AdaptiveKellyManager:
+    """
+    Adaptive Kelly management combining position sizing with heat tracking.
+    
+    Phase 7: Integrates Kelly criterion with portfolio-level risk constraints.
+    """
+    
+    def __init__(
+        self,
+        base_kelly_fraction: float = 0.25,
+        max_portfolio_heat: float = 0.40,
+        min_position_pct: float = 0.02,
+        max_position_pct: float = 0.10,
+    ):
+        self.kelly_sizer = KellyPositionSizer(
+            kelly_fraction=base_kelly_fraction,
+            min_position_pct=min_position_pct,
+            max_position_pct=max_position_pct,
+        )
+        self.heat_tracker = PortfolioHeatTracker(max_heat=max_portfolio_heat)
+        
+    def calculate_position_size(
+        self,
+        ticker: str,
+        current_price: float,
+        current_volatility: float,
+        signal_strength: float,
+        portfolio_value: float,
+        regime: str = 'normal',
+        stop_loss_pct: float = 0.10,
+    ) -> Tuple[int, float, str]:
+        """
+        Calculate position size respecting both Kelly and heat constraints.
+        
+        Returns:
+            Tuple of (shares, position_value, reason)
+        """
+        # Get Kelly-based position size
+        kelly_pct, kelly_reason = self.kelly_sizer.get_position_size(
+            current_volatility=current_volatility,
+            signal_strength=signal_strength,
+            regime=regime,
+        )
+        
+        kelly_value = portfolio_value * kelly_pct
+        
+        # Check heat constraint
+        heat_report = self.heat_tracker.calculate_heat(portfolio_value)
+        max_heat_value = heat_report['heat_budget_remaining'] * portfolio_value / stop_loss_pct
+        
+        # Use smaller of Kelly or heat-constrained
+        if kelly_value <= max_heat_value:
+            final_value = kelly_value
+            reason = f"Kelly-sized: {kelly_reason}"
+        else:
+            final_value = max_heat_value
+            reason = f"Heat-constrained: {heat_report['heat_pct']:.1%} used, max remaining {heat_report['heat_budget_remaining']:.1%}"
+        
+        shares = int(final_value / current_price) if current_price > 0 else 0
+        
+        return shares, final_value, reason
+    
+    def add_trade_result(self, return_pct: float) -> None:
+        """Record trade result for Kelly calculation."""
+        self.kelly_sizer.add_trade_result(return_pct)
+    
+    def get_summary(self) -> Dict[str, Any]:
+        """Get combined summary of Kelly and heat status."""
+        kelly_result = self.kelly_sizer.calculate_kelly()
+        
+        return {
+            'kelly': {
+                'full_kelly': kelly_result.full_kelly,
+                'half_kelly': kelly_result.half_kelly,
+                'edge': kelly_result.edge,
+                'trade_count': len(self.kelly_sizer.trade_returns),
+            },
+            'positions': self.heat_tracker.get_position_summary(),
+        }
+
+
 if __name__ == "__main__":
     # Test Kelly position sizer
     print("Testing Kelly Position Sizer")
@@ -395,5 +630,23 @@ if __name__ == "__main__":
     for vix, ma_slope, dd in scenarios:
         invest_pct, reason = allocator.get_target_investment_pct(vix, ma_slope, dd)
         print(f"  VIX={vix}, MA_slope={ma_slope:.3f}, DD={dd:.0%}: {reason}")
+    
+    # Test portfolio heat tracker
+    print("\n" + "=" * 50)
+    print("Testing Portfolio Heat Tracker")
+    print("=" * 50)
+    
+    heat_tracker = PortfolioHeatTracker(max_heat=0.40)
+    
+    # Add some positions
+    heat_tracker.add_position('AAPL', 100, 180.00, 162.00)  # 10% stop
+    heat_tracker.add_position('MSFT', 50, 400.00, 380.00)   # 5% stop
+    heat_tracker.add_position('GOOGL', 20, 150.00, 135.00)  # 10% stop
+    
+    report = heat_tracker.calculate_heat(100000)
+    print(f"  Invested: ${report['invested_capital']:,.0f}")
+    print(f"  Total Heat: ${report['total_heat']:,.0f} ({report['heat_pct']:.1%})")
+    print(f"  Heat Budget Remaining: {report['heat_budget_remaining']:.1%}")
+    print(f"  Can Add Positions: {report['can_add_position']}")
     
     print("\nKelly Position Sizer tests complete!")

@@ -1,0 +1,16 @@
+{
+  "strategy": "Phase 10 v3: Trend-Following Leveraged ETF",
+  "period": "2023-01-01 to 2025-05-01",
+  "initial_capital": 100000.0,
+  "final_value": 169335.62244360938,
+  "total_return_pct": 69.34,
+  "cagr_pct": 25.57,
+  "max_drawdown_pct": 20.22,
+  "sharpe_ratio": 1.16,
+  "avg_exposure": 0.69,
+  "n_trades": 418,
+  "n_tickers": 14,
+  "runtime_seconds": 4.1,
+  "spy_cagr": 19.22,
+  "alpha_vs_spy": 6.35
+}

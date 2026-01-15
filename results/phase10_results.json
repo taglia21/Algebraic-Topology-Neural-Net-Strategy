@@ -1,0 +1,31 @@
+{
+  "phase": "Phase 10",
+  "description": "Aggressive Alpha Amplification with Dynamic Leverage",
+  "period": "2023-01-01 to 2025-12-31",
+  "initial_capital": 100000.0,
+  "final_value": 92870.19185516168,
+  "performance": {
+    "total_return": "-7.1%",
+    "cagr": "-2.5%",
+    "sharpe_ratio": "-0.12",
+    "max_drawdown": "-24.0%"
+  },
+  "leverage": {
+    "average_leverage": "0.79x",
+    "max_leverage": "1.47x",
+    "min_leverage": "0.53x"
+  },
+  "targets": {
+    "cagr_target": "25-35%",
+    "sharpe_target": ">1.5",
+    "max_dd_target": "<22%"
+  },
+  "target_met": {
+    "cagr": false,
+    "sharpe": false,
+    "max_dd": false
+  },
+  "trades": 393,
+  "runtime_seconds": 70.89728665351868,
+  "timestamp": "2026-01-15T21:01:29.455684"
+}

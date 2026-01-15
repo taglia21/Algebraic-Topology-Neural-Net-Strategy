@@ -1,0 +1,26 @@
+{
+  "phase": "Phase 9",
+  "description": "Advanced Alpha Generation & Regime-Adaptive Optimization",
+  "period": "2023-01-01 to 2025-12-31",
+  "initial_capital": 100000.0,
+  "final_value": 140975.86431256152,
+  "performance": {
+    "total_return": "41.0%",
+    "cagr": "12.2%",
+    "sharpe_ratio": "2.62",
+    "max_drawdown": "-14.7%"
+  },
+  "targets": {
+    "cagr_target": "30-50%",
+    "sharpe_target": ">2.0",
+    "max_dd_target": "<15%"
+  },
+  "target_met": {
+    "cagr": false,
+    "sharpe": true,
+    "max_dd": true
+  },
+  "trades": 818,
+  "runtime_seconds": 79.56640148162842,
+  "timestamp": "2026-01-15T20:34:40.335082"
+}

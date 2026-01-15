@@ -1,0 +1,15 @@
+{
+  "phase": "Phase 11 v2: Momentum Trend Following",
+  "period": "2022-01-01 to 2025-01-01",
+  "initial_capital": 100000,
+  "final_equity": 148423.81515645632,
+  "cagr": 0.14093081828918774,
+  "max_drawdown": -0.4216115049872974,
+  "volatility": 0.3317664364501767,
+  "sharpe": 0.30422251077934187,
+  "total_return": 0.48423815156456307,
+  "alpha_vs_spy": 0.04093081828918774,
+  "n_rebalances": 37,
+  "avg_positions": 17.18918918918919,
+  "avg_leverage": 0.4734459459459459
+}

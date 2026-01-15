@@ -1,0 +1,61 @@
+{
+  "config": {
+    "universe_size": 200,
+    "min_price": 5.0,
+    "min_volume": 1000000,
+    "start_date": "2021-06-01",
+    "end_date": "2024-06-01",
+    "momentum_weight": 0.35,
+    "tda_weight": 0.25,
+    "value_weight": 0.2,
+    "quality_weight": 0.2,
+    "n_positions": 30,
+    "rebalance_days": 21,
+    "equal_weight": true,
+    "max_sector_weight": 0.3,
+    "stop_loss_pct": 0.15,
+    "tda_window": 60,
+    "n_data_workers": 20,
+    "n_tda_workers": 4,
+    "use_regime_rotation": true
+  },
+  "metrics": {
+    "total_return": 0.28715130483816775,
+    "cagr": 0.0877853371569346,
+    "sharpe_ratio": 0.5217015217561098,
+    "sortino_ratio": 0.8291578631092609,
+    "max_drawdown": -0.3200396691028969,
+    "calmar_ratio": 0.2742951753543729,
+    "win_rate": 0.8474264705882353,
+    "avg_trade_return": 3.3258236378781936,
+    "n_trades": 544,
+    "n_sectors": 6,
+    "max_sector_concentration": 0.0,
+    "sector_other_pct": 0.015,
+    "regime_distribution": {
+      "bull": 0,
+      "bear": 0,
+      "recovery": 3,
+      "sideways": 26,
+      "volatile": 4,
+      "default": 2
+    }
+  },
+  "timing": {
+    "data_fetch_seconds": 0.7202088832855225,
+    "sector_map_seconds": 0.2994880676269531,
+    "tda_compute_seconds": 0.9594223499298096,
+    "backtest_seconds": 71.23060965538025,
+    "total_seconds": 73.21043705940247
+  },
+  "universe": {
+    "total_fetched": 200,
+    "after_screen": 200,
+    "with_tda": 200
+  },
+  "equity_summary": {
+    "start": 100.0,
+    "end": 128.71513048381678,
+    "n_days": 756
+  }
+}

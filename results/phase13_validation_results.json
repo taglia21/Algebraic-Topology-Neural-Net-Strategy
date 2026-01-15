@@ -1,0 +1,138 @@
+{
+  "phase": "Phase 13: Validation & Paper Trading Readiness",
+  "date": "2025-06-16",
+  "status": "VALIDATED - READY FOR PAPER TRADING",
+  
+  "baseline_performance": {
+    "period": "2022-01-03 to 2025-05-30",
+    "total_return": 2.89,
+    "cagr": 0.492,
+    "max_drawdown": 0.108,
+    "sharpe_ratio": 2.29
+  },
+  
+  "walk_forward_validation": {
+    "windows": 7,
+    "profitable_windows": 7,
+    "win_rate": 1.0,
+    "window_results": [
+      {"period": "Jan-Jun 2022", "return": 0.084},
+      {"period": "Jul-Dec 2022", "return": 0.063},
+      {"period": "Jan-Jun 2023", "return": 0.331},
+      {"period": "Jul-Dec 2023", "return": 0.027},
+      {"period": "Jan-Jun 2024", "return": 0.219},
+      {"period": "Jul-Dec 2024", "return": 0.109},
+      {"period": "Jan-May 2025", "return": 0.162}
+    ]
+  },
+  
+  "monte_carlo_simulation": {
+    "runs": 5000,
+    "mean_return": 3.082,
+    "percentile_5": 1.262,
+    "percentile_25": 2.277,
+    "percentile_50": 3.029,
+    "percentile_75": 3.801,
+    "percentile_95": 5.612,
+    "prob_return_gt_100pct": 0.977,
+    "prob_return_gt_150pct": 0.913,
+    "prob_return_gt_200pct": 0.785
+  },
+  
+  "cost_sensitivity": {
+    "best_case": {"slippage": 0.0001, "commission": 0.0, "return": 2.806},
+    "base_case": {"slippage": 0.0005, "commission": 0.0, "return": 2.718},
+    "conservative": {"slippage": 0.001, "commission": 0.0005, "return": 2.394},
+    "worst_case": {"slippage": 0.002, "commission": 0.001, "return": 2.033}
+  },
+  
+  "parameter_stability": {
+    "coefficient_of_variation": 0.02,
+    "tested_variations": [
+      {"sma_20": 16, "sma_50": 40, "sma_200": 160, "cagr": 0.471},
+      {"sma_20": 20, "sma_50": 50, "sma_200": 200, "cagr": 0.492},
+      {"sma_20": 24, "sma_50": 60, "sma_200": 240, "cagr": 0.483}
+    ]
+  },
+  
+  "options_overlay_analysis": {
+    "recommendation": "Start without options",
+    "scenarios": [
+      {"allocation": 0.0, "name": "Base (No Options)", "return": 2.89, "sharpe": 2.29},
+      {"allocation": 0.1, "name": "Conservative (10%)", "return": 2.46, "sharpe": 2.13},
+      {"allocation": 0.2, "name": "Moderate (20%)", "return": 1.76, "sharpe": 1.81},
+      {"allocation": 0.3, "name": "Aggressive (30%)", "return": 0.74, "sharpe": 1.14}
+    ],
+    "note": "Options reduce returns due to theta decay in simplified model"
+  },
+  
+  "bear_market_2022": {
+    "strategy_return": 0.397,
+    "tqqq_return": -0.797,
+    "advantage": 1.194
+  },
+  
+  "validation_checks": [
+    {"name": "Total Return >200%", "result": true, "value": "289%"},
+    {"name": "Max DD ≤22%", "result": true, "value": "10.8%"},
+    {"name": "Sharpe >1.5", "result": true, "value": "2.29"},
+    {"name": "Walk-Forward Win Rate >70%", "result": true, "value": "100%"},
+    {"name": "Parameter CV <0.30", "result": true, "value": "0.02"}
+  ],
+  
+  "production_controls": {
+    "circuit_breakers": [
+      {"trigger": "daily_loss_3pct", "action": "reduce_50pct"},
+      {"trigger": "daily_loss_5pct", "action": "exit_all"},
+      {"trigger": "vix_30", "action": "reduce_50pct"},
+      {"trigger": "vix_40", "action": "exit_to_cash"},
+      {"trigger": "max_dd_15pct", "action": "reduce_30pct"},
+      {"trigger": "max_dd_20pct", "action": "exit_all"}
+    ],
+    "position_limits": {
+      "single_stock": 0.08,
+      "single_leveraged_etf": 0.25,
+      "options": 0.30
+    }
+  },
+  
+  "deployment_plan": {
+    "phase_1": {
+      "name": "Initial Deployment",
+      "duration_days": 30,
+      "capital": 100000,
+      "strategy": "BASE (no options)"
+    },
+    "phase_2": {
+      "name": "Validation",
+      "duration_days": 30,
+      "tasks": ["compare_to_backtest", "verify_signals", "check_execution"]
+    },
+    "phase_3": {
+      "name": "Refinement",
+      "duration_days": 30,
+      "tasks": ["address_gaps", "tune_timing", "prepare_live_transition"]
+    }
+  },
+  
+  "recommended_brokers": [
+    {"name": "Alpaca", "features": ["free_paper_trading", "good_api", "commission_free"]},
+    {"name": "Interactive Brokers", "features": ["robust_api", "good_fills"]},
+    {"name": "TD Ameritrade", "features": ["paper_trading", "testing"]}
+  ],
+  
+  "etf_allocation": {
+    "long_regime": {
+      "TQQQ": 0.50,
+      "SPXL": 0.30,
+      "SOXL": 0.20
+    },
+    "inverse_regime": {
+      "SQQQ": 0.50,
+      "SPXU": 0.30,
+      "SOXS": 0.20
+    }
+  },
+  
+  "conclusion": "VALIDATED AND READY FOR PAPER TRADING"
+}

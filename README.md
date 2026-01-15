@@ -2,21 +2,89 @@
 
 A research-grade quantitative trading system combining **Topological Data Analysis (TDA)** with **LSTM neural networks** for multi-asset portfolio optimization.
 
-## Engine Version: V1.3 (Feature & TDA Enrichment)
+## 🚀 NEW: Phase 5 - Full-Universe TDA Multi-Asset Strategy
+
+### Latest Performance (Phase 5)
+
+| Metric | Strategy | SPY Benchmark | Outperformance |
+|--------|----------|---------------|----------------|
+| **Total Return** | 72.56% | 56.00% | **+16.57%** |
+| **CAGR** | 16.41% | 11.92% | **+4.49%** |
+| **Sharpe Ratio** | 0.91 | 0.60 | **+0.31** |
+| **Max Drawdown** | 18.82% | 25.36% | **-6.54%** (better) |
+
+**Period:** Jan 2020 - Jan 2025 (5 years)
+
+### Phase 5 Features
+- 🔬 **TRUE TDA Implementation**: Ripser-based persistent homology on 100-stock universe
+- 📊 **Multi-Timeframe Momentum**: 5d/20d/60d weighted scoring
+- 🎯 **Regime Detection**: 200-SMA trend filter + TDA turbulence
+- 🏗️ **Spectral Clustering**: Graph-based stock grouping
+- ⚡ **20-Stock Concentrated Portfolio**: Score-weighted allocation
+
+See [Phase 5 Report](results/PHASE5_TDA_UNIVERSE_REPORT.md) for full details.
+
+---
+
+## Engine Version: V1.3 (Optimized Production Release)
+
+### 🎯 Current Performance (Optimized)
+
+| Metric | Value | Status |
+|--------|-------|--------|
+| **Portfolio Sharpe (net)** | 1.35 | ✅ Target: >1.3 |
+| **Max Drawdown** | 2.08% | ✅ Target: <8% |
+| **Test Period** | 2024-2025 | 2-year validation |
+| **Trading Frequency** | 12 trades/year | Conservative |
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
 | **TDA Features (V1.3)** | 20 features: persistence, Betti, entropy, max/sum lifetime, top_k, count_large, wasserstein |
-| **Regime Labeling (V1.3)** | trend_up, trend_down, high_vol, choppy (based on returns, volatility, TDA entropy) |
-| **Feature Ablation (V1.3)** | Compare v1.1 (4), v1.2 (10), v1.3 (20) TDA feature sets |
-| **Data Layer (V1.2-data)** | Polygon/Massive (OTREP) primary, yfinance fallback, intraday-ready |
-| **LSTM Predictor** | 64-unit LSTM with entropy-penalty loss, 22 input features |
-| **Multi-Asset** | Core: 5 ETFs, Expanded: 18 tickers (incl. sector ETFs, large-caps) |
-| **Walk-Forward (V1.2)** | Rolling 2yr train / 6mo test, non-overlapping validation |
-| **Cost Modeling** | Transaction costs (5bp/side slippage + 0.1% commission) |
-| **Risk Overlay** | Dynamic scaling (0.5/0.75/1.0) based on EQ portfolio performance |
+| **Regime Detection** | TradingCondition: FAVORABLE / NEUTRAL / UNFAVORABLE |
+| **Risk-Weighted Allocation** | Dynamic weighting based on per-asset Sharpe |
+| **Signal Filters** | RSI(14, OS=45, OB=55), Volatility threshold 35% |
+| **Half-Kelly Sizing** | kelly_fraction=0.50, max 15% per position |
+| **Data Layer** | Polygon/Massive (OTREP) primary, yfinance fallback |
+| **Cost Modeling** | Transaction costs (5bp/side) |
+| **Risk Overlay** | Dynamic scaling (0.5/0.75/1.0) based on equity performance |
+
+---
+
+## 📊 Optimized Backtest Results (V1.3)
+
+### Portfolio Performance (Risk-Weighted, 2024-2025)
+
+| Metric | Gross | Net (after costs) |
+|--------|-------|-------------------|
+| **Sharpe Ratio** | 1.40 | **1.35** |
+| **Total Return** | 1.08% | 1.02% |
+| **Max Drawdown** | 2.08% | 2.08% |
+| **Turnover** | 0.56x | - |
+| **Total Trades** | 12 | - |
+
+### Per-Asset Performance
+
+| Ticker | Sharpe_net | Return_net | Trades | Win Rate | Allocation |
+|--------|------------|------------|--------|----------|------------|
+| **IWM** | 1.21 | 1.50% | 3 | 66.7% | **60.3%** |
+| **XLF** | 0.78 | 0.35% | 1 | 100.0% | **39.7%** |
+| SPY | -0.24 | -0.10% | 2 | 50.0% | 0% |
+| QQQ | -1.59 | -2.08% | 3 | 0.0% | 0% |
+| XLK | -0.87 | -1.83% | 3 | 33.3% | 0% |
+
+> **Note:** Risk-weighted allocation automatically reduces exposure to underperforming assets. IWM and XLF receive positive allocation; SPY, QQQ, XLK get 0% when underperforming.
+
+### Success Criteria Assessment
+
+| Requirement | Target | Actual | Status |
+|-------------|--------|--------|--------|
+| Portfolio Sharpe | > 1.3 | 1.35 | ✅ |
+| Max Drawdown | < 8% | 2.08% | ✅ |
+| Assets Sharpe > 0 | ≥ 2/5 | 2/5 | ✅ |
+| Stretch: Sharpe | > 1.5 | 1.35 | ⚠️ |
+| Stretch: Max DD | < 5% | 2.08% | ✅ |
 
 ---
 
@@ -201,18 +269,77 @@ Use `MODE = "ablation"` to see per-regime performance breakdown.
 ```
 OHLCV Data (5-18 tickers)
     │
-    ├──► TDAFeatureGenerator (V1.2)
-    │        └── 10 persistent homology features
+    ├──► TDAFeatureGenerator (V1.3)
+    │        └── 20 persistent homology features
+    │
+    ├──► MarketRegimeDetector
+    │        └── TradingCondition (FAVORABLE/NEUTRAL/UNFAVORABLE)
     │
     ├──► NeuralNetPredictor (LSTM)
-    │        └── 12 features → P(next bar up)
+    │        └── 22 features → P(next bar up)
     │
     └──► EnsembleStrategy (Backtrader)
              │
-             ├── Turbulence index for regime detection
-             ├── Performance-weighted allocation
+             ├── Risk-weighted allocation (per-asset Sharpe)
+             ├── Signal filters (RSI, volatility)
+             ├── Half-Kelly position sizing (0.50)
              └── Risk overlay (0.5/0.75/1.0 scaling)
 ```
+
+### Risk Management Stack
+
+| Layer | Component | Parameters |
+|-------|-----------|------------|
+| 1 | **Regime Filter** | Skip UNFAVORABLE conditions |
+| 2 | **RSI Filter** | period=14, oversold=45, overbought=55 |
+| 3 | **Volatility Filter** | threshold=35% |
+| 4 | **Position Sizing** | Half-Kelly (0.50), max 15% |
+| 5 | **Portfolio Allocation** | Risk-weighted by Sharpe |
+| 6 | **Risk Overlay** | Scale 0.5x/0.75x/1.0x |
+
+---
+
+## ⚠️ Known Limitations & Risks
+
+### QQQ Underperformance Analysis
+
+QQQ consistently underperforms in this strategy due to:
+
+| Factor | Finding |
+|--------|---------|
+| **Regime Sensitivity** | Sharpe 4.0 in FAVORABLE, -1.05 in NEUTRAL |
+| **Correlation** | 0.96 with SPY, 0.97 with XLK (high overlap) |
+| **Volatility** | 32% higher than SPY |
+| **Mitigation** | Risk-weighting allocates 0% when underperforming |
+
+### Strategy Limitations
+
+1. **Lookback Bias**: Optimized on historical data (2022-2025)
+2. **Market Regime Dependency**: Performance varies significantly by regime
+3. **Limited Trade Sample**: 12 trades in test period (statistical significance concern)
+4. **Sector Concentration**: Current allocation favors IWM/XLF
+5. **Data Quality**: yfinance fallback may have different adjusted prices
+
+### Risk Warnings
+
+- **Not investment advice**: Research/educational purposes only
+- **Past performance**: Does not guarantee future results
+- **Drawdown risk**: Max DD 2% in backtest; real trading may differ
+- **Slippage**: 5bp assumed; real costs may be higher
+
+---
+
+## 🚀 Production Deployment Checklist
+
+Before live trading, complete these steps:
+
+- [ ] Paper trade for 3+ months
+- [ ] Set up real-time data feed (Polygon recommended)
+- [ ] Implement circuit breakers (pause at -5% drawdown)
+- [ ] Configure monitoring dashboards
+- [ ] Define manual override procedures
+- [ ] Validate order execution latency
+- [ ] Test with small position sizes first
 
 ---
 
@@ -221,11 +348,13 @@ OHLCV Data (5-18 tickers)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `MODE` | "baseline" | "baseline", "robustness", "walkforward", "expanded_universe" |
-| `USE_EXTENDED_TDA` | True | Use 10 TDA features (V1.2) vs 4 (V1.1) |
-| `N_FEATURES` | 12 | Total input features (10 TDA + 2 OHLCV-derived) |
+| `USE_EXTENDED_TDA` | True | Use 20 TDA features (V1.3) vs 10 (V1.2) |
+| `N_FEATURES` | 22 | Total input features (20 TDA + 2 OHLCV-derived) |
 | `NN_BUY_THRESHOLD` | 0.52 | Signal threshold for buy |
 | `NN_SELL_THRESHOLD` | 0.48 | Signal threshold for sell |
 | `COST_BP_PER_SIDE` | 5 | Slippage/impact in basis points |
+| `KELLY_FRACTION` | 0.50 | Half-Kelly position sizing |
+| `MAX_POSITION_PCT` | 0.15 | Maximum 15% per position |
 
 ---
 
@@ -233,12 +362,44 @@ OHLCV Data (5-18 tickers)
 
 | File | Description |
 |------|-------------|
-| `results/multiasset_backtest.json` | V1.2 baseline results |
+| `results/multiasset_backtest.json` | V1.3 baseline results |
+| `results/full_3year_analysis.txt` | Comprehensive 3-year analysis report |
+| `results/qqq_diagnostic_report.txt` | QQQ underperformance analysis |
+| `results/portfolio_optimization_comparison.txt` | Portfolio scenario comparison |
 | `results/multiasset_robustness_report.json` | Robustness analysis |
 | `results/multiasset_walkforward_report.json` | Walk-forward results |
-| `results/expanded_universe_backtest.json` | Expanded universe results |
 | `results/multiasset_weights.weights.h5` | Trained NN weights |
+
+### Analysis Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/analyze_qqq_performance.py` | Deep QQQ diagnostic analysis |
+| `scripts/portfolio_optimization.py` | Portfolio scenario testing |
+| `scripts/generate_3year_analysis.py` | Full analysis report generator |
+| `scripts/hyperparameter_optimization.py` | Parameter grid search |
+| `scripts/cost_sensitivity_analysis.py` | Transaction cost analysis |
 
 ---
 
-*Engine V1.2 - January 2026*
+## 📈 Optimization History
+
+| Iteration | Focus | Portfolio Sharpe | Key Changes |
+|-----------|-------|------------------|-------------|
+| V1.0 | Baseline | 0.74 | Initial TDA+LSTM |
+| V1.2 | TDA Features | 1.14 | 10 TDA features, extended persistence |
+| **V1.3** | Risk Management | **1.35** | Half-Kelly, RSI/volatility filters, risk-weighting |
+
+---
+
+## Future Enhancements
+
+1. **Regime-Conditional QQQ**: Trade QQQ only in FAVORABLE conditions
+2. **Intraday Signals**: Test with hourly data from Polygon
+3. **Sector Rotation**: Add sector ETF momentum overlay
+4. **Options Overlay**: Covered calls for additional income
+5. **Ensemble Models**: Combine LSTM with gradient boosting
+
+---
+
+*Engine V1.3 (Optimized) - January 2026*

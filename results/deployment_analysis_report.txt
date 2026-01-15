@@ -1,0 +1,134 @@
+================================================================================
+TDA+NN TRADING STRATEGY - DEPLOYMENT ANALYSIS REPORT
+Generated: 2026-01-15 02:49:18
+================================================================================
+
+EXECUTIVE SUMMARY
+========================================
+Absolute Returns: SPY BEATS STRATEGY
+Risk-Adjusted: STRATEGY BEATS SPY (Risk-Adjusted)
+Deployment Recommendation: PAPER TRADE FIRST
+Confidence: Low-Medium
+Minimum Capital: $4,500
+Recommended Capital: $9,000
+
+KEY METRICS COMPARISON
+========================================
+Metric                        Strategy      SPY B&H     Winner
+------------------------------------------------------------
+Total Return 5Yr                 0.85%      100.64%        SPY
+Annualized Return                0.21%       14.83%        SPY
+Sharpe Ratio                     0.887        0.510   Strategy
+Max Drawdown                     1.94%       33.72%   Strategy
+Calmar Ratio                     0.109        0.440        SPY
+
+5-YEAR STRATEGY PERFORMANCE (Walk-Forward Validated)
+========================================
+Period: 2020-01-01 to 2025-12-31
+Walk-Forward Folds: 8
+Years Covered: 4.0
+
+Performance-Weighted Portfolio:
+  Total Return: 0.85%
+  CAGR: 0.21%
+  Sharpe Ratio (mean): 0.887
+  Sharpe Ratio (std): 1.499
+  Max Drawdown: 1.94%
+  Total Trades: 89
+  Win Rate: 55.1%
+  Profitable Folds: 6/8
+
+SPY BUY-AND-HOLD BENCHMARK
+========================================
+Period: 2020-01-01 to 2025-01-15
+Total Return: 100.64%
+CAGR: 14.83%
+Sharpe Ratio: 0.510
+Sortino Ratio: 0.633
+Max Drawdown: -33.72%
+Calmar Ratio: 0.440
+
+SPY Year-by-Year Returns:
+  2020:   18.1% (Sharpe: 0.42, MaxDD: -33.7%)
+  2021:   38.0% (Sharpe: 2.29, MaxDD: -5.4%)
+  2022:  -19.9% (Sharpe: -0.99, MaxDD: -25.4%)
+  2023:   24.8% (Sharpe: 1.58, MaxDD: -10.3%)
+  2024:   24.0% (Sharpe: 1.59, MaxDD: -8.4%)
+  2025:    1.4% (Sharpe: 0.08, MaxDD: -2.5%)
+
+MICRO CAPITAL ANALYSIS ($2,000)
+========================================
+Capital: $2,000
+Feasibility: NO
+Minimum Viable Capital: $2,250
+Recommended Capital: $4,500
+
+Position Sizes at $2K (60/40 IWM/XLF):
+  IWM: 5 shares @ $225 = $1125
+  XLF: 16 shares @ $48 = $768
+  Cash Remainder: $107
+
+Transaction Cost Impact:
+  Backtest Assumed: 10.00% per trade
+  Actual at $2K: 0.08% per roundtrip
+  Cost Multiplier: 0.8x backtest assumption
+
+EXPECTED LIVE PERFORMANCE
+========================================
+Backtest Annual Return: 0.21%
+Optimistic (20% degradation): 0.17%
+Realistic (40% degradation): 0.13%
+Conservative (60% degradation): 0.08%
+
+At $2,000 Starting Capital:
+  Optimistic Annual P&L: $3
+  Realistic Annual P&L: $3
+  Conservative Annual P&L: $2
+  Worth the Effort: NO
+
+DRAWDOWN TOLERANCE CHECK
+========================================
+User Tolerance: 5-8%
+Strategy Max DD: 1.94%
+SPY Max DD: 33.72%
+Strategy Within Tolerance: YES ✓
+SPY Within Tolerance: NO ✗
+
+IDENTIFIED RISKS
+========================================
+  1. Strategy shows high variance across time periods (Sharpe std > 1.3)
+  2. Only 5-6 out of 8 walk-forward folds were profitable
+  3. Current backtest period may not represent future conditions
+  4. Small capital amplifies transaction cost impact
+  5. Limited diversification with single-asset (IWM) concentration
+
+RECOMMENDED MITIGATIONS
+========================================
+  1. Start with paper trading for 3-6 months to verify signals
+  2. Use larger capital ($5K+) to reduce transaction cost drag
+  3. Implement strict position sizing (max 2% risk per trade)
+  4. Monitor for regime changes that invalidate model
+  5. Set monthly review checkpoints to evaluate performance
+
+================================================================================
+FINAL RECOMMENDATION
+================================================================================
+VERDICT: PAPER TRADE FIRST
+CONFIDENCE: Low-Medium
+
+Action Items:
+  1. Investigate why strategy underperforms SPY
+  2. Consider alternative feature engineering
+  3. Test different asset allocation strategies
+  4. Evaluate longer training periods
+  5. Compare against other benchmarks (QQQ, IWM itself)
+
+================================================================================
+CRITICAL BOTTOM LINE FOR USER
+================================================================================
+✗ Strategy DOES NOT beat SPY on absolute returns (-99.79%)
+✓ Strategy DOES beat SPY on risk-adjusted basis (Sharpe +0.377)
+✗ $2K capital NOT recommended (need $4,500)
+✓ Max drawdown 1.9% is within 5-8% tolerance
+
+================================================================================

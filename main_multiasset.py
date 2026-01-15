@@ -30,7 +30,7 @@ import backtrader as bt
 from src.tda_features import TDAFeatureGenerator
 from src.nn_predictor import NeuralNetPredictor, DataPreprocessor, train_model
 from src.ensemble_strategy import EnsembleStrategy, PerformanceAnalyzer
-from src.data.data_provider import get_ohlcv_data, validate_provider
+from src.data.data_provider import get_ohlcv_data, get_ohlcv_hybrid, validate_provider
 from src.regime_labeler import RegimeLabeler, label_regimes
 from src.risk_management import RiskManager, TradeJournal, calculate_atr
 from src.transaction_costs import CostModel, CostScenario, estimate_roundtrip_cost
@@ -52,7 +52,7 @@ MODE = "baseline"
 # =============================================================================
 
 # Primary data provider: "polygon" (Massive/OTREP) or "yfinance" (fallback)
-DATA_PROVIDER = "yfinance"  # Change to "polygon" when POLYGON_API_KEY_OTREP is set
+DATA_PROVIDER = "polygon"  # Using Polygon for high-quality data
 
 # Environment variable containing the Polygon/Massive OTREP API key
 POLYGON_API_KEY_ENV = "POLYGON_API_KEY_OTREP"
@@ -76,10 +76,10 @@ EXPANDED_TICKERS = [
     "JPM", "UNH", "XOM"
 ]
 
-# Date ranges (used for baseline mode)
-TRAIN_START = "2022-01-01"
-TRAIN_END = "2023-12-31"  # V1.2: Use recommended 2-year training
-TEST_START = "2024-01-01"
+# Date ranges (used for baseline mode) - 5-year backtest window
+TRAIN_START = "2020-01-01"
+TRAIN_END = "2022-12-31"  # V1.3: 3-year training
+TEST_START = "2023-01-01"
 TEST_END = "2025-12-31"
 
 # Walk-forward configuration (V1.2)
@@ -255,17 +255,17 @@ def download_ticker_data(ticker: str, start_date: str, end_date: str) -> pd.Data
     """
     Download OHLCV data for a single ticker from the configured data provider.
     
-    V1.2-data: Uses unified data layer (Polygon primary, yfinance fallback).
+    V1.3-data: Uses hybrid data layer (Polygon + yfinance combined for full coverage).
     """
-    print(f"    Downloading {ticker} via {DATA_PROVIDER} ({DEFAULT_TIMEFRAME})...")
+    print(f"    Downloading {ticker} via hybrid provider ({DEFAULT_TIMEFRAME})...")
     try:
-        df = get_ohlcv_data(
+        df = get_ohlcv_hybrid(
             ticker=ticker,
             start_date=start_date,
             end_date=end_date,
             timeframe=DEFAULT_TIMEFRAME,
-            provider=DATA_PROVIDER,
             polygon_api_key_env=POLYGON_API_KEY_ENV,
+            prefer_polygon=(DATA_PROVIDER == "polygon")
         )
         
         if df.empty:

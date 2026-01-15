@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # V1.3: Extended date configuration
-DEFAULT_START_DATE = '2015-01-01'  # Extended from 2022 for 10-year backtests
+DEFAULT_START_DATE = '2020-01-01'  # 5-year backtest window
 DEFAULT_END_DATE = '2025-12-31'
 
 
@@ -187,6 +187,98 @@ def get_ohlcv_data(
         f"Unknown data provider: '{provider}'. "
         f"Supported: 'polygon', 'yfinance'"
     )
+
+
+def get_ohlcv_hybrid(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    timeframe: str = "1d",
+    polygon_api_key_env: str = "POLYGON_API_KEY_OTREP",
+    prefer_polygon: bool = True
+) -> pd.DataFrame:
+    """
+    Hybrid data provider that combines Polygon and yfinance.
+    
+    Uses Polygon as primary source where data is available (typically last 2-4 years),
+    and falls back to yfinance for older data or when Polygon is unavailable.
+    
+    Args:
+        ticker: Stock/ETF symbol
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        timeframe: Bar size (daily only for hybrid mode)
+        polygon_api_key_env: Environment variable for Polygon API key
+        prefer_polygon: If True, try Polygon first; if False, use yfinance only
+    
+    Returns:
+        DataFrame with columns: open, high, low, close, volume
+    """
+    if timeframe != "1d":
+        # For intraday, only Polygon is supported
+        return get_ohlcv_data(
+            ticker, start_date, end_date,
+            timeframe=timeframe,
+            provider="polygon",
+            polygon_api_key_env=polygon_api_key_env
+        )
+    
+    # Try Polygon first if preferred
+    polygon_df = pd.DataFrame()
+    yfinance_df = pd.DataFrame()
+    
+    if prefer_polygon:
+        try:
+            polygon_df = get_ohlcv_data(
+                ticker, start_date, end_date,
+                timeframe="1d",
+                provider="polygon",
+                polygon_api_key_env=polygon_api_key_env
+            )
+            logger.info(f"Polygon: {len(polygon_df)} bars for {ticker}")
+        except Exception as e:
+            logger.warning(f"Polygon fetch failed for {ticker}: {e}")
+    
+    # Get yfinance data
+    try:
+        yfinance_df = get_ohlcv_data(
+            ticker, start_date, end_date,
+            timeframe="1d",
+            provider="yfinance",
+            use_subprocess=True
+        )
+        logger.info(f"yfinance: {len(yfinance_df)} bars for {ticker}")
+    except Exception as e:
+        logger.warning(f"yfinance fetch failed for {ticker}: {e}")
+    
+    # Return best available data
+    if polygon_df.empty and yfinance_df.empty:
+        return pd.DataFrame()
+    
+    if polygon_df.empty:
+        return yfinance_df
+    
+    if yfinance_df.empty:
+        return polygon_df
+    
+    # Both have data - use Polygon for recent data where available,
+    # fill earlier dates from yfinance
+    polygon_start = polygon_df.index.min()
+    
+    # Get yfinance data before Polygon coverage
+    yf_early = yfinance_df[yfinance_df.index < polygon_start]
+    
+    if len(yf_early) > 0:
+        # Combine: yfinance early data + Polygon recent data
+        combined = pd.concat([yf_early, polygon_df])
+        combined = combined.sort_index()
+        # Remove duplicates (prefer Polygon)
+        combined = combined[~combined.index.duplicated(keep='last')]
+        logger.info(f"Hybrid: {len(combined)} bars for {ticker} (yf:{len(yf_early)} early + polygon:{len(polygon_df)} recent)")
+        return combined
+    
+    # Polygon covers the full range
+    return polygon_df
 
 
 def validate_ohlcv_data(

@@ -1,0 +1,108 @@
+================================================================================
+PORTFOLIO COMPOSITION OPTIMIZATION REPORT
+Generated: 2026-01-15 00:26:05
+================================================================================
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+
+BEST SCENARIO: A (Keep QQQ Modified)
+Portfolio Sharpe: 1.10
+
+================================================================================
+SCENARIO COMPARISON
+================================================================================
+
+Scenario                              Avg Sharpe  Avg Return%    Max DD%
+----------------------------------------------------------------------
+A (Keep QQQ Modified)                        1.1        47.88       27.5
+B (Replace with VGT)                        1.09        49.41       27.5
+C (4-Asset Portfolio)                       1.08        45.96       27.5
+
+------------------------------------------------------------
+SCENARIO A: Keep QQQ with Modifications
+------------------------------------------------------------
+Configuration:
+  • QQQ traded only in FAVORABLE conditions
+  • QQQ position size multiplier: 0.5x
+  • RSI filter: oversold=40, overbought=60
+
+Per-Asset Results:
+  SPY: Sharpe=1.36, Return=48.95%, MaxDD=18.76%
+  QQQ: Sharpe=1.19, Return=55.56%, MaxDD=22.77%
+  IWM: Sharpe=0.59, Return=27.19%, MaxDD=27.5%
+  XLF: Sharpe=1.36, Return=50.49%, MaxDD=15.54%
+  XLK: Sharpe=1.02, Return=57.19%, MaxDD=25.66%
+
+------------------------------------------------------------
+SCENARIO B: Replace QQQ with VGT
+------------------------------------------------------------
+Replacement Asset: VGT
+  Sharpe: 1.12
+  Return: 63.23%
+  Volatility: 25.01%
+
+Per-Asset Results:
+  SPY: Sharpe=1.36, Return=48.95%
+  VGT: Sharpe=1.12, Return=63.23%
+  IWM: Sharpe=0.59, Return=27.19%
+  XLF: Sharpe=1.36, Return=50.49%
+  XLK: Sharpe=1.02, Return=57.19%
+
+------------------------------------------------------------
+SCENARIO C: 4-Asset Portfolio (No QQQ)
+------------------------------------------------------------
+Assets: SPY, IWM, XLF, XLK
+
+Per-Asset Results:
+  SPY: Sharpe=1.36, Return=48.95%
+  IWM: Sharpe=0.59, Return=27.19%
+  XLF: Sharpe=1.36, Return=50.49%
+  XLK: Sharpe=1.02, Return=57.19%
+
+================================================================================
+ALTERNATIVE ASSETS ANALYSIS
+================================================================================
+
+Asset        Sharpe    Return%       Vol%     MaxDD%
+--------------------------------------------------
+DIA            1.07      32.46      14.26      15.95
+MDY             0.6      23.45      18.67      24.03
+VGT            1.12      63.23      25.01      27.23
+SOXX           0.79      66.93      37.19      41.36
+RSP            0.86      26.48       14.6      17.81
+PORTFOLIO        N/A        N/A        N/A      41.36
+
+Best Alternative: VGT
+
+================================================================================
+CORRELATION WITH EXISTING PORTFOLIO
+================================================================================
+
+Correlation Matrix (alternatives vs SPY/IWM):
+  DIA-SPY: 0.89
+  MDY-SPY: 0.86
+  VGT-SPY: 0.93
+  SOXX-SPY: 0.83
+  RSP-SPY: 0.88
+
+================================================================================
+FINAL RECOMMENDATION
+================================================================================
+
+Selected Configuration: A (Keep QQQ Modified)
+Expected Portfolio Sharpe: 1.10
+
+Rationale:
+  • QQQ shows strong performance in FAVORABLE conditions
+  • Regime-based filtering can capture upside while limiting downside
+
+Implementation:
+  1. Add QQQ-specific regime filter in ensemble_strategy.py
+  2. Only enter QQQ trades when TradingCondition=FAVORABLE
+  3. Run full 3-year validation
+
+================================================================================
+END OF REPORT
+================================================================================

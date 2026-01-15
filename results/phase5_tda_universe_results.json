@@ -1,0 +1,1970 @@
+{
+  "strategy": {
+    "total_return": 0.7256243453504367,
+    "cagr": 0.16406814783715085,
+    "volatility": 0.15781125980028968,
+    "sharpe": 0.9129142497149396,
+    "max_drawdown": 0.1881850972975817,
+    "win_rate": 0.5447513812154696,
+    "avg_positions": 16.685082872928177,
+    "n_trades": 141
+  },
+  "benchmark": {
+    "total_return": 0.5599680596220373,
+    "cagr": 0.11920516706953732,
+    "volatility": 0.16576720146365817,
+    "sharpe": 0.598460770246438,
+    "max_drawdown": 0.25360574407066916
+  },
+  "outperformance": {
+    "total_return_diff": 0.1656562857283994,
+    "cagr_diff": 0.044862980767613525,
+    "sharpe_diff": 0.31445347946850166
+  },
+  "trade_log": [
+    {
+      "date": "2021-03-17 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-03-24 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-03-31 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-04-08 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999998,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-04-15 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-04-22 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-04-29 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-05-06 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-05-13 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-05-20 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999998,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-05-27 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-06-04 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-06-11 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-06-18 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-06-25 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-07-02 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999998,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-07-12 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-07-19 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-07-26 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-08-02 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-08-09 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-08-16 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-08-23 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-08-30 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-09-07 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-09-14 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-09-21 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-09-28 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-10-05 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-10-12 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-10-19 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-10-26 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-11-02 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999998,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-11-09 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-11-16 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-11-23 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-12-01 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-12-08 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-12-15 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-12-22 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2021-12-30 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2022-01-06 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2022-01-13 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2022-01-21 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2022-02-04 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000004,
+      "regime": "BULL"
+    },
+    {
+      "date": "2022-02-11 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2022-03-28 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2022-04-04 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-01-27 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-02-03 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-02-10 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-02-17 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-02-27 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-03-06 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-03-27 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-04-03 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-04-11 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-04-18 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-04-25 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-05-02 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-05-09 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-05-16 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-05-23 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-05-31 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-06-07 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-06-14 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-06-22 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-06-29 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-07-07 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-07-14 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-07-21 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999998,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-07-28 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-08-04 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-08-11 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-08-18 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-08-25 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-09-01 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-09-11 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-09-18 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-09-25 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-10-02 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999997,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-10-09 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-10-16 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-11-06 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-11-13 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-11-20 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-11-28 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-12-05 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-12-12 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-12-19 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2023-12-27 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-01-04 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-01-11 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-01-19 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-01-26 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-02-02 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-02-09 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-02-16 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-02-26 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-03-04 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-03-11 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-03-18 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-03-25 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-04-02 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-04-09 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-04-16 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-04-23 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-04-30 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-05-07 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-05-14 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-05-21 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-05-29 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999997,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-06-05 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-06-12 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-06-20 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-06-27 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-07-05 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999998,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-07-12 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-07-19 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-07-26 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-08-02 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-08-09 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-08-16 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-08-23 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-08-30 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-09-09 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-09-16 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-09-23 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-09-30 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-10-07 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999999,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-10-14 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-10-21 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-10-28 04:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-11-04 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-11-11 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999998,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-11-18 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-11-25 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-12-03 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-12-10 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-12-17 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 1.0000000000000002,
+      "regime": "BULL"
+    },
+    {
+      "date": "2024-12-24 05:00:00",
+      "action": "REBALANCE",
+      "n_positions": 20,
+      "exposure": 0.9999999999999998,
+      "regime": "BULL"
+    }
+  ],
+  "regime_log": [
+    {
+      "date": "2021-03-17 04:00:00",
+      "regime": "BULL",
+      "turbulence": 30.0
+    },
+    {
+      "date": "2021-03-24 04:00:00",
+      "regime": "BULL",
+      "turbulence": 30.0
+    },
+    {
+      "date": "2021-03-31 04:00:00",
+      "regime": "BULL",
+      "turbulence": 30.0
+    },
+    {
+      "date": "2021-04-08 04:00:00",
+      "regime": "BULL",
+      "turbulence": 30.0
+    },
+    {
+      "date": "2021-04-15 04:00:00",
+      "regime": "BULL",
+      "turbulence": 30.0
+    },
+    {
+      "date": "2021-04-22 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.726463213217327
+    },
+    {
+      "date": "2021-04-29 04:00:00",
+      "regime": "BULL",
+      "turbulence": 8.65692740252168
+    },
+    {
+      "date": "2021-05-06 04:00:00",
+      "regime": "BULL",
+      "turbulence": 8.940009651951893
+    },
+    {
+      "date": "2021-05-13 04:00:00",
+      "regime": "BULL",
+      "turbulence": 8.601668280284077
+    },
+    {
+      "date": "2021-05-20 04:00:00",
+      "regime": "BULL",
+      "turbulence": 8.267972847076845
+    },
+    {
+      "date": "2021-05-27 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.746794344808963
+    },
+    {
+      "date": "2021-06-04 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.094780452373913
+    },
+    {
+      "date": "2021-06-11 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.82232639834703
+    },
+    {
+      "date": "2021-06-18 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.198662110077999
+    },
+    {
+      "date": "2021-06-25 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.086910292742358
+    },
+    {
+      "date": "2021-07-02 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.095204026343206
+    },
+    {
+      "date": "2021-07-12 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.757721491853733
+    },
+    {
+      "date": "2021-07-19 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.335568663205562
+    },
+    {
+      "date": "2021-07-26 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.130525730162084
+    },
+    {
+      "date": "2021-08-02 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.48173222909525
+    },
+    {
+      "date": "2021-08-09 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.266345770270547
+    },
+    {
+      "date": "2021-08-16 04:00:00",
+      "regime": "BULL",
+      "turbulence": 12.97268562884134
+    },
+    {
+      "date": "2021-08-23 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.697236982839103
+    },
+    {
+      "date": "2021-08-30 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.96948622131948
+    },
+    {
+      "date": "2021-09-07 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.600727429529984
+    },
+    {
+      "date": "2021-09-14 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.208937561809593
+    },
+    {
+      "date": "2021-09-21 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.60045610017055
+    },
+    {
+      "date": "2021-09-28 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.226851835316642
+    },
+    {
+      "date": "2021-10-05 04:00:00",
+      "regime": "BULL",
+      "turbulence": 12.765714384011215
+    },
+    {
+      "date": "2021-10-12 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.226851835316642
+    },
+    {
+      "date": "2021-10-19 04:00:00",
+      "regime": "BULL",
+      "turbulence": 12.651844448396734
+    },
+    {
+      "date": "2021-10-26 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.79339611907106
+    },
+    {
+      "date": "2021-11-02 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.01797639229725
+    },
+    {
+      "date": "2021-11-09 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.391738274699403
+    },
+    {
+      "date": "2021-11-16 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.5974171590792
+    },
+    {
+      "date": "2021-11-23 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.0753292574971
+    },
+    {
+      "date": "2021-12-01 05:00:00",
+      "regime": "BULL",
+      "turbulence": 12.971653121994562
+    },
+    {
+      "date": "2021-12-08 05:00:00",
+      "regime": "BULL",
+      "turbulence": 12.186223238012548
+    },
+    {
+      "date": "2021-12-15 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.839496762836568
+    },
+    {
+      "date": "2021-12-22 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.527129714659049
+    },
+    {
+      "date": "2021-12-30 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.261920167491668
+    },
+    {
+      "date": "2022-01-06 05:00:00",
+      "regime": "BULL",
+      "turbulence": 15.023130314433297
+    },
+    {
+      "date": "2022-01-13 05:00:00",
+      "regime": "BULL",
+      "turbulence": 15.99685077425797
+    },
+    {
+      "date": "2022-01-21 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.550717260020734
+    },
+    {
+      "date": "2022-01-28 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-02-04 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.491376746189447
+    },
+    {
+      "date": "2022-02-11 05:00:00",
+      "regime": "BULL",
+      "turbulence": 15.275441043522154
+    },
+    {
+      "date": "2022-02-18 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-02-28 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-03-07 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-03-14 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-03-21 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-03-28 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.937461031485112
+    },
+    {
+      "date": "2022-04-04 04:00:00",
+      "regime": "BULL",
+      "turbulence": 15.76327703168913
+    },
+    {
+      "date": "2022-04-11 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-04-19 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-04-26 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-05-03 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-05-10 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-05-17 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-05-24 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-06-01 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-06-08 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-06-15 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-06-23 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-06-30 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-07-08 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-07-15 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-07-22 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-07-29 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-08-05 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-08-12 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-08-19 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-08-26 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-09-02 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-09-12 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-09-19 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-09-26 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-10-03 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-10-10 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-10-17 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-10-24 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-10-31 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-11-07 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-11-14 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-11-21 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-11-29 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-12-06 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-12-13 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-12-20 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2022-12-28 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2023-01-05 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2023-01-12 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2023-01-20 05:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2023-01-27 05:00:00",
+      "regime": "BULL",
+      "turbulence": 16.59583201736955
+    },
+    {
+      "date": "2023-02-03 05:00:00",
+      "regime": "BULL",
+      "turbulence": 16.62588471520277
+    },
+    {
+      "date": "2023-02-10 05:00:00",
+      "regime": "BULL",
+      "turbulence": 16.65232045415529
+    },
+    {
+      "date": "2023-02-17 05:00:00",
+      "regime": "BULL",
+      "turbulence": 17.040651009283582
+    },
+    {
+      "date": "2023-02-27 05:00:00",
+      "regime": "BULL",
+      "turbulence": 17.006813580108325
+    },
+    {
+      "date": "2023-03-06 05:00:00",
+      "regime": "BULL",
+      "turbulence": 16.476359045841704
+    },
+    {
+      "date": "2023-03-13 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2023-03-20 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2023-03-27 04:00:00",
+      "regime": "BULL",
+      "turbulence": 15.973714534135043
+    },
+    {
+      "date": "2023-04-03 04:00:00",
+      "regime": "BULL",
+      "turbulence": 16.54472234872508
+    },
+    {
+      "date": "2023-04-11 04:00:00",
+      "regime": "BULL",
+      "turbulence": 16.697632022227694
+    },
+    {
+      "date": "2023-04-18 04:00:00",
+      "regime": "BULL",
+      "turbulence": 17.933877406925323
+    },
+    {
+      "date": "2023-04-25 04:00:00",
+      "regime": "BULL",
+      "turbulence": 17.818487874325076
+    },
+    {
+      "date": "2023-05-02 04:00:00",
+      "regime": "BULL",
+      "turbulence": 16.607336938503888
+    },
+    {
+      "date": "2023-05-09 04:00:00",
+      "regime": "BULL",
+      "turbulence": 16.596289738798784
+    },
+    {
+      "date": "2023-05-16 04:00:00",
+      "regime": "BULL",
+      "turbulence": 15.750969915422477
+    },
+    {
+      "date": "2023-05-23 04:00:00",
+      "regime": "BULL",
+      "turbulence": 15.312515314703894
+    },
+    {
+      "date": "2023-05-31 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.781188514017865
+    },
+    {
+      "date": "2023-06-07 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.604484519861023
+    },
+    {
+      "date": "2023-06-14 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.351917605448103
+    },
+    {
+      "date": "2023-06-22 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.656736703313461
+    },
+    {
+      "date": "2023-06-29 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.685793568850054
+    },
+    {
+      "date": "2023-07-07 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.909941454158798
+    },
+    {
+      "date": "2023-07-14 04:00:00",
+      "regime": "BULL",
+      "turbulence": 16.65557778677204
+    },
+    {
+      "date": "2023-07-21 04:00:00",
+      "regime": "BULL",
+      "turbulence": 16.599595356935033
+    },
+    {
+      "date": "2023-07-28 04:00:00",
+      "regime": "BULL",
+      "turbulence": 16.20476803579258
+    },
+    {
+      "date": "2023-08-04 04:00:00",
+      "regime": "BULL",
+      "turbulence": 15.065763585466877
+    },
+    {
+      "date": "2023-08-11 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.756775596306811
+    },
+    {
+      "date": "2023-08-18 04:00:00",
+      "regime": "BULL",
+      "turbulence": 14.242414292647233
+    },
+    {
+      "date": "2023-08-25 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.310646823717292
+    },
+    {
+      "date": "2023-09-01 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.483299066522742
+    },
+    {
+      "date": "2023-09-11 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.416453087445449
+    },
+    {
+      "date": "2023-09-18 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.808193618794956
+    },
+    {
+      "date": "2023-09-25 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.361302366961523
+    },
+    {
+      "date": "2023-10-02 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.903357671377032
+    },
+    {
+      "date": "2023-10-09 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.052139350802914
+    },
+    {
+      "date": "2023-10-16 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.635433662790804
+    },
+    {
+      "date": "2023-10-23 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2023-10-30 04:00:00",
+      "regime": "BEAR",
+      "turbulence": 80
+    },
+    {
+      "date": "2023-11-06 05:00:00",
+      "regime": "BULL",
+      "turbulence": 12.954986520121745
+    },
+    {
+      "date": "2023-11-13 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.463808726916199
+    },
+    {
+      "date": "2023-11-20 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.632718790567573
+    },
+    {
+      "date": "2023-11-28 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.005994545610788
+    },
+    {
+      "date": "2023-12-05 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.344012294516288
+    },
+    {
+      "date": "2023-12-12 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.620444468267866
+    },
+    {
+      "date": "2023-12-19 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.48368066033863
+    },
+    {
+      "date": "2023-12-27 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.37233877990102
+    },
+    {
+      "date": "2024-01-04 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.515768997030959
+    },
+    {
+      "date": "2024-01-11 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.771928600189602
+    },
+    {
+      "date": "2024-01-19 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.332377641590485
+    },
+    {
+      "date": "2024-01-26 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.504879719564627
+    },
+    {
+      "date": "2024-02-02 05:00:00",
+      "regime": "BULL",
+      "turbulence": 12.897168020167905
+    },
+    {
+      "date": "2024-02-09 05:00:00",
+      "regime": "BULL",
+      "turbulence": 11.7952038024788
+    },
+    {
+      "date": "2024-02-16 05:00:00",
+      "regime": "BULL",
+      "turbulence": 12.029242099036807
+    },
+    {
+      "date": "2024-02-26 05:00:00",
+      "regime": "BULL",
+      "turbulence": 11.175527032808095
+    },
+    {
+      "date": "2024-03-04 05:00:00",
+      "regime": "BULL",
+      "turbulence": 13.076724295143162
+    },
+    {
+      "date": "2024-03-11 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.577342801121054
+    },
+    {
+      "date": "2024-03-18 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.623559458460507
+    },
+    {
+      "date": "2024-03-25 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.213194453615623
+    },
+    {
+      "date": "2024-04-02 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.904359052409243
+    },
+    {
+      "date": "2024-04-09 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.352626869712847
+    },
+    {
+      "date": "2024-04-16 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.991704573288581
+    },
+    {
+      "date": "2024-04-23 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.165312705813326
+    },
+    {
+      "date": "2024-04-30 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.919190489393495
+    },
+    {
+      "date": "2024-05-07 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.019150771547178
+    },
+    {
+      "date": "2024-05-14 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.735142614969586
+    },
+    {
+      "date": "2024-05-21 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.30593747149631
+    },
+    {
+      "date": "2024-05-29 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.622359375019789
+    },
+    {
+      "date": "2024-06-05 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.59537088911207
+    },
+    {
+      "date": "2024-06-12 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.131067644642219
+    },
+    {
+      "date": "2024-06-20 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.01446194749365
+    },
+    {
+      "date": "2024-06-27 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.529698146263621
+    },
+    {
+      "date": "2024-07-05 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.857269983104569
+    },
+    {
+      "date": "2024-07-12 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.275792406312643
+    },
+    {
+      "date": "2024-07-19 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.798855734020442
+    },
+    {
+      "date": "2024-07-26 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.948618185979143
+    },
+    {
+      "date": "2024-08-02 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.948618185979145
+    },
+    {
+      "date": "2024-08-09 04:00:00",
+      "regime": "BULL",
+      "turbulence": 9.882117688026195
+    },
+    {
+      "date": "2024-08-16 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.123735593516862
+    },
+    {
+      "date": "2024-08-23 04:00:00",
+      "regime": "BULL",
+      "turbulence": 10.246950765959609
+    },
+    {
+      "date": "2024-08-30 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.049497126644994
+    },
+    {
+      "date": "2024-09-09 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.73488024688526
+    },
+    {
+      "date": "2024-09-16 04:00:00",
+      "regime": "BULL",
+      "turbulence": 11.73488024688526
+    },
+    {
+      "date": "2024-09-23 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.627343996520771
+    },
+    {
+      "date": "2024-09-30 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.733171520082324
+    },
+    {
+      "date": "2024-10-07 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.48368066033863
+    },
+    {
+      "date": "2024-10-14 04:00:00",
+      "regime": "BULL",
+      "turbulence": 13.96545365934476
+    },
+    {
+      "date": "2024-10-21 04:00:00",
+      "regime": "BULL",
+      "turbulence": 15.185614835128737
+    },
+    {
+      "date": "2024-10-28 04:00:00",
+      "regime": "BULL",
+      "turbulence": 16.72999549706056
+    },
+    {
+      "date": "2024-11-04 05:00:00",
+      "regime": "BULL",
+      "turbulence": 15.997120298932854
+    },
+    {
+      "date": "2024-11-11 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.745395377994106
+    },
+    {
+      "date": "2024-11-18 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.747991257713789
+    },
+    {
+      "date": "2024-11-25 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.746749346080998
+    },
+    {
+      "date": "2024-12-03 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.516086670033875
+    },
+    {
+      "date": "2024-12-10 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.548793336330435
+    },
+    {
+      "date": "2024-12-17 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.381389185740193
+    },
+    {
+      "date": "2024-12-24 05:00:00",
+      "regime": "BULL",
+      "turbulence": 14.381389185740193
+    }
+  ]
+}

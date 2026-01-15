@@ -1,0 +1,37 @@
+{
+  "phase": "Phase 4 - Aggressive Optimization",
+  "symbols": [
+    "SPY",
+    "QQQ",
+    "IWM"
+  ],
+  "start_date": "2020-01-01",
+  "end_date": "2025-01-01",
+  "initial_capital": 100000,
+  "final_value": 97397.81842411248,
+  "total_return_pct": -2.602181575887519,
+  "cagr_pct": -0.525724208989331,
+  "max_drawdown_pct": 8.475059386773147,
+  "sharpe_ratio": -0.806885939847304,
+  "total_trades": 190,
+  "trades_per_year": 37.98440065681445,
+  "spy_benchmark": {
+    "total_return": 94.58503165095797,
+    "cagr": 14.251389324783093,
+    "max_drawdown": 33.71725271441379,
+    "sharpe": 0.7412320903172332,
+    "years": 4.996577686516085
+  },
+  "targets": {
+    "cagr_target": 14.83,
+    "sharpe_target": 1.0,
+    "max_dd_target": 8.0,
+    "trades_per_year_target": 50
+  },
+  "passes": {
+    "cagr": false,
+    "sharpe": false,
+    "max_dd": false,
+    "trades_per_year": false
+  }
+}

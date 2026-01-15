@@ -1,0 +1,21 @@
+{
+  "strategy": "Phase4Final",
+  "symbol": "QQQ",
+  "period": "2020-01-01 to 2025-01-01",
+  "capital": 100000,
+  "final_value": 203959.8740662444,
+  "total_return": 103.95987406624441,
+  "cagr": 15.314397135469937,
+  "max_drawdown": 13.168355384004848,
+  "sharpe_ratio": 0.9581691115233579,
+  "spy_cagr": 14.25137988346583,
+  "qqq_cagr": 19.531476095925715,
+  "beats_spy": true,
+  "targets_met": 2,
+  "targets": {
+    "CAGR > 14.83%": true,
+    "Sharpe > 1.0": false,
+    "Max DD < 8%": false,
+    "Beat SPY CAGR": true
+  }
+}

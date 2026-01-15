@@ -1,0 +1,211 @@
+{
+  "test_period": {
+    "start": "2024-01-01",
+    "end": "2025-12-31"
+  },
+  "scenario_a": {
+    "SPY": {
+      "ticker": "SPY",
+      "total_return_pct": 48.95,
+      "ann_return_pct": 22.24,
+      "volatility_pct": 16.38,
+      "sharpe_ratio": 1.36,
+      "max_drawdown_pct": 18.76,
+      "num_days": 500
+    },
+    "QQQ": {
+      "ticker": "QQQ",
+      "total_return_pct": 55.56,
+      "ann_return_pct": 24.94,
+      "volatility_pct": 20.95,
+      "sharpe_ratio": 1.19,
+      "max_drawdown_pct": 22.77,
+      "num_days": 500
+    },
+    "IWM": {
+      "ticker": "IWM",
+      "total_return_pct": 27.19,
+      "ann_return_pct": 12.89,
+      "volatility_pct": 21.84,
+      "sharpe_ratio": 0.59,
+      "max_drawdown_pct": 27.5,
+      "num_days": 500
+    },
+    "XLF": {
+      "ticker": "XLF",
+      "total_return_pct": 50.49,
+      "ann_return_pct": 22.88,
+      "volatility_pct": 16.79,
+      "sharpe_ratio": 1.36,
+      "max_drawdown_pct": 15.54,
+      "num_days": 500
+    },
+    "XLK": {
+      "ticker": "XLK",
+      "total_return_pct": 57.19,
+      "ann_return_pct": 25.6,
+      "volatility_pct": 24.99,
+      "sharpe_ratio": 1.02,
+      "max_drawdown_pct": 25.66,
+      "num_days": 500
+    },
+    "PORTFOLIO": {
+      "avg_sharpe": 1.1,
+      "avg_return_pct": 47.88,
+      "max_drawdown_pct": 27.5,
+      "num_assets": 5
+    }
+  },
+  "scenario_b": {
+    "SPY": {
+      "ticker": "SPY",
+      "total_return_pct": 48.95,
+      "ann_return_pct": 22.24,
+      "volatility_pct": 16.38,
+      "sharpe_ratio": 1.36,
+      "max_drawdown_pct": 18.76,
+      "num_days": 500
+    },
+    "VGT": {
+      "ticker": "VGT",
+      "total_return_pct": 63.23,
+      "ann_return_pct": 28.01,
+      "volatility_pct": 25.01,
+      "sharpe_ratio": 1.12,
+      "max_drawdown_pct": 27.23,
+      "num_days": 500
+    },
+    "IWM": {
+      "ticker": "IWM",
+      "total_return_pct": 27.19,
+      "ann_return_pct": 12.89,
+      "volatility_pct": 21.84,
+      "sharpe_ratio": 0.59,
+      "max_drawdown_pct": 27.5,
+      "num_days": 500
+    },
+    "XLF": {
+      "ticker": "XLF",
+      "total_return_pct": 50.49,
+      "ann_return_pct": 22.88,
+      "volatility_pct": 16.79,
+      "sharpe_ratio": 1.36,
+      "max_drawdown_pct": 15.54,
+      "num_days": 500
+    },
+    "XLK": {
+      "ticker": "XLK",
+      "total_return_pct": 57.19,
+      "ann_return_pct": 25.6,
+      "volatility_pct": 24.99,
+      "sharpe_ratio": 1.02,
+      "max_drawdown_pct": 25.66,
+      "num_days": 500
+    },
+    "PORTFOLIO": {
+      "avg_sharpe": 1.09,
+      "avg_return_pct": 49.41,
+      "max_drawdown_pct": 27.5,
+      "num_assets": 5
+    }
+  },
+  "scenario_c": {
+    "SPY": {
+      "ticker": "SPY",
+      "total_return_pct": 48.95,
+      "ann_return_pct": 22.24,
+      "volatility_pct": 16.38,
+      "sharpe_ratio": 1.36,
+      "max_drawdown_pct": 18.76,
+      "num_days": 500
+    },
+    "IWM": {
+      "ticker": "IWM",
+      "total_return_pct": 27.19,
+      "ann_return_pct": 12.89,
+      "volatility_pct": 21.84,
+      "sharpe_ratio": 0.59,
+      "max_drawdown_pct": 27.5,
+      "num_days": 500
+    },
+    "XLF": {
+      "ticker": "XLF",
+      "total_return_pct": 50.49,
+      "ann_return_pct": 22.88,
+      "volatility_pct": 16.79,
+      "sharpe_ratio": 1.36,
+      "max_drawdown_pct": 15.54,
+      "num_days": 500
+    },
+    "XLK": {
+      "ticker": "XLK",
+      "total_return_pct": 57.19,
+      "ann_return_pct": 25.6,
+      "volatility_pct": 24.99,
+      "sharpe_ratio": 1.02,
+      "max_drawdown_pct": 25.66,
+      "num_days": 500
+    },
+    "PORTFOLIO": {
+      "avg_sharpe": 1.08,
+      "avg_return_pct": 45.96,
+      "max_drawdown_pct": 27.5,
+      "num_assets": 4
+    }
+  },
+  "alternatives": {
+    "DIA": {
+      "ticker": "DIA",
+      "total_return_pct": 32.46,
+      "ann_return_pct": 15.22,
+      "volatility_pct": 14.26,
+      "sharpe_ratio": 1.07,
+      "max_drawdown_pct": 15.95,
+      "num_days": 500
+    },
+    "MDY": {
+      "ticker": "MDY",
+      "total_return_pct": 23.45,
+      "ann_return_pct": 11.2,
+      "volatility_pct": 18.67,
+      "sharpe_ratio": 0.6,
+      "max_drawdown_pct": 24.03,
+      "num_days": 500
+    },
+    "VGT": {
+      "ticker": "VGT",
+      "total_return_pct": 63.23,
+      "ann_return_pct": 28.01,
+      "volatility_pct": 25.01,
+      "sharpe_ratio": 1.12,
+      "max_drawdown_pct": 27.23,
+      "num_days": 500
+    },
+    "SOXX": {
+      "ticker": "SOXX",
+      "total_return_pct": 66.93,
+      "ann_return_pct": 29.47,
+      "volatility_pct": 37.19,
+      "sharpe_ratio": 0.79,
+      "max_drawdown_pct": 41.36,
+      "num_days": 500
+    },
+    "RSP": {
+      "ticker": "RSP",
+      "total_return_pct": 26.48,
+      "ann_return_pct": 12.57,
+      "volatility_pct": 14.6,
+      "sharpe_ratio": 0.86,
+      "max_drawdown_pct": 17.81,
+      "num_days": 500
+    },
+    "PORTFOLIO": {
+      "avg_sharpe": 0.89,
+      "avg_return_pct": 42.51,
+      "max_drawdown_pct": 41.36,
+      "num_assets": 5
+    }
+  },
+  "best_alternative": "VGT",
+  "recommendation": "A (Keep QQQ Modified)"
+}

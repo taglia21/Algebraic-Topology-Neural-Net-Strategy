@@ -1,0 +1,24 @@
+/usr/local/python/3.12.1/lib/python3.12/site-packages/keras/src/export/tf2onnx_lib.py:8: FutureWarning: In the future `np.object` will be defined as the corresponding NumPy scalar.
+  if not hasattr(np, "object"):
+INFO:src.data.data_provider:Polygon: 1003 bars for SPY
+INFO:src.data.data_provider:yfinance: 1002 bars for SPY
+INFO:src.data.data_provider:Hybrid: 1004 bars for SPY (yf:1 early + polygon:1003 recent)
+INFO:src.data.data_provider:Polygon: 1003 bars for QQQ
+INFO:src.data.data_provider:yfinance: 1002 bars for QQQ
+INFO:src.data.data_provider:Hybrid: 1004 bars for QQQ (yf:1 early + polygon:1003 recent)
+INFO:src.data.data_provider:Polygon: 1003 bars for IWM
+INFO:src.data.data_provider:yfinance: 1002 bars for IWM
+INFO:src.data.data_provider:Hybrid: 1004 bars for IWM (yf:1 early + polygon:1003 recent)
+INFO:src.data.data_provider:Polygon: 1003 bars for XLF
+INFO:src.data.data_provider:yfinance: 1002 bars for XLF
+INFO:src.data.data_provider:Hybrid: 1004 bars for XLF (yf:1 early + polygon:1003 recent)
+INFO:src.data.data_provider:Polygon: 1003 bars for XLK
+INFO:src.data.data_provider:yfinance: 1002 bars for XLK
+INFO:src.data.data_provider:Hybrid: 1004 bars for XLK (yf:1 early + polygon:1003 recent)
+2026-01-15 01:59:47.488484: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+INFO:src.risk_management:RiskManager initialized: capital=$20,000.00, risk_per_trade=2.0%, kelly=0.5000
+INFO:src.signal_filters:SignalFilter initialized: RSI(14, OS=45, OB=55), Vol threshold=35%
+INFO:src.regime_detector:MarketRegimeDetector initialized: MA(50/200), ATR(14), RSI(14)
+INFO:src.risk_management:RiskManager initialized: capital=$20,000.00, risk_per_trade=2.0%, kelly=0.5000
+INFO:src.signal_filters:SignalFilter initialized: RSI(14, OS=45, OB=55), Vol threshold=35%
+INFO:src.regime_detector:MarketRegimeDetector initialized: MA(50/200), ATR(14), RSI(14)

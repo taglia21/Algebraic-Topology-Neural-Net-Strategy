@@ -1,0 +1,241 @@
+================================================================================
+MULTI-ASSET TDA+NN PORTFOLIO STRATEGY – ENGINE V1.3
+================================================================================
+
+Engine V1.3 Features:
+  • V1.3 NEW: Enriched TDA features (20 total: top_k, count_large, wasserstein)
+  • V1.3 NEW: Regime labeling (trend_up, trend_down, high_vol, choppy)
+  • V1.3 NEW: Feature ablation experiments (v1.1/v1.2/v1.3)
+  • V1.2-data: Polygon/Massive as primary data provider
+  • V1.2: Walk-forward validation, expanded universe
+  • V1.1: Cost-aware metrics, risk overlay
+
+Data Provider Configuration:
+  Provider: yfinance
+  Timeframe: 1d
+  ✓ Using yfinance (no API key required)
+
+Configuration:
+  Mode: baseline
+  TDA Feature Mode: v1.3 (20 TDA features)
+  N_FEATURES: 22
+  Tickers: ['SPY', 'IWM', 'XLF', 'XLK']
+  Thresholds: Buy > 0.52, Sell < 0.48
+  Confidence Sizing: True
+  Cost Model: 5 bp/side
+
+Running BASELINE scenario only...
+
+================================================================================
+RUNNING SCENARIO: train_2022_2023_test_2024_2025
+  Train: 2022-01-01 to 2023-12-31
+  Test:  2024-01-01 to 2025-12-31
+  TDA Feature Mode: v1.3 (20 TDA features)
+  Total N_FEATURES: 22
+================================================================================
+
+============================================================
+PHASE A: Building Multi-Asset Dataset
+============================================================
+
+  [SPY]
+    Downloading SPY via yfinance (1d)...
+    ✓ SPY: 1002 bars (2022-01-03 to 2025-12-30)
+    Train: 501 bars, Test: 501 bars
+    Train samples: 465
+    Test samples: 465
+
+  [IWM]
+    Downloading IWM via yfinance (1d)...
+    ✓ IWM: 1002 bars (2022-01-03 to 2025-12-30)
+    Train: 501 bars, Test: 501 bars
+    Train samples: 465
+    Test samples: 465
+
+  [XLF]
+    Downloading XLF via yfinance (1d)...
+    ✓ XLF: 1002 bars (2022-01-03 to 2025-12-30)
+    Train: 501 bars, Test: 501 bars
+    Train samples: 465
+    Test samples: 465
+
+  [XLK]
+    Downloading XLK via yfinance (1d)...
+    ✓ XLK: 1002 bars (2022-01-03 to 2025-12-30)
+    Train: 501 bars, Test: 501 bars
+    Train samples: 465
+    Test samples: 465
+
+  Combined training data:
+    train_X shape: (1860, 15, 22)
+    train_y shape: (1860,)
+    Class balance: 50.6% up, 49.4% down
+    Tickers with test data: ['SPY', 'IWM', 'XLF', 'XLK']
+
+============================================================
+PHASE B1: Training Multi-Asset Neural Network
+============================================================
+    Using entropy penalty loss (weight=0.05)
+
+  Training on 1860 samples...
+    Epoch 10: mean=0.4835, std=0.0652, extreme=47.6% (>0.55:16.9%, <0.45:30.6%)
+    Epoch 20: mean=0.4392, std=0.1540, extreme=78.0% (>0.55:23.4%, <0.45:54.6%)
+  Multi-Asset NN Training Diagnostics - 2026-01-15T00:28:35.900320
+  ============================================================
+  
+Training Data:
+    train_X shape: (1860, 15, 22)
+    train_y shape: (1860,)
+    train_y distribution: 50.6% up
+  
+Training Results:
+    Epochs completed: 20
+    Final loss: 0.6628
+    Final val_loss: 0.7541
+  
+Prediction Statistics on Training Data:
+    Mean: 0.5002
+    Std: 0.0359
+    % > 0.55: 9.0%
+    % < 0.45: 9.2%
+    % in extreme zones: 18.2%
+
+  Diagnostics saved to: /workspaces/Algebraic-Topology-Neural-Net-Strategy/results/multiasset_nn_diagnostics.txt
+  Model saved to: /workspaces/Algebraic-Topology-Neural-Net-Strategy/results/multiasset_weights.weights.h5
+
+============================================================
+PHASE B2: Running Multi-Asset Backtests
+============================================================
+
+  Total capital: $100,000
+  Per-asset allocation: $25,000
+  Assets: ['SPY', 'IWM', 'XLF', 'XLK']
+
+  Running backtest for SPY (501 bars)...
+
+
+════════════════════════════════════════════════════════════
+SIGNAL DIAGNOSTIC SUMMARY [SPY]
+════════════════════════════════════════════════════════════
+Ticker: SPY
+Total bars analyzed: 619
+------------------------------------------------------------
+  Warming up (insufficient data)               39 (  6.3%)
+  Order pending                                 0 (  0.0%)
+  Already positioned (holding)                 28 (  4.5%)
+  NN signal too low for buy                     0 (  0.0%)
+  NN signal too high for sell (no pos)         40 (  6.5%)
+  Turbulence blocking                           0 (  0.0%)
+  RSI filter blocked signal                   118 ( 19.1%)
+  Volatility filter blocked signal              0 (  0.0%)
+  Insufficient cash                             0 (  0.0%)
+  Trade executed (BUY)                          3 (  0.5%)
+  Trade executed (SELL)                         0 (  0.0%)
+  Stop-loss exit                                2 (  0.3%)
+  Take-profit exit                              1 (  0.2%)
+  No signal (neutral zone)                    235 ( 38.0%)
+------------------------------------------------------------
+  TOTAL TRADES                                  6
+════════════════════════════════════════════════════════════
+
+Current Thresholds:
+  NN Buy Threshold:        0.52
+  NN Sell Threshold:       0.48
+  Position Size Pct:       0.15
+  TDA Regime Min Mult:     0.4
+════════════════════════════════════════════════════════════
+      Risk: stops=0, targets=0, heat=0.4%
+    SPY: Sharpe=-0.78 (net:-0.82), Return=-0.88% (net:-0.92%), Trades=3
+
+  Running backtest for IWM (501 bars)...
+      Risk: stops=0, targets=0, heat=0.6%
+    IWM: Sharpe=0.06 (net:0.02), Return=0.12% (net:0.05%), Trades=6
+
+  Running backtest for XLF (501 bars)...
+      Risk: stops=0, targets=0, heat=0.0%
+    XLF: Sharpe=0.00 (net:0.00), Return=0.00% (net:0.00%), Trades=0
+
+  Running backtest for XLK (501 bars)...
+      Risk: stops=0, targets=0, heat=0.6%
+    XLK: Sharpe=-1.15 (net:-1.17), Return=-2.72% (net:-2.76%), Trades=3
+
+  Computing portfolio metrics...
+
+  Computing Equal-Weight Portfolio Metrics...
+    Sharpe: -0.8373 (net: -0.8731)
+    Return: -0.87% (net: -0.91%)
+    Max DD: 3.08%
+    Trades: 12, Turnover: 0.74x
+    Final Value: $99,130.03 (net: $99,092.80)
+
+  Risk Overlay: scale=0.50, cash_weight=50.0%
+
+  Computing Performance-Weighted (Risk-Adjusted) Portfolio Metrics...
+    Sharpe: 0.0642 (net: 0.0249)
+    Return: 0.12% (net: 0.05%)
+    Max DD: 3.08%
+    Trades: 12, Turnover: 1.43x
+    Final Value: $100,116.92 (net: $100,045.36)
+
+============================================================
+PHASE C: Threshold Sensitivity Analysis
+============================================================
+
+  Analyzing on SPY test data...
+  Prediction distribution:
+    Mean: 0.5083
+    Std: 0.0248
+    Min: 0.4556
+    Max: 0.5703
+
+  Signal counts by threshold:
+    conservative (0.53/0.47): BUY=95 (20.4%), SELL=25 (5.4%)
+    baseline     (0.52/0.48): BUY=140 (30.1%), SELL=62 (13.3%)
+    aggressive   (0.51/0.49): BUY=200 (43.0%), SELL=104 (22.4%)
+
+  Recommendation:
+    → Current thresholds (0.52/0.48) appear reasonable.
+    → Aggressive thresholds (0.51/0.49) would generate more signals.
+
+  Scenario Summary: train_2022_2023_test_2024_2025
+--------------------------------------------------------------------------------
+  Ticker     Sharpe   Sh_Net   Return  Ret_Net  Trades Turnover
+  SPY         -0.78    -0.82   -0.88%   -0.92%       3     0.76x
+  IWM          0.06     0.02    0.12%    0.05%       6     1.43x
+  XLF          0.00     0.00    0.00%    0.00%       0     0.00x
+  XLK         -1.15    -1.17   -2.72%   -2.76%       3     0.79x
+--------------------------------------------------------------------------------
+  PORTF_EQ    -0.84    -0.87   -0.87%   -0.91%
+  PORTF_WGT     0.06     0.02    0.12%    0.05% (risk_scale=0.50, cash=50%)
+  Weights: {IWM: 100%}
+
+Baseline results saved to: /workspaces/Algebraic-Topology-Neural-Net-Strategy/results/multiasset_backtest.json
+
+============================================================
+BASELINE COMPLETE (V1.3)
+============================================================
+  Data Provider: yfinance
+  TDA Mode: v1.3 (20 TDA features)
+  Timeframe: 1d
+  WGT Sharpe_net: 0.025
+  WGT Return_net: 0.05%
+  Total Trades: 12
+  Turnover: 1.43x
+
+
+STDERR:
+/usr/local/python/3.12.1/lib/python3.12/site-packages/keras/src/export/tf2onnx_lib.py:8: FutureWarning: In the future `np.object` will be defined as the corresponding NumPy scalar.
+  if not hasattr(np, "object"):
+2026-01-15 00:28:19.793334: E external/local_xla/xla/stream_executor/cuda/cuda_platform.cc:51] failed call to cuInit: INTERNAL: CUDA error: Failed call to cuInit: UNKNOWN ERROR (303)
+INFO:src.risk_management:RiskManager initialized: capital=$25,000.00, risk_per_trade=2.0%, kelly=0.5000
+INFO:src.signal_filters:SignalFilter initialized: RSI(14, OS=45, OB=55), Vol threshold=35%
+INFO:src.regime_detector:MarketRegimeDetector initialized: MA(50/200), ATR(14), RSI(14)
+INFO:src.risk_management:RiskManager initialized: capital=$25,000.00, risk_per_trade=2.0%, kelly=0.5000
+INFO:src.signal_filters:SignalFilter initialized: RSI(14, OS=45, OB=55), Vol threshold=35%
+INFO:src.regime_detector:MarketRegimeDetector initialized: MA(50/200), ATR(14), RSI(14)
+INFO:src.risk_management:RiskManager initialized: capital=$25,000.00, risk_per_trade=2.0%, kelly=0.5000
+INFO:src.signal_filters:SignalFilter initialized: RSI(14, OS=45, OB=55), Vol threshold=35%
+INFO:src.regime_detector:MarketRegimeDetector initialized: MA(50/200), ATR(14), RSI(14)
+INFO:src.risk_management:RiskManager initialized: capital=$25,000.00, risk_per_trade=2.0%, kelly=0.5000
+INFO:src.signal_filters:SignalFilter initialized: RSI(14, OS=45, OB=55), Vol threshold=35%
+INFO:src.regime_detector:MarketRegimeDetector initialized: MA(50/200), ATR(14), RSI(14)

@@ -131,12 +131,12 @@ class StrategyConfig:
 class ValidationConfig:
     """Data validation configuration."""
     
-    # Date Range
-    start_date: str = '2015-01-01'  # Backtest start
+    # Date Range - 5 years for comprehensive backtesting
+    start_date: str = '2020-01-01'  # Backtest start (5-year window)
     end_date: str = '2025-12-31'  # Backtest end
     
-    # Data Provider
-    provider: str = 'yfinance'  # 'yfinance', 'polygon', 'alpaca'
+    # Data Provider - Polygon for high-quality data
+    provider: str = 'polygon'  # 'yfinance', 'polygon', 'alpaca'
     
     # Quality Checks
     max_gap_days: int = 5  # Max allowable data gap

@@ -1,0 +1,339 @@
+{
+  "generated_at": "2026-01-15T02:49:18.335125",
+  "benchmark": {
+    "ticker": "SPY",
+    "period": "2020-01-01 to 2025-01-15",
+    "years": 5.03,
+    "total_bars": 1267,
+    "total_return": 1.006398530750785,
+    "cagr": 0.1483231005874628,
+    "annual_volatility": 0.21228479285743343,
+    "max_drawdown": -0.3371726736559413,
+    "max_drawdown_start": "2020-02-19",
+    "max_drawdown_end": "2020-03-23",
+    "drawdown_duration_days": 33,
+    "recovery_days": 140,
+    "sharpe_ratio": 0.5102725406252279,
+    "sortino_ratio": 0.6328994681807542,
+    "calmar_ratio": 0.43990249559433475,
+    "yearly_returns": {
+      "2020": {
+        "return": 0.18129723426023903,
+        "volatility": 0.3345364925308079,
+        "sharpe": 0.4223671779162531,
+        "max_drawdown": -0.3371726736559413,
+        "trading_days": 252
+      },
+      "2021": {
+        "return": 0.37966783699386353,
+        "volatility": 0.14841572197308797,
+        "sharpe": 2.2875548649535666,
+        "max_drawdown": -0.05417153953088116,
+        "trading_days": 253
+      },
+      "2022": {
+        "return": -0.19945155010361926,
+        "volatility": 0.24268686214050286,
+        "sharpe": -0.9860147262786364,
+        "max_drawdown": -0.2536057440706705,
+        "trading_days": 251
+      },
+      "2023": {
+        "return": 0.24812247255921438,
+        "volatility": 0.13188803730767631,
+        "sharpe": 1.5804309255919362,
+        "max_drawdown": -0.10290744664584195,
+        "trading_days": 250
+      },
+      "2024": {
+        "return": 0.23998730561726456,
+        "volatility": 0.12586179235093303,
+        "sharpe": 1.5889437285276513,
+        "max_drawdown": -0.08405622632156617,
+        "trading_days": 252
+      },
+      "2025": {
+        "return": 0.013923097974822163,
+        "volatility": 0.16632616461487826,
+        "sharpe": 0.07512063165276084,
+        "max_drawdown": -0.02497648481590975,
+        "trading_days": 9
+      }
+    },
+    "best_month": 0.1269833389477104,
+    "worst_month": -0.12487127521536023,
+    "winning_months": 40,
+    "losing_months": 21,
+    "monthly_win_rate": 0.6557377049180327
+  },
+  "strategy": {
+    "source": "walk_forward",
+    "period": "2020-01-01 to 2025-12-31",
+    "n_folds": 8,
+    "years_covered": 4.0,
+    "eq_total_return": -0.0020224676750491,
+    "eq_cagr": -0.0005060008445058051,
+    "eq_sharpe_mean": 0.42453750000000007,
+    "eq_sharpe_std": 1.3455359024729703,
+    "wgt_total_return": 0.008477074457211797,
+    "wgt_cagr": 0.00211256478613131,
+    "wgt_sharpe_mean": 0.8872500000000001,
+    "wgt_sharpe_std": 1.499307496813112,
+    "max_drawdown": 0.0194,
+    "total_trades": 89,
+    "overall_win_rate": 0.550561797752809,
+    "positive_eq_folds": 5,
+    "positive_wgt_folds": 6,
+    "yearly_data": {
+      "2022_H1": {
+        "period": "2022-01-01 to 2022-06-30",
+        "eq_return": -0.0097,
+        "wgt_return": -0.0097,
+        "eq_sharpe": -1.2756,
+        "wgt_sharpe": -1.2756,
+        "max_drawdown": 0.0194,
+        "trades": 0,
+        "win_rate": 0.0
+      },
+      "2022_H2": {
+        "period": "2022-07-01 to 2022-12-31",
+        "eq_return": -0.0087,
+        "wgt_return": -0.0087,
+        "eq_sharpe": -1.2015,
+        "wgt_sharpe": -1.2015,
+        "max_drawdown": 0.0165,
+        "trades": 15,
+        "win_rate": 0.4
+      },
+      "2023_H1": {
+        "period": "2023-01-01 to 2023-06-30",
+        "eq_return": 0.0001,
+        "wgt_return": 0.0036,
+        "eq_sharpe": 0.067,
+        "wgt_sharpe": 1.6366,
+        "max_drawdown": 0.0039,
+        "trades": 16,
+        "win_rate": 0.5
+      },
+      "2023_H2": {
+        "period": "2023-07-01 to 2023-12-31",
+        "eq_return": 0.0043,
+        "wgt_return": 0.0065,
+        "eq_sharpe": 2.9178,
+        "wgt_sharpe": 3.5789,
+        "max_drawdown": 0.0032,
+        "trades": 17,
+        "win_rate": 0.6471
+      },
+      "2024_H1": {
+        "period": "2024-01-01 to 2024-06-30",
+        "eq_return": -0.001,
+        "wgt_return": 0.0007,
+        "eq_sharpe": -0.5383,
+        "wgt_sharpe": 0.4183,
+        "max_drawdown": 0.0072,
+        "trades": 18,
+        "win_rate": 0.4445
+      },
+      "2024_H2": {
+        "period": "2024-07-01 to 2024-12-31",
+        "eq_return": 0.0041,
+        "wgt_return": 0.0063,
+        "eq_sharpe": 1.3512,
+        "wgt_sharpe": 1.7765,
+        "max_drawdown": 0.0055,
+        "trades": 21,
+        "win_rate": 0.7619
+      },
+      "2025_H1": {
+        "period": "2025-01-01 to 2025-06-30",
+        "eq_return": 0.0054,
+        "wgt_return": 0.0061,
+        "eq_sharpe": 0.8548,
+        "wgt_sharpe": 0.9255,
+        "max_drawdown": 0.0124,
+        "trades": 0,
+        "win_rate": 0.0
+      },
+      "2025_H2": {
+        "period": "2025-07-01 to 2025-12-31",
+        "eq_return": 0.0036,
+        "wgt_return": 0.0038,
+        "eq_sharpe": 1.2209,
+        "wgt_sharpe": 1.2393,
+        "max_drawdown": 0.0071,
+        "trades": 2,
+        "win_rate": 0.5
+      }
+    }
+  },
+  "comparison": {
+    "metric_comparison": {
+      "total_return_5yr": {
+        "strategy": "0.85%",
+        "spy": "100.64%",
+        "winner": "SPY",
+        "difference": "-99.79%"
+      },
+      "annualized_return": {
+        "strategy": "0.21%",
+        "spy": "14.83%",
+        "winner": "SPY",
+        "difference": "-14.62%"
+      },
+      "sharpe_ratio": {
+        "strategy": "0.887",
+        "spy": "0.510",
+        "winner": "Strategy",
+        "difference": "0.377"
+      },
+      "max_drawdown": {
+        "strategy": "1.94%",
+        "spy": "33.72%",
+        "winner": "Strategy",
+        "note": "Lower is better"
+      },
+      "calmar_ratio": {
+        "strategy": "0.109",
+        "spy": "0.440",
+        "winner": "SPY"
+      }
+    },
+    "absolute_verdict": {
+      "result": "SPY BEATS STRATEGY",
+      "margin": "99.79%",
+      "explanation": "SPY returned 100.64% vs Strategy's 0.85%"
+    },
+    "risk_adjusted_verdict": {
+      "result": "STRATEGY BEATS SPY (Risk-Adjusted)",
+      "sharpe_advantage": "0.377",
+      "explanation": "Strategy Sharpe 0.887 vs SPY Sharpe 0.510"
+    },
+    "overall_recommendation": null,
+    "drawdown_comparison": {
+      "strategy_max_dd": "1.94%",
+      "spy_max_dd": "33.72%",
+      "user_tolerance": "5-8%",
+      "strategy_within_tolerance": true,
+      "spy_within_tolerance": false
+    }
+  },
+  "micro_capital": {
+    "capital_tested": 2000,
+    "allocations": {
+      "conservative": {
+        "capital": 2000,
+        "positions": {
+          "IWM": {
+            "target_allocation": 1200.0,
+            "shares": 5,
+            "actual_value": 1125.0,
+            "price_per_share": 225.0
+          },
+          "XLF": {
+            "target_allocation": 800.0,
+            "shares": 16,
+            "actual_value": 768.0,
+            "price_per_share": 48.0
+          }
+        },
+        "total_invested": 1893.0,
+        "cash_remainder": 107.0,
+        "utilization": 0.9465,
+        "commission_analysis": {
+          "IWM": {
+            "shares": 5,
+            "commission": 0.35,
+            "pct_of_trade": 0.031111111111111107,
+            "roundtrip_cost_pct": 0.062222222222222213
+          },
+          "XLF": {
+            "shares": 16,
+            "commission": 0.35,
+            "pct_of_trade": 0.045572916666666664,
+            "roundtrip_cost_pct": 0.09114583333333333
+          }
+        },
+        "avg_roundtrip_cost_pct": 0.07668402777777777,
+        "backtest_assumed_cost_pct": 0.1,
+        "cost_multiplier_vs_backtest": 0.7668402777777777
+      },
+      "concentrated": {
+        "capital": 2000,
+        "positions": {
+          "IWM": {
+            "target_allocation": 2000.0,
+            "shares": 8,
+            "actual_value": 1800.0,
+            "price_per_share": 225.0
+          }
+        },
+        "total_invested": 1800.0,
+        "cash_remainder": 200.0,
+        "utilization": 0.9,
+        "commission_analysis": {
+          "IWM": {
+            "shares": 8,
+            "commission": 0.35,
+            "pct_of_trade": 0.019444444444444445,
+            "roundtrip_cost_pct": 0.03888888888888889
+          }
+        },
+        "avg_roundtrip_cost_pct": 0.03888888888888889,
+        "backtest_assumed_cost_pct": 0.1,
+        "cost_multiplier_vs_backtest": 0.3888888888888889
+      }
+    },
+    "minimum_viable_capital": 2250.0,
+    "recommended_capital": 4500.0,
+    "prices_used": {
+      "IWM": 225.0,
+      "XLF": 48.0,
+      "SPY": 590.0,
+      "QQQ": 520.0,
+      "XLK": 230.0
+    },
+    "feasibility_verdict": false
+  },
+  "recommendation": {
+    "verdict": "PAPER TRADE FIRST",
+    "confidence": "Low-Medium",
+    "minimum_capital": 4500.0,
+    "expected_performance": {
+      "backtest_annual_return": "0.21%",
+      "optimistic_live": "0.17%",
+      "realistic_live": "0.13%",
+      "conservative_live": "0.08%",
+      "note": "Live trading typically underperforms backtest by 20-60%"
+    },
+    "risks": [
+      "Strategy shows high variance across time periods (Sharpe std > 1.3)",
+      "Only 5-6 out of 8 walk-forward folds were profitable",
+      "Current backtest period may not represent future conditions",
+      "Small capital amplifies transaction cost impact",
+      "Limited diversification with single-asset (IWM) concentration"
+    ],
+    "mitigations": [
+      "Start with paper trading for 3-6 months to verify signals",
+      "Use larger capital ($5K+) to reduce transaction cost drag",
+      "Implement strict position sizing (max 2% risk per trade)",
+      "Monitor for regime changes that invalidate model",
+      "Set monthly review checkpoints to evaluate performance"
+    ],
+    "action_items": [
+      "1. Investigate why strategy underperforms SPY",
+      "2. Consider alternative feature engineering",
+      "3. Test different asset allocation strategies",
+      "4. Evaluate longer training periods",
+      "5. Compare against other benchmarks (QQQ, IWM itself)"
+    ],
+    "recommended_capital": 9000.0,
+    "dollar_expectations": {
+      "starting_capital": "$2,000",
+      "expected_annual_pnl_optimistic": "$3",
+      "expected_annual_pnl_realistic": "$3",
+      "expected_annual_pnl_conservative": "$2",
+      "is_worth_effort": false
+    }
+  }
+}

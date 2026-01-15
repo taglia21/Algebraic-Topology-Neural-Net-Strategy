@@ -1,0 +1,137 @@
+================================================================================
+QQQ PERFORMANCE DIAGNOSTIC REPORT
+Generated: 2026-01-15 00:20:43
+================================================================================
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+
+RECOMMENDATION: MODIFY
+Confidence: 60%
+
+Rationale:
+  • QQQ has negative Sharpe (-1.05) in neutral conditions
+  • QQQ volatility (23.7%) is >30% higher than SPY (18.0%)
+  • QQQ highly correlated with SPY (0.96) - limited diversification benefit
+  • QQQ shows promise in favorable conditions (Sharpe=4.00)
+
+Specific Actions:
+  → Trade QQQ only in FAVORABLE conditions
+  → Increase RSI filter stringency for QQQ (oversold=40, overbought=60)
+  → Reduce QQQ position size multiplier to 0.5x
+  → If still underperforms after 6 months, REMOVE
+
+================================================================================
+SECTION 1: REGIME-LEVEL PERFORMANCE ANALYSIS
+================================================================================
+
+1.1 Trading Condition Breakdown (QQQ vs SPY vs IWM)
+------------------------------------------------------------
+Condition       Ticker   Days     %Days    MeanRet%   Sharpe  
+------------------------------------------------------------
+favorable       QQQ      486      48.5     0.2297     4.00    
+favorable       SPY      504      50.3     0.1498     3.54    
+favorable       IWM      312      31.1     0.2280     3.07    
+
+neutral         QQQ      250      25.0     -0.1031    -1.05   
+neutral         SPY      213      21.3     -0.0294    -0.40   
+neutral         IWM      444      44.3     -0.0710    -0.83   
+
+unfavorable     QQQ      56       5.6      0.0730     0.48    
+unfavorable     SPY      75       7.5      -0.0376    -0.31   
+unfavorable     IWM      36       3.6      0.0564     0.38    
+
+
+1.2 Market Regime Breakdown
+------------------------------------------------------------
+Regime       Ticker   Days     %Days    Sharpe  
+------------------------------------------------------------
+bull         QQQ      490      48.9     4.13    
+bull         SPY      495      49.4     4.09    
+bull         IWM      301      30.0     2.74    
+
+bear         QQQ      32       3.2      -1.55   
+bear         SPY      21       2.1      0.23    
+bear         IWM      74       7.4      -1.36   
+
+sideways     QQQ      270      26.9     -0.77   
+sideways     SPY      276      27.5     -0.77   
+sideways     IWM      417      41.6     -0.25   
+
+
+================================================================================
+SECTION 2: TRADE QUALITY ANALYSIS
+================================================================================
+
+2.1 Trade Metrics Comparison
+------------------------------------------------------------
+Metric               QQQ          SPY          IWM         
+------------------------------------------------------------
+Total Trades         N/A          N/A          N/A         
+Win Rate %           N/A          N/A          N/A         
+Avg Win %            N/A          N/A          N/A         
+Avg Loss %           N/A          N/A          N/A         
+Profit Factor        N/A          N/A          N/A         
+Expectancy %         N/A          N/A          N/A         
+
+================================================================================
+SECTION 3: SIGNAL QUALITY ANALYSIS
+================================================================================
+
+3.1 NN Signal Distribution
+------------------------------------------------------------
+Metric               QQQ          SPY         
+------------------------------------------------------------
+Mean Signal          N/A          0.51        
+Std Signal           N/A          0.11        
+Buy Signals %        N/A          38.12       
+Sell Signals %       N/A          37.72       
+Neutral %            N/A          24.15       
+
+================================================================================
+SECTION 4: VOLATILITY STRUCTURE ANALYSIS
+================================================================================
+
+4.1 Volatility Metrics
+------------------------------------------------------------
+Metric                    QQQ          SPY          IWM         
+------------------------------------------------------------
+Annualized Vol %          23.69        18.02        23.16       
+Avg ATR %                 1.86         1.39         1.99        
+Vol of Vol                0.44         0.50         0.30        
+Max Daily Move %          12.00        10.50        8.50        
+Days >2% Move             157          69           146         
+
+================================================================================
+SECTION 5: CORRELATION ANALYSIS
+================================================================================
+
+5.1 Return Correlation Matrix
+------------------------------------------------------------
+             SPY     QQQ     IWM     XLF     XLK
+SPY         1.00    0.96    0.86    0.83    0.93
+QQQ         0.96    1.00    0.79    0.69    0.97
+IWM         0.86    0.79    1.00    0.80    0.75
+XLF         0.83    0.69    0.80    1.00    0.65
+XLK         0.93    0.97    0.75    0.65    1.00
+
+Correlation Insights:
+  • QQQ-SPY correlation: 0.96 (>0.9 = high overlap)
+  • QQQ-XLK correlation: 0.97 (tech sector overlap)
+
+================================================================================
+CONCLUSION & NEXT STEPS
+================================================================================
+
+Final Recommendation: MODIFY
+
+Next Steps:
+  1. Trade QQQ only in FAVORABLE conditions
+  2. Increase RSI filter stringency for QQQ (oversold=40, overbought=60)
+  3. Reduce QQQ position size multiplier to 0.5x
+  4. If still underperforms after 6 months, REMOVE
+
+================================================================================
+END OF REPORT
+================================================================================

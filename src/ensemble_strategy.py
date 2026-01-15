@@ -5,6 +5,11 @@ Version 4.0: Multi-asset support with risk management framework.
 - ATR-based stop-losses with min/max bounds  
 - Take-profit targets based on risk-reward ratio
 - Portfolio heat limits
+
+Version 5.0 (Iteration 2): Regime-Aware Trading
+- Integrated MarketRegimeDetector for trading condition assessment
+- Volatility-adaptive position sizing
+- Trading condition filtering (FAVORABLE/NEUTRAL/UNFAVORABLE)
 """
 
 import csv
@@ -15,6 +20,7 @@ import backtrader as bt
 
 from src.risk_management import RiskManager, TradeJournal, calculate_atr
 from src.signal_filters import SignalFilter
+from src.regime_detector import MarketRegimeDetector, TradingCondition, Regime, VolatilityState
 
 
 class EnsembleStrategy(bt.Strategy):
@@ -61,6 +67,10 @@ class EnsembleStrategy(bt.Strategy):
         ('rsi_oversold', 45),            # Buy below this RSI (relaxed from 35)
         ('rsi_overbought', 55),          # Sell above this RSI (relaxed from 65)
         ('vol_threshold', 0.35),         # Pause if vol > 35% (relaxed from 30%)
+        # V5.0: Regime-Aware Trading Parameters
+        ('use_regime_detection', True), # Enable regime-based trading adjustment
+        ('skip_unfavorable', True),     # Skip trades in UNFAVORABLE conditions
+        ('regime_detector', None),      # External MarketRegimeDetector instance
         # Logging
         ('verbose', False),
         ('diagnostic_csv_path', '/workspaces/Algebraic-Topology-Neural-Net-Strategy/results/signal_diagnostics.csv'),
@@ -123,6 +133,25 @@ class EnsembleStrategy(bt.Strategy):
         else:
             self.signal_filter = None
         
+        # V5.0: Regime Detection Initialization
+        if self.params.use_regime_detection:
+            if self.params.regime_detector is not None:
+                self.regime_detector = self.params.regime_detector
+            else:
+                self.regime_detector = MarketRegimeDetector()
+        else:
+            self.regime_detector = None
+        
+        # V5.0: Regime tracking statistics
+        self.regime_stats = {
+            'FAVORABLE': 0,
+            'NEUTRAL': 0,
+            'UNFAVORABLE': 0,
+            'UNFAVORABLE_SKIPPED': 0,
+            'regime_adjusted_signals': 0,
+        }
+        self.last_regime_result = None
+        
         # Diagnostic tracking
         self.diagnostic_counts = {
             'ALREADY_POSITIONED': 0,
@@ -137,6 +166,7 @@ class EnsembleStrategy(bt.Strategy):
             'ORDER_PENDING': 0,
             'RSI_FILTERED': 0,           # V4.1: RSI filter blocked
             'VOLATILITY_FILTERED': 0,    # V4.1: Volatility filter blocked
+            'REGIME_UNFAVORABLE': 0,     # V5.0: Regime condition blocked
         }
         
         # CSV logging setup
@@ -458,6 +488,17 @@ class EnsembleStrategy(bt.Strategy):
         if self.risk_manager:
             risk_stats = self.risk_manager.get_risk_metrics(self.open_positions)
         
+        # V5.0: Include regime statistics
+        regime_info = {}
+        if hasattr(self, 'regime_stats'):
+            regime_info = {
+                'regime_favorable_count': self.regime_stats.get('FAVORABLE', 0),
+                'regime_neutral_count': self.regime_stats.get('NEUTRAL', 0),
+                'regime_unfavorable_count': self.regime_stats.get('UNFAVORABLE', 0),
+                'regime_skipped_trades': self.regime_stats.get('UNFAVORABLE_SKIPPED', 0),
+                'regime_adjusted_signals': self.regime_stats.get('regime_adjusted_signals', 0),
+            }
+        
         return {
             'num_stopped_out': self.num_stopped_out,
             'num_take_profit_hits': self.num_take_profit_hits,
@@ -465,7 +506,8 @@ class EnsembleStrategy(bt.Strategy):
             'open_positions_count': len(self.open_positions),
             'account_balance': self.account_balance,
             **journal_stats,
-            **risk_stats
+            **risk_stats,
+            **regime_info
         }
 
     def notify_order(self, order):
@@ -517,29 +559,54 @@ class EnsembleStrategy(bt.Strategy):
         turbulence = self._get_turbulence_index()
         regime_multiplier = self._calculate_position_scale(turbulence)
         
+        # V5.0: Detect current market regime
+        trading_condition, regime_size_mult, threshold_adj = self._detect_regime()
+        
+        # Apply regime-based threshold adjustment
+        adjusted_buy_threshold = self.params.nn_buy_threshold + threshold_adj
+        adjusted_sell_threshold = self.params.nn_sell_threshold - threshold_adj
+        
         cash = self.broker.getcash()
         price = self.data.close[0]
         
+        # V5.0: Check for UNFAVORABLE regime condition before trading
+        if self.params.use_regime_detection and self.params.skip_unfavorable:
+            if trading_condition == TradingCondition.UNFAVORABLE and not has_position:
+                # Skip new trades in unfavorable conditions
+                self.regime_stats['UNFAVORABLE_SKIPPED'] += 1
+                self._log_diagnostic(
+                    current_date, nn_signal, turbulence, regime_multiplier,
+                    False, 'REGIME_UNFAVORABLE', 0.0, portfolio_value
+                )
+                return
+        
         # V4.0: Use risk-aware position sizing if enabled
         if self.params.use_risk_management and self.risk_manager is not None:
-            # Use generate_signal for risk-aware sizing
+            # Use generate_signal for risk-aware sizing with regime multiplier
             signal_result = self.generate_signal()
-            potential_size = signal_result.get('position_size', 0)
+            base_size = signal_result.get('position_size', 0)
+            # Apply regime-based size adjustment
+            potential_size = int(base_size * regime_size_mult)
             stop_loss = signal_result.get('stop_loss', price * 0.97)
             take_profit = signal_result.get('take_profit', price * 1.06)
+            
+            # Track regime adjustment
+            if regime_size_mult != 1.0:
+                self.regime_stats['regime_adjusted_signals'] += 1
         else:
-            # Fallback to simple position sizing
+            # Fallback to simple position sizing with regime adjustment
             position_pct = self._compute_position_size_pct(nn_signal)
-            potential_position_value = cash * position_pct * regime_multiplier
+            potential_position_value = cash * position_pct * regime_multiplier * regime_size_mult
             potential_size = int(potential_position_value / price) if price > 0 else 0
             stop_loss = price * 0.97
             take_profit = price * 1.06
         
-        # Execute trading logic with diagnostic logging
+        # Execute trading logic with regime-adjusted thresholds
         self._execute_trading_logic_with_risk(
             nn_signal, turbulence, regime_multiplier,
             has_position, current_date, portfolio_value,
-            potential_size, cash, price, stop_loss, take_profit
+            potential_size, cash, price, stop_loss, take_profit,
+            adjusted_buy_threshold, adjusted_sell_threshold
         )
 
     def _update_history(self):
@@ -604,6 +671,48 @@ class EnsembleStrategy(bt.Strategy):
             
         except Exception:
             return 0.5
+
+    def _detect_regime(self) -> tuple:
+        """
+        Detect current market regime using MarketRegimeDetector.
+        
+        V5.0: Returns trading condition and adjustment factors.
+        
+        Returns:
+            Tuple of (TradingCondition, position_size_multiplier, signal_threshold_adjustment)
+        """
+        if self.regime_detector is None or len(self.price_history) < 210:
+            # Not enough data for regime detection
+            return TradingCondition.NEUTRAL, 1.0, 0.0
+        
+        try:
+            # Build DataFrame from price history
+            ohlcv_df = pd.DataFrame(self.price_history[-210:])
+            close_series = ohlcv_df['close']
+            
+            # Detect regime
+            regime_result = self.regime_detector.detect_regime(
+                price_series=close_series,
+                df=ohlcv_df
+            )
+            
+            # Store for reference
+            self.last_regime_result = regime_result
+            
+            # Update statistics
+            condition_name = regime_result.trading_condition.value.upper()
+            if condition_name in self.regime_stats:
+                self.regime_stats[condition_name] = self.regime_stats.get(condition_name, 0) + 1
+            
+            return (
+                regime_result.trading_condition,
+                regime_result.position_size_multiplier,
+                regime_result.signal_threshold_adjustment
+            )
+            
+        except Exception as e:
+            self.log(f'Regime detection error: {e}')
+            return TradingCondition.NEUTRAL, 1.0, 0.0
 
     def _calculate_position_scale(self, turbulence: float) -> float:
         """Scale position size inversely to turbulence (high turbulence = smaller position)."""
@@ -677,8 +786,17 @@ class EnsembleStrategy(bt.Strategy):
                                           regime_multiplier: float, has_position: bool,
                                           current_date, portfolio_value: float,
                                           potential_size: int, cash: float, price: float,
-                                          stop_loss: float, take_profit: float):
-        """Execute buy/sell logic with risk management integration."""
+                                          stop_loss: float, take_profit: float,
+                                          buy_threshold: float = None, sell_threshold: float = None):
+        """Execute buy/sell logic with risk management integration.
+        
+        V5.0: Accepts regime-adjusted buy/sell thresholds.
+        """
+        # Use adjusted thresholds or defaults
+        if buy_threshold is None:
+            buy_threshold = self.params.nn_buy_threshold
+        if sell_threshold is None:
+            sell_threshold = self.params.nn_sell_threshold
         
         position_value = potential_size * price if potential_size > 0 else 0.0
         
@@ -716,11 +834,11 @@ class EnsembleStrategy(bt.Strategy):
                     del self.open_positions[self.ticker]
                 return
             
-            # Check for NN sell signal
-            if nn_signal < self.params.nn_sell_threshold:
+            # Check for NN sell signal (using regime-adjusted threshold)
+            if nn_signal < sell_threshold:
                 self.order = self.close()
                 self.num_trades += 1
-                self.log(f'SELL SIGNAL: {nn_signal:.3f}')
+                self.log(f'SELL SIGNAL: {nn_signal:.3f} < threshold {sell_threshold:.3f}')
                 self._log_diagnostic(
                     current_date, nn_signal, turbulence, regime_multiplier,
                     True, 'TRADE_EXECUTED_SELL', position_value, portfolio_value
@@ -735,8 +853,8 @@ class EnsembleStrategy(bt.Strategy):
                     True, 'ALREADY_POSITIONED', position_value, portfolio_value
                 )
         else:
-            # Not in position - check for buy signal
-            if nn_signal > self.params.nn_buy_threshold:
+            # Not in position - check for buy signal (using regime-adjusted threshold)
+            if nn_signal > buy_threshold:
                 # V4.1: Apply signal quality filter before buying
                 signal_passes_filter = True
                 filter_reason = None

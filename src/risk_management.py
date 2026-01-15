@@ -37,6 +37,7 @@ class RiskManager:
     - Portfolio Heat = sum(position_risk) / account_balance
     
     OPTIMIZED V1.1: Half-Kelly (0.50) + 15% position cap for 60%+ win rate strategies
+    V2.0: Added volatility-adaptive position sizing for Iteration 2
     """
 
     # Constants for risk limits - OPTIMIZED for strong win rates
@@ -44,12 +45,18 @@ class RiskManager:
     MIN_STOP_DISTANCE_PCT = 0.015  # Minimum 1.5% stop distance
     MAX_STOP_DISTANCE_PCT = 0.04  # Maximum 4% stop distance
     DEFAULT_KELLY_FRACTION = 0.50  # Half-Kelly (industry standard for 60%+ win rates)
+    
+    # V2.0: Volatility-adaptive sizing constants
+    MIN_VOL_ADJUSTMENT = 0.5  # Minimum position size multiplier
+    MAX_VOL_ADJUSTMENT = 1.5  # Maximum position size multiplier
 
     def __init__(
         self,
         initial_capital: float = 100000.0,
         risk_per_trade: float = 0.01,
-        log_path: str = '/workspaces/Algebraic-Topology-Neural-Net-Strategy/results/risk_log.csv'
+        log_path: str = '/workspaces/Algebraic-Topology-Neural-Net-Strategy/results/risk_log.csv',
+        use_volatility_scaling: bool = True,
+        target_volatility: float = None
     ):
         """
         Initialize RiskManager with capital and risk parameters.
@@ -58,11 +65,18 @@ class RiskManager:
             initial_capital: Starting account balance
             risk_per_trade: Maximum risk per trade as fraction of account (default 1%)
             log_path: Path to save risk calculations log
+            use_volatility_scaling: Enable volatility-adaptive position sizing (V2.0)
+            target_volatility: Target volatility level (if None, uses historical median)
         """
         self.initial_capital = initial_capital
         self.account_balance = initial_capital
         self.risk_per_trade = risk_per_trade
         self.log_path = log_path
+        
+        # V2.0: Volatility-adaptive sizing parameters
+        self.use_volatility_scaling = use_volatility_scaling
+        self.target_volatility = target_volatility
+        self.volatility_history: List[float] = []
         
         # Kelly parameters (updated from trade history)
         # Default to Half-Kelly (0.50) assumptions:
@@ -137,6 +151,60 @@ class RiskManager:
         # Constrain to reasonable range
         return max(0.0, min(0.5, kelly))
 
+    def update_volatility_history(self, current_volatility: float):
+        """
+        Track volatility history for adaptive sizing.
+        
+        Args:
+            current_volatility: Current volatility (ATR or annualized std dev)
+        """
+        self.volatility_history.append(current_volatility)
+        # Keep last 252 trading days (1 year)
+        if len(self.volatility_history) > 252:
+            self.volatility_history = self.volatility_history[-252:]
+        
+        # Auto-calculate target volatility as historical median if not set
+        if self.target_volatility is None and len(self.volatility_history) >= 20:
+            self.target_volatility = np.median(self.volatility_history)
+
+    def calculate_volatility_adjustment(self, current_volatility: float) -> float:
+        """
+        Calculate position size multiplier based on current vs target volatility.
+        
+        V2.0: Inverse scaling - reduce size in high volatility, increase in low volatility.
+        
+        Formula: adjustment = target_vol / current_vol
+        - High vol (current > target): adjustment < 1.0 → smaller positions
+        - Low vol (current < target): adjustment > 1.0 → larger positions
+        - Capped between MIN_VOL_ADJUSTMENT (0.5) and MAX_VOL_ADJUSTMENT (1.5)
+        
+        Args:
+            current_volatility: Current volatility measure
+            
+        Returns:
+            Position size multiplier (0.5 to 1.5)
+        """
+        if not self.use_volatility_scaling:
+            return 1.0
+        
+        # Need target volatility for scaling
+        if self.target_volatility is None or self.target_volatility <= 0:
+            return 1.0
+        
+        if current_volatility <= 0:
+            return 1.0
+        
+        # Inverse scaling: higher vol → smaller position
+        raw_adjustment = self.target_volatility / current_volatility
+        
+        # Clamp to safe range
+        adjustment = max(self.MIN_VOL_ADJUSTMENT, min(self.MAX_VOL_ADJUSTMENT, raw_adjustment))
+        
+        logger.debug(f"Vol adjustment: target={self.target_volatility:.4f}, "
+                    f"current={current_volatility:.4f}, adjustment={adjustment:.2f}")
+        
+        return adjustment
+
     def calculate_position_size(
         self,
         account_balance: float,
@@ -144,16 +212,20 @@ class RiskManager:
         entry_price: float,
         stop_price: float,
         volatility: float = 0.0,
-        ticker: str = ''
+        ticker: str = '',
+        regime_multiplier: float = 1.0
     ) -> int:
         """
-        Calculate position size using Fractional Kelly Criterion.
+        Calculate position size using Fractional Kelly Criterion with volatility adjustment.
+        
+        V2.0: Adds volatility-adaptive sizing and regime multiplier integration.
         
         Formula:
         - kelly_fraction = (win_rate * avg_win - loss_rate * avg_loss) / avg_win
-        - position_value = balance * kelly_fraction * 0.25
-        - position_size = position_value / abs(entry - stop)
-        - Hard cap at 10% of account per position
+        - vol_adjustment = target_vol / current_vol (capped 0.5 - 1.5)
+        - regime_multiplier = from regime detector (0.0 - 1.25)
+        - position_value = balance * kelly_fraction * vol_adjustment * regime_multiplier
+        - Hard cap at 15% of account per position
         
         Args:
             account_balance: Current account balance
@@ -162,6 +234,7 @@ class RiskManager:
             stop_price: Stop-loss price
             volatility: Volatility measure (ATR or similar)
             ticker: Ticker symbol for logging
+            regime_multiplier: Position size multiplier from regime detector (default 1.0)
             
         Returns:
             Number of shares to buy (integer)
@@ -181,6 +254,11 @@ class RiskManager:
                                  entry_price=entry_price, stop_price=stop_price)
             return 0
         
+        # V2.0: Update volatility history and get adjustment
+        if volatility > 0:
+            self.update_volatility_history(volatility)
+        vol_adjustment = self.calculate_volatility_adjustment(volatility)
+        
         # Fractional Kelly sizing (use computed kelly_fraction, capped at DEFAULT_KELLY_FRACTION)
         # kelly_fraction already incorporates the half-kelly cap from initialization
         kelly_position_value = account_balance * self.kelly_fraction
@@ -189,12 +267,15 @@ class RiskManager:
         fixed_risk_value = account_balance * risk_per_trade
         
         # Use the more conservative of Kelly-based or fixed risk
-        position_risk_value = min(kelly_position_value, fixed_risk_value)
+        base_position_value = min(kelly_position_value, fixed_risk_value)
+        
+        # V2.0: Apply volatility adjustment and regime multiplier
+        position_risk_value = base_position_value * vol_adjustment * regime_multiplier
         
         # Calculate shares based on risk
         shares = int(position_risk_value / risk_per_share)
         
-        # Enforce max position size (10% of account)
+        # Enforce max position size (15% of account)
         max_shares = int((account_balance * self.MAX_POSITION_PCT) / entry_price)
         shares = min(shares, max_shares)
         
@@ -206,7 +287,7 @@ class RiskManager:
         position_value = shares * entry_price
         risk_amount = shares * risk_per_share
         
-        # Log the calculation
+        # Log the calculation with V2.0 fields
         self._log_calculation(
             'position_size', ticker,
             account_balance=account_balance,

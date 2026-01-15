@@ -7,6 +7,11 @@ Uses technical indicators:
 - Moving averages (50-day, 200-day)
 - ATR for volatility
 - RSI for momentum
+
+V2.0: Added TradingCondition classification for Iteration 2 optimization
+- FAVORABLE: Trade normally
+- NEUTRAL: Require stronger signals
+- UNFAVORABLE: Skip trades or reduce position size
 """
 
 import numpy as np
@@ -34,17 +39,34 @@ class VolatilityState(Enum):
     NORMAL = "normal_vol"
 
 
+class TradingCondition(Enum):
+    """Trading condition based on regime + volatility combination.
+    
+    FAVORABLE: Low volatility trending market - trade normally
+    NEUTRAL: Mixed conditions - require stronger signals
+    UNFAVORABLE: High volatility or choppy - reduce/skip trades
+    """
+    FAVORABLE = "favorable"
+    NEUTRAL = "neutral"
+    UNFAVORABLE = "unfavorable"
+
+
 @dataclass
 class RegimeResult:
     """Result of regime detection."""
     regime: Regime
     volatility: VolatilityState
+    trading_condition: TradingCondition  # V2.0: Added trading condition
     confidence: float
     ma_50: float
     ma_200: float
     atr_14: float
     rsi_14: float
     details: Dict
+    
+    # V2.0: Trading adjustment factors
+    position_size_multiplier: float = 1.0  # Multiply position size by this
+    signal_threshold_adjustment: float = 0.0  # Add to buy threshold, subtract from sell
 
 
 class MarketRegimeDetector:
@@ -151,9 +173,12 @@ class MarketRegimeDetector:
             return RegimeResult(
                 regime=Regime.SIDEWAYS,
                 volatility=VolatilityState.NORMAL,
+                trading_condition=TradingCondition.NEUTRAL,
                 confidence=0.0,
                 ma_50=0, ma_200=0, atr_14=0, rsi_14=50,
-                details={'error': 'Insufficient data'}
+                details={'error': 'Insufficient data'},
+                position_size_multiplier=0.5,
+                signal_threshold_adjustment=0.02
             )
         
         # Calculate indicators
@@ -185,12 +210,18 @@ class MarketRegimeDetector:
             atr_14, atr_rolling_avg
         )
         
+        # V2.0: Classify trading condition and get adjustment factors
+        trading_condition, size_mult, threshold_adj = self._classify_trading_condition(
+            regime, volatility, regime_confidence, vol_confidence
+        )
+        
         # Overall confidence
         confidence = (regime_confidence + vol_confidence) / 2
         
         return RegimeResult(
             regime=regime,
             volatility=volatility,
+            trading_condition=trading_condition,
             confidence=round(confidence, 4),
             ma_50=round(ma_50, 4),
             ma_200=round(ma_200, 4),
@@ -202,7 +233,9 @@ class MarketRegimeDetector:
                 'price_vs_ma200': round((current_price / ma_200 - 1) * 100, 2) if ma_200 > 0 else 0,
                 'ma50_vs_ma200': round((ma_50 / ma_200 - 1) * 100, 2) if ma_200 > 0 else 0,
                 'atr_ratio': round(atr_14 / atr_rolling_avg, 4) if atr_rolling_avg > 0 else 1.0
-            }
+            },
+            position_size_multiplier=size_mult,
+            signal_threshold_adjustment=threshold_adj
         )
     
     def _classify_regime(
@@ -235,6 +268,73 @@ class MarketRegimeDetector:
         
         # SIDEWAYS: all other cases
         return Regime.SIDEWAYS, 0.5
+    
+    def _classify_trading_condition(
+        self,
+        regime: Regime,
+        volatility: VolatilityState,
+        regime_confidence: float,
+        vol_confidence: float
+    ) -> Tuple[TradingCondition, float, float]:
+        """
+        Classify trading condition based on regime and volatility combination.
+        
+        V2.0: Implements regime-aware trading rules.
+        
+        Returns:
+            - TradingCondition: FAVORABLE, NEUTRAL, or UNFAVORABLE
+            - position_size_multiplier: 0.0 to 1.5
+            - signal_threshold_adjustment: -0.02 to +0.03
+        
+        Trading Rules:
+        - FAVORABLE: Bull + Low Vol, or clear trending with normal vol
+          → Trade normally: size_mult=1.0, threshold_adj=0.0
+        
+        - NEUTRAL: Sideways + Normal Vol, or mixed conditions
+          → Require stronger signals: size_mult=0.75, threshold_adj=+0.01
+        
+        - UNFAVORABLE: High Vol (any regime), or Bear + trending down strongly
+          → Skip or reduce: size_mult=0.5 or 0.0, threshold_adj=+0.02
+        """
+        
+        # High volatility is always unfavorable regardless of regime
+        if volatility == VolatilityState.HIGH:
+            # High vol during bear is worst - skip trades
+            if regime == Regime.BEAR:
+                return TradingCondition.UNFAVORABLE, 0.0, 0.03
+            # High vol during sideways - very cautious
+            elif regime == Regime.SIDEWAYS:
+                return TradingCondition.UNFAVORABLE, 0.25, 0.03
+            # High vol during bull - still trade but cautiously
+            else:
+                return TradingCondition.NEUTRAL, 0.5, 0.02
+        
+        # Low volatility is generally favorable
+        if volatility == VolatilityState.LOW:
+            if regime == Regime.BULL:
+                # Best condition: trending up with low volatility
+                return TradingCondition.FAVORABLE, 1.25, -0.01
+            elif regime == Regime.SIDEWAYS:
+                # Low vol sideways - okay for mean reversion
+                return TradingCondition.FAVORABLE, 1.0, 0.0
+            else:  # BEAR with low vol
+                # Still bearish but controlled - neutral
+                return TradingCondition.NEUTRAL, 0.75, 0.01
+        
+        # Normal volatility - depends on regime
+        if volatility == VolatilityState.NORMAL:
+            if regime == Regime.BULL:
+                # Good condition: clear uptrend
+                return TradingCondition.FAVORABLE, 1.0, 0.0
+            elif regime == Regime.BEAR:
+                # Bearish but not extreme - reduce exposure
+                return TradingCondition.NEUTRAL, 0.5, 0.02
+            else:  # SIDEWAYS
+                # Choppy market - be selective
+                return TradingCondition.NEUTRAL, 0.75, 0.01
+        
+        # Default fallback
+        return TradingCondition.NEUTRAL, 0.75, 0.01
     
     def _classify_volatility(
         self,

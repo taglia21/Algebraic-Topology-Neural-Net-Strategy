@@ -1,0 +1,30 @@
+================================================================================
+OPTIMIZATION ITERATION 2 COMPARISON REPORT
+Generated: 2026-01-15 00:09:24
+================================================================================
+
+Scenario: 2022-01-01 to 2023-12-31 → 2024-01-01 to 2025-12-31
+--------------------------------------------------------------------------------
+
+Portfolio (Equal Weight):
+  Sharpe (net): 0.94
+  Return (net): 0.83%
+  Max DD: 1.47%
+  Trades: 0
+
+Portfolio (Risk-Weighted):
+  Sharpe (net): 1.67
+  Return (net): 1.37%
+  Weights: {}
+
+Per-Asset:
+  SPY: Sharpe=1.23, Return=1.02%, Trades=6
+  QQQ: Sharpe=-0.79, Return=-1.06%, Trades=6
+  IWM: Sharpe=1.25, Return=2.40%, Trades=9
+  XLF: Sharpe=1.29, Return=0.85%, Trades=3
+  XLK: Sharpe=0.44, Return=0.96%, Trades=9
+
+Target Achievement:
+  Portfolio Sharpe > 1.5: ✓ (1.67)
+  4/5 assets Sharpe > 0.2: ✓ (4/5)
+  Max DD < 5%: ✓ (1.47%)

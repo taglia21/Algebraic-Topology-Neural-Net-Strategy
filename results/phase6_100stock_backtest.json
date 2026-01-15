@@ -1,0 +1,28 @@
+{
+  "phase": 6,
+  "universe_size": 100,
+  "n_positions": 30,
+  "period": {
+    "start": "2020-01-02",
+    "end": "2024-12-02"
+  },
+  "performance": {
+    "total_return_pct": 48.7,
+    "cagr_pct": 8.4,
+    "sharpe_ratio": 0.73,
+    "max_drawdown_pct": -17.7
+  },
+  "portfolio": {
+    "num_positions": 30,
+    "num_sectors": 6,
+    "sector_distribution": {
+      "Technology": 9,
+      "Healthcare": 4,
+      "Consumer Cyclical": 5,
+      "Industrial": 2,
+      "Consumer Defensive": 3,
+      "Financial": 7
+    }
+  },
+  "targets_met": {
+    "cagr_gt_17": 

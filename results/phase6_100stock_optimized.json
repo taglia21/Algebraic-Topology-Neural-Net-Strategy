@@ -1,0 +1,15 @@
+{
+  "phase": 6,
+  "universe_size": 100,
+  "n_positions": 30,
+  "period": "2021-01-04 to 2024-12-02",
+  "total_return_pct": 40.3,
+  "spy_return_pct": 72.7,
+  "alpha_pct": -32.4,
+  "cagr_pct": 9.1,
+  "sharpe_ratio": 0.7,
+  "max_drawdown_pct": -21.0,
+  "num_positions": 30,
+  "num_sectors": 6,
+  "total_trades": 646
+}

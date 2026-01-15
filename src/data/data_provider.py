@@ -495,6 +495,282 @@ def validate_provider(
     raise ValueError(f"Unknown provider: '{provider}'")
 
 
+# =============================================================================
+# Phase 6: Batch Download Functions for Large Universe
+# =============================================================================
+
+def fetch_universe_batch(
+    tickers: List[str],
+    start_date: str,
+    end_date: str,
+    provider: str = "polygon",
+    polygon_api_key_env: str = "POLYGON_API_KEY_OTREP",
+    rate_limit: float = 5.0,
+    use_cache: bool = True,
+    cache_dir: str = "./cache",
+    progress_callback: callable = None,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch OHLCV data for a batch of tickers with rate limiting and caching.
+    
+    Designed for Phase 6 universe expansion to handle 3000+ stocks efficiently.
+    
+    Args:
+        tickers: List of stock symbols
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        provider: Data provider ("polygon" or "yfinance")
+        polygon_api_key_env: Environment variable for Polygon API key
+        rate_limit: Max API calls per second
+        use_cache: Whether to use caching
+        cache_dir: Directory for cache storage
+        progress_callback: Optional callback(completed, total, ticker)
+        
+    Returns:
+        Dict mapping ticker to OHLCV DataFrame
+    """
+    import time
+    
+    results = {}
+    cached_count = 0
+    fetch_count = 0
+    failed = []
+    
+    # Initialize cache if enabled
+    cache = None
+    if use_cache:
+        try:
+            from .data_cache import get_data_cache
+            cache = get_data_cache(cache_dir)
+        except ImportError:
+            logger.warning("Cache module not available, fetching all data")
+    
+    call_interval = 1.0 / rate_limit
+    last_call_time = 0
+    
+    for i, ticker in enumerate(tickers):
+        # Check cache first
+        if cache:
+            cached = cache.get_ohlcv_data(ticker, start_date, end_date)
+            if cached is not None and len(cached) > 0:
+                results[ticker] = cached
+                cached_count += 1
+                if progress_callback:
+                    progress_callback(i + 1, len(tickers), ticker, 'cached')
+                continue
+        
+        # Rate limit
+        elapsed = time.time() - last_call_time
+        if elapsed < call_interval:
+            time.sleep(call_interval - elapsed)
+        
+        # Fetch from API
+        try:
+            df = get_ohlcv_data(
+                ticker=ticker,
+                start_date=start_date,
+                end_date=end_date,
+                timeframe="1d",
+                provider=provider,
+                polygon_api_key_env=polygon_api_key_env,
+            )
+            last_call_time = time.time()
+            
+            if df is not None and not df.empty:
+                results[ticker] = df
+                fetch_count += 1
+                
+                # Save to cache
+                if cache:
+                    cache.save_ohlcv_data(ticker, df, start_date, end_date)
+            else:
+                failed.append(ticker)
+                
+        except Exception as e:
+            logger.warning(f"Failed to fetch {ticker}: {e}")
+            failed.append(ticker)
+            last_call_time = time.time()
+        
+        # Progress callback
+        if progress_callback:
+            status = 'fetched' if ticker in results else 'failed'
+            progress_callback(i + 1, len(tickers), ticker, status)
+        
+        # Log progress every 100 tickers
+        if (i + 1) % 100 == 0:
+            logger.info(f"Progress: {i + 1}/{len(tickers)} ({cached_count} cached, {fetch_count} fetched, {len(failed)} failed)")
+    
+    logger.info(
+        f"Batch fetch complete: {len(results)}/{len(tickers)} successful "
+        f"({cached_count} cached, {fetch_count} fetched, {len(failed)} failed)"
+    )
+    
+    return results
+
+
+def fetch_universe_batch_parallel(
+    tickers: List[str],
+    start_date: str,
+    end_date: str,
+    provider: str = "yfinance",
+    max_workers: int = 4,
+    use_cache: bool = True,
+    cache_dir: str = "./cache",
+) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch OHLCV data for multiple tickers in parallel (yfinance only).
+    
+    Note: Polygon has strict rate limits, so parallel fetching is not recommended.
+    Use fetch_universe_batch for Polygon with rate limiting.
+    
+    Args:
+        tickers: List of stock symbols
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        provider: Data provider (recommend "yfinance" for parallel)
+        max_workers: Number of parallel workers
+        use_cache: Whether to use caching
+        cache_dir: Directory for cache storage
+        
+    Returns:
+        Dict mapping ticker to OHLCV DataFrame
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    results = {}
+    to_fetch = []
+    
+    # Check cache first
+    cache = None
+    if use_cache:
+        try:
+            from .data_cache import get_data_cache
+            cache = get_data_cache(cache_dir)
+            
+            for ticker in tickers:
+                cached = cache.get_ohlcv_data(ticker, start_date, end_date)
+                if cached is not None and len(cached) > 0:
+                    results[ticker] = cached
+                else:
+                    to_fetch.append(ticker)
+            
+            logger.info(f"Cache hit: {len(results)}/{len(tickers)}, fetching {len(to_fetch)}")
+        except ImportError:
+            to_fetch = tickers
+    else:
+        to_fetch = tickers
+    
+    if not to_fetch:
+        return results
+    
+    # Parallel fetch
+    def fetch_one(ticker: str) -> Tuple[str, Optional[pd.DataFrame]]:
+        try:
+            df = get_ohlcv_data(
+                ticker=ticker,
+                start_date=start_date,
+                end_date=end_date,
+                timeframe="1d",
+                provider=provider,
+            )
+            return (ticker, df if df is not None and not df.empty else None)
+        except Exception as e:
+            logger.warning(f"Failed to fetch {ticker}: {e}")
+            return (ticker, None)
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_one, t): t for t in to_fetch}
+        
+        completed = len(results)
+        for future in as_completed(futures):
+            ticker, df = future.result()
+            if df is not None:
+                results[ticker] = df
+                
+                # Save to cache
+                if cache:
+                    cache.save_ohlcv_data(ticker, df, start_date, end_date)
+            
+            completed += 1
+            if completed % 50 == 0:
+                logger.info(f"Progress: {completed}/{len(tickers)}")
+    
+    logger.info(f"Parallel fetch complete: {len(results)}/{len(tickers)} successful")
+    return results
+
+
+def compute_returns_batch(
+    ohlcv_dict: Dict[str, pd.DataFrame],
+    return_type: str = 'log',
+) -> Dict[str, np.ndarray]:
+    """
+    Compute returns for all tickers in a batch.
+    
+    Args:
+        ohlcv_dict: Dict mapping ticker to OHLCV DataFrame
+        return_type: 'log' for log returns, 'simple' for arithmetic returns
+        
+    Returns:
+        Dict mapping ticker to returns array
+    """
+    returns_dict = {}
+    
+    for ticker, df in ohlcv_dict.items():
+        try:
+            close = df['close'].values if 'close' in df.columns else df['Close'].values
+            
+            if return_type == 'log':
+                returns = np.diff(np.log(close + 1e-10))
+            else:
+                returns = np.diff(close) / close[:-1]
+            
+            returns_dict[ticker] = returns
+            
+        except Exception as e:
+            logger.warning(f"Failed to compute returns for {ticker}: {e}")
+    
+    return returns_dict
+
+
+def get_universe_statistics(
+    ohlcv_dict: Dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """
+    Compute basic statistics for all tickers in universe.
+    
+    Args:
+        ohlcv_dict: Dict mapping ticker to OHLCV DataFrame
+        
+    Returns:
+        DataFrame with statistics per ticker
+    """
+    stats = []
+    
+    for ticker, df in ohlcv_dict.items():
+        try:
+            close = df['close'].values if 'close' in df.columns else df['Close'].values
+            volume = df['volume'].values if 'volume' in df.columns else df['Volume'].values
+            
+            returns = np.diff(close) / close[:-1]
+            
+            stats.append({
+                'ticker': ticker,
+                'n_bars': len(df),
+                'start_date': str(df.index[0].date()),
+                'end_date': str(df.index[-1].date()),
+                'avg_price': np.mean(close),
+                'avg_volume': np.mean(volume),
+                'avg_dollar_volume': np.mean(close * volume),
+                'annualized_return': np.mean(returns) * 252,
+                'annualized_volatility': np.std(returns) * np.sqrt(252),
+                'sharpe_estimate': (np.mean(returns) * 252) / (np.std(returns) * np.sqrt(252) + 1e-10),
+            })
+        except Exception as e:
+            logger.warning(f"Failed to compute stats for {ticker}: {e}")
+    
+    return pd.DataFrame(stats)
+
+
 if __name__ == "__main__":
     # Quick test of both providers
     import sys

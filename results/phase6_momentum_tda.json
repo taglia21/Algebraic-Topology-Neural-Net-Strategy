@@ -1,0 +1,50 @@
+{
+  "phase": 6,
+  "strategy": "momentum_tda",
+  "universe_size": 100,
+  "n_positions": 20,
+  "period": {
+    "start": "2021-01-04",
+    "end": "2024-12-02"
+  },
+  "performance": {
+    "total_return_pct": 104.2,
+    "spy_return_pct": 72.7,
+    "alpha_pct": 31.5,
+    "cagr_pct": 20.0,
+    "sharpe_ratio": 1.2,
+    "max_drawdown_pct": -14.2
+  },
+  "trading": {
+    "total_trades": 462,
+    "avg_trades_per_month": 9.6
+  },
+  "holdings": {
+    "GE": 55,
+    "NVDA": 72,
+    "META": 16,
+    "AVGO": 60,
+    "AXP": 33,
+    "COST": 10,
+    "ISRG": 18,
+    "MMM": 76,
+    "GS": 16,
+    "BK": 126,
+    "RTX": 85,
+    "CAT": 25,
+    "ORCL": 55,
+    "WMT": 109,
+    "MS": 78,
+    "ABBV": 56,
+    "WFC": 135,
+    "PM": 79,
+    "COF": 54,
+    "JPM": 41
+  },
+  "targets_met": {
+    "cagr_gt_17": "True",
+    "sharpe_gt_1": "True",
+    "max_dd_lt_17": "True",
+    "beat_spy": "True"
+  }
+}

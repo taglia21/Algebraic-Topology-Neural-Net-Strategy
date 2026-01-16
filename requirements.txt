@@ -5,3 +5,9 @@ ccxt>=4.4.0
 pandas>=2.0.0
 numpy>=1.24.0
 scikit-learn>=1.5.0
+
+# Paper Trading Dependencies
+python-dotenv>=1.0.0
+schedule>=1.2.0
+yfinance>=0.2.0
+requests>=2.31.0

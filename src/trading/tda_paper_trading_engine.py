@@ -801,7 +801,7 @@ class TDAPaperTradingEngine:
         portfolio_value = account.equity
         
         # Get current positions
-        current_positions = self.client.get_all_positions()
+        current_positions = self.client.get_positions()
         current_symbols = {p.symbol for p in current_positions}
         
         # Compute target values
@@ -899,7 +899,7 @@ class TDAPaperTradingEngine:
         """Get current system status."""
         try:
             account = self.client.get_account()
-            positions = self.client.get_all_positions()
+            positions = self.client.get_positions()
             
             # Get current regime
             try:

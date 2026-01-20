@@ -81,7 +81,7 @@ class TDADeployment:
             if self.engine.health_check():
                 # Get account directly first
                 account = self.engine.client.get_account()
-                positions = self.engine.client.get_all_positions()
+                positions = self.engine.client.get_positions()
                 
                 print(f"\n✅ Connection SUCCESSFUL")
                 print(f"\nAccount Details:")

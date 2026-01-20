@@ -218,16 +218,16 @@ class TDAMarketAnalyzer:
         betti_1 = max(0, int((1 - fragmentation) * 5))  # Higher = more connected
         
         # Classify regime
-        if turbulence_index > 90:
+        if turbulence_index > 50:
             regime = MarketRegime.RISK_OFF
             confidence = 0.8
-        elif turbulence_index > 70:
+        elif turbulence_index > 30:
             regime = MarketRegime.BEAR
             confidence = 0.6
-        elif fragmentation > 0.7:
+        elif fragmentation > 0.6:
             regime = MarketRegime.NEUTRAL
             confidence = 0.5
-        elif fragmentation < 0.5 and turbulence_index < 40:
+        elif fragmentation < 0.3 and turbulence_index < 20:
             regime = MarketRegime.RISK_ON
             confidence = 0.8
         else:
@@ -492,10 +492,10 @@ class RiskManager:
         """Get multiplier based on TDA regime."""
         multipliers = {
             MarketRegime.RISK_ON: 1.0,
-            MarketRegime.BULL: 0.95,
-            MarketRegime.NEUTRAL: 0.85,
-            MarketRegime.BEAR: 0.65,
-            MarketRegime.RISK_OFF: 0.25,
+            MarketRegime.BULL: 0.85,
+            MarketRegime.NEUTRAL: 0.60,
+            MarketRegime.BEAR: 0.30,
+            MarketRegime.RISK_OFF: 0.10,
         }
         return multipliers.get(regime, 0.5)
     
@@ -549,9 +549,9 @@ class TDAPaperTradingEngine:
         self.risk_manager = RiskManager()
         
         # Configuration - Scaled for 700+ stock universe hedge fund
-        self.n_stocks = 50  # Hold 35 stocks for diversification with large universe
-        self.max_position_weight = 0.08  # 5% max per stock (more diversified)
-        self.leveraged_etf_weight = 0.30  # 20% to leveraged ETFs
+        self.n_stocks = 35  # Hold 35 stocks for diversification with large universe
+        self.max_position_weight = 0.05  # 5% max per stock (more diversified)
+        self.leveraged_etf_weight = 0.20  # 20% to leveraged ETFs
         self.stock_weight = 0.60  # 60% to individual stocks (more alpha from scanning 700+)
         self.cash_buffer = 0.05  # 5% cash buffer
         

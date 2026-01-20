@@ -79,19 +79,19 @@ class TDADeployment:
             self.engine = TDAPaperTradingEngine()
             
             if self.engine.health_check():
-                status = self.engine.get_status()
+                # Get account directly first
+                account = self.engine.client.get_account()
+                positions = self.engine.client.get_all_positions()
                 
                 print(f"\n✅ Connection SUCCESSFUL")
                 print(f"\nAccount Details:")
-                print(f"  Equity:      ${status['account']['equity']:,.2f}")
-                print(f"  Cash:        ${status['account']['cash']:,.2f}")
-                print(f"  Positions:   {len(status['positions'])}")
+                print(f"  Equity:      ${account.equity:,.2f}")
+                print(f"  Cash:        ${account.cash:,.2f}")
+                print(f"  Positions:   {len(positions)}")
                 
                 print(f"\nMarket Status:")
-                print(f"  Regime:      {status.get('regime', 'Unknown')}")
-                print(f"  Trend:       {status.get('trend', 'Unknown')}")
-                print(f"  VIX:         {status.get('vix', 0):.1f}")
-                print(f"  Drawdown:    {status.get('drawdown', 0):.2%}")
+                print(f"  (Market data loaded on first rebalance)")
+                print(f"  VIX:         Fetched at rebalance time")
                 
                 print(f"\nStrategy Configuration:")
                 print(f"  Stock Universe: {len(STOCK_UNIVERSE)} stocks")

@@ -114,89 +114,43 @@ class TradeRecord:
 
 
 # =============================================================================
-# UNIVERSE CONFIGURATION
+# UNIVERSE CONFIGURATION - FULL 700+ STOCK UNIVERSE
 # =============================================================================
 
-# Core stock universe - top liquid stocks across sectors
-STOCK_UNIVERSE = [
-    # Technology (20 stocks)
-    'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'META', 'AVGO', 'CSCO', 'ORCL',
-    'CRM', 'ACN', 'ADBE', 'AMD', 'INTC', 'QCOM', 'TXN', 'NOW',
-    'IBM', 'AMAT', 'MU', 'PANW',
-    
-    # Healthcare (10 stocks)
-    'UNH', 'JNJ', 'LLY', 'PFE', 'ABBV', 'MRK', 'TMO', 'ABT', 'DHR', 'ISRG',
-    
-    # Financials (10 stocks)
-    'JPM', 'V', 'MA', 'BAC', 'GS', 'MS', 'BLK', 'C', 'AXP', 'SCHW',
-    
-    # Consumer (10 stocks)
-    'AMZN', 'TSLA', 'HD', 'MCD', 'NKE', 'SBUX', 'COST', 'WMT', 'LOW', 'TGT',
-    
-    # Industrials (8 stocks)
-    'CAT', 'HON', 'UPS', 'RTX', 'GE', 'BA', 'DE', 'LMT',
-    
-    # Energy (6 stocks)
-    'XOM', 'CVX', 'COP', 'SLB', 'EOG', 'OXY',
-    
-    # Other (6 stocks)
-    'NEE', 'DUK', 'LIN', 'APD', 'NFLX', 'DIS',
-]
+# Import full universe from dedicated module
+try:
+    from src.trading.full_universe import (
+        FULL_UNIVERSE, SP500_TICKERS, MIDCAP_TICKERS, SMALLCAP_MOMENTUM,
+        ETFS, SECTOR_MAP, get_leveraged_bull_etfs, get_leveraged_bear_etfs,
+        UNIVERSE_SIZE
+    )
+    STOCK_UNIVERSE = FULL_UNIVERSE
+    logger.info(f"Loaded FULL UNIVERSE with {len(STOCK_UNIVERSE)} tradeable symbols!")
+except ImportError:
+    logger.warning("Full universe module not found, using minimal universe")
+    # Fallback minimal universe
+    STOCK_UNIVERSE = [
+        'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'META', 'AMZN', 'TSLA', 'AMD', 'AVGO', 'CRM',
+        'JPM', 'V', 'MA', 'BAC', 'GS', 'UNH', 'JNJ', 'LLY', 'PFE', 'ABBV',
+        'XOM', 'CVX', 'COP', 'CAT', 'HON', 'UPS', 'HD', 'MCD', 'COST', 'WMT',
+    ]
+    SECTOR_MAP = {}
 
-# Leveraged ETFs for amplification
+# Leveraged ETFs for amplification (3x)
 LEVERAGED_ETFS = {
-    'TQQQ': 0.50,  # Nasdaq 3x
-    'SPXL': 0.30,  # S&P 500 3x
+    'TQQQ': 0.35,  # Nasdaq 3x
+    'SPXL': 0.25,  # S&P 500 3x
     'SOXL': 0.20,  # Semiconductors 3x
+    'TECL': 0.10,  # Technology 3x
+    'FNGU': 0.10,  # FAANG 3x
 }
 
 INVERSE_ETFS = {
-    'SQQQ': 0.50,  # Nasdaq -3x
-    'SPXU': 0.30,  # S&P 500 -3x
+    'SQQQ': 0.35,  # Nasdaq -3x
+    'SPXU': 0.25,  # S&P 500 -3x
     'SOXS': 0.20,  # Semiconductors -3x
-}
-
-# Sector classification
-SECTOR_MAP = {
-    # Technology
-    'AAPL': 'Technology', 'MSFT': 'Technology', 'NVDA': 'Technology',
-    'GOOGL': 'Technology', 'META': 'Technology', 'AVGO': 'Technology',
-    'CSCO': 'Technology', 'ORCL': 'Technology', 'CRM': 'Technology',
-    'ACN': 'Technology', 'ADBE': 'Technology', 'AMD': 'Technology',
-    'INTC': 'Technology', 'QCOM': 'Technology', 'TXN': 'Technology',
-    'NOW': 'Technology', 'IBM': 'Technology', 'AMAT': 'Technology',
-    'MU': 'Technology', 'PANW': 'Technology',
-    
-    # Healthcare
-    'UNH': 'Healthcare', 'JNJ': 'Healthcare', 'LLY': 'Healthcare',
-    'PFE': 'Healthcare', 'ABBV': 'Healthcare', 'MRK': 'Healthcare',
-    'TMO': 'Healthcare', 'ABT': 'Healthcare', 'DHR': 'Healthcare',
-    'ISRG': 'Healthcare',
-    
-    # Financials
-    'JPM': 'Financials', 'V': 'Financials', 'MA': 'Financials',
-    'BAC': 'Financials', 'GS': 'Financials', 'MS': 'Financials',
-    'BLK': 'Financials', 'C': 'Financials', 'AXP': 'Financials',
-    'SCHW': 'Financials',
-    
-    # Consumer
-    'AMZN': 'Consumer', 'TSLA': 'Consumer', 'HD': 'Consumer',
-    'MCD': 'Consumer', 'NKE': 'Consumer', 'SBUX': 'Consumer',
-    'COST': 'Consumer', 'WMT': 'Consumer', 'LOW': 'Consumer',
-    'TGT': 'Consumer',
-    
-    # Industrials
-    'CAT': 'Industrials', 'HON': 'Industrials', 'UPS': 'Industrials',
-    'RTX': 'Industrials', 'GE': 'Industrials', 'BA': 'Industrials',
-    'DE': 'Industrials', 'LMT': 'Industrials',
-    
-    # Energy
-    'XOM': 'Energy', 'CVX': 'Energy', 'COP': 'Energy',
-    'SLB': 'Energy', 'EOG': 'Energy', 'OXY': 'Energy',
-    
-    # Other
-    'NEE': 'Utilities', 'DUK': 'Utilities', 'LIN': 'Materials',
-    'APD': 'Materials', 'NFLX': 'Communications', 'DIS': 'Communications',
+    'TECS': 0.10,  # Technology -3x
+    'FNGD': 0.10,  # FAANG -3x
 }
 
 
@@ -594,11 +548,11 @@ class TDAPaperTradingEngine:
         self.trend_analyzer = TrendAnalyzer()
         self.risk_manager = RiskManager()
         
-        # Configuration
-        self.n_stocks = 15  # Number of stocks to hold
-        self.max_position_weight = 0.08  # 8% max per stock
-        self.leveraged_etf_weight = 0.25  # 25% to leveraged ETFs
-        self.stock_weight = 0.50  # 50% to individual stocks
+        # Configuration - Scaled for 700+ stock universe hedge fund
+        self.n_stocks = 35  # Hold 35 stocks for diversification with large universe
+        self.max_position_weight = 0.05  # 5% max per stock (more diversified)
+        self.leveraged_etf_weight = 0.20  # 20% to leveraged ETFs
+        self.stock_weight = 0.60  # 60% to individual stocks (more alpha from scanning 700+)
         self.cash_buffer = 0.05  # 5% cash buffer
         
         # State
@@ -610,12 +564,20 @@ class TDAPaperTradingEngine:
         self.price_cache: Dict[str, pd.DataFrame] = {}
         self.cache_date: str = ""
         
-        logger.info("TDAPaperTradingEngine initialized")
-        logger.info(f"Universe: {len(STOCK_UNIVERSE)} stocks + {len(LEVERAGED_ETFS)} leveraged ETFs")
+        # Log universe size
+        logger.info("=" * 60)
+        logger.info("TDA PAPER TRADING ENGINE - HEDGE FUND MODE")
+        logger.info("=" * 60)
+        logger.info(f"FULL UNIVERSE: {len(STOCK_UNIVERSE)} tradeable symbols")
+        logger.info(f"Leveraged ETFs: {len(LEVERAGED_ETFS)} bull + {len(INVERSE_ETFS)} bear")
+        logger.info(f"Target Holdings: {self.n_stocks} stocks + ETFs")
+        logger.info("=" * 60)
     
     def fetch_market_data(self) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame, float]:
         """
-        Fetch all required market data.
+        Fetch all required market data using efficient batch processing.
+        
+        For 700+ stock universe, uses yfinance batch download for efficiency.
         
         Returns:
             Tuple of (stock_data, spy_data, vix_level)
@@ -629,25 +591,68 @@ class TDAPaperTradingEngine:
             vix = self._get_vix()
             return self.price_cache, spy_data, vix
         
-        logger.info(f"Fetching market data for {len(STOCK_UNIVERSE)} stocks...")
+        universe_size = len(STOCK_UNIVERSE)
+        logger.info(f"Fetching market data for {universe_size} stocks (FULL UNIVERSE)...")
         
         # All tickers to fetch
-        all_tickers = STOCK_UNIVERSE + list(LEVERAGED_ETFS.keys()) + list(INVERSE_ETFS.keys()) + ['SPY', '^VIX']
+        all_tickers = list(set(STOCK_UNIVERSE + list(LEVERAGED_ETFS.keys()) + list(INVERSE_ETFS.keys()) + ['SPY', '^VIX']))
         
-        # Fetch with yfinance
-        price_data = {}
         end_date = datetime.now()
         start_date = end_date - timedelta(days=400)  # ~1.5 years for 252 day lookback
         
-        for ticker in all_tickers:
-            try:
-                df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-                if len(df) >= 100:  # Minimum data requirement
-                    price_data[ticker] = df
-            except Exception as e:
-                logger.warning(f"Failed to fetch {ticker}: {e}")
+        price_data = {}
         
-        logger.info(f"Fetched data for {len(price_data)} tickers")
+        # Batch download in chunks (yfinance can handle ~50-100 tickers efficiently)
+        batch_size = 50
+        total_batches = (len(all_tickers) + batch_size - 1) // batch_size
+        
+        for batch_idx in range(0, len(all_tickers), batch_size):
+            batch = all_tickers[batch_idx:batch_idx + batch_size]
+            batch_num = batch_idx // batch_size + 1
+            logger.info(f"Fetching batch {batch_num}/{total_batches}: {len(batch)} tickers")
+            
+            try:
+                # Batch download (much faster than individual)
+                batch_data = yf.download(
+                    batch, 
+                    start=start_date, 
+                    end=end_date, 
+                    progress=False,
+                    group_by='ticker',
+                    threads=True
+                )
+                
+                # Extract individual ticker data
+                if len(batch) == 1:
+                    # Single ticker returns differently
+                    ticker = batch[0]
+                    if len(batch_data) >= 100:
+                        price_data[ticker] = batch_data
+                else:
+                    for ticker in batch:
+                        try:
+                            if ticker in batch_data.columns.get_level_values(0):
+                                df = batch_data[ticker].dropna()
+                                if len(df) >= 100:
+                                    price_data[ticker] = df
+                        except Exception as e:
+                            logger.debug(f"Skipping {ticker}: {e}")
+                            
+            except Exception as e:
+                logger.warning(f"Batch download failed: {e}")
+                # Fallback: individual downloads for this batch
+                for ticker in batch:
+                    try:
+                        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+                        if len(df) >= 100:
+                            price_data[ticker] = df
+                    except:
+                        pass
+            
+            # Small delay between batches to avoid rate limits
+            time.sleep(0.5)
+        
+        logger.info(f"Successfully fetched data for {len(price_data)} / {len(all_tickers)} tickers")
         
         # Update cache
         self.price_cache = price_data

@@ -884,7 +884,6 @@ class TDAPaperTradingEngine:
                         'side': trade['side'],
                         'qty': trade['qty'],
                         'order_id': order.id,
-                        'value': trade['qty'] * self.price_cache.get(trade['symbol'], pd.DataFrame()).get('Close', pd.Series([0])).iloc[-1] if trade['symbol'] in self.price_cache else 0,
                     })
                     logger.info(f"Executed: {trade['side'].upper()} {trade['qty']} {trade['symbol']}")
                     
@@ -894,22 +893,6 @@ class TDAPaperTradingEngine:
                 logger.error(f"Failed to execute {trade}: {e}")
         
         logger.info(f"Rebalance complete: {len(executed)} trades executed")
-        
-        # Send notification if trades were executed
-        if executed:
-            try:
-                account = self.client.get_account()
-                positions = self.client.get_positions()
-                regime_str = self.last_regime.value if hasattr(self, 'last_regime') else 'NEUTRAL'
-                notify_rebalance_summary(
-                    trades=executed,
-                    regime=regime_str.upper(),
-                    equity=float(account.equity),
-                    cash=float(account.cash),
-                    positions=len(positions)
-                )
-            except Exception as e:
-                logger.error(f"Failed to send rebalance notification: {e}")
         
         return {
             "status": "success",

@@ -1,0 +1,91 @@
+{
+  "version": "V3.5",
+  "timestamp": "2025-01-21T12:00:00Z",
+  "status": "NO-GO",
+  "recommendation": "Continue with V3.0 (Conditional GO)",
+  
+  "targets": {
+    "sharpe_target": 1.5,
+    "sharpe_minimum": 1.2,
+    "max_dd_limit": 0.20,
+    "win_rate_minimum": 0.52
+  },
+  
+  "results": {
+    "v30_baseline": {
+      "sharpe_mean": 1.29,
+      "sharpe_std": 2.87,
+      "max_dd": 0.046,
+      "win_rate": 0.583,
+      "windows": 8
+    },
+    "v35_final": {
+      "sharpe_mean": 1.29,
+      "sharpe_std": 2.87,
+      "max_dd": 0.046,
+      "win_rate": 0.583,
+      "windows": 8,
+      "improvement": 0.0
+    }
+  },
+  
+  "approaches_tested": [
+    {
+      "name": "Stacked Ensemble",
+      "description": "4 base learners + Ridge meta-learner",
+      "result": "No improvement - all models produce identical predictions",
+      "sharpe": 1.29
+    },
+    {
+      "name": "Confidence Threshold",
+      "description": "Filter low-confidence trades",
+      "result": "No effect - all predictions exceed threshold",
+      "sharpe": 1.29
+    },
+    {
+      "name": "Multi-Asset Diversification",
+      "description": "Trade 10 assets simultaneously",
+      "result": "Worse performance due to correlation",
+      "sharpe": 0.41
+    },
+    {
+      "name": "Momentum Regime Filter",
+      "description": "Only trade when SMA confirms direction",
+      "result": "Much worse - reduced trade count in trends",
+      "sharpe": -3.22
+    },
+    {
+      "name": "Classification",
+      "description": "XGBClassifier for up/down prediction",
+      "result": "Random performance (50% accuracy)",
+      "sharpe": 0.25
+    }
+  ],
+  
+  "root_cause": {
+    "finding": "Model produces constant positive predictions (~0.0011 daily)",
+    "prediction_std": 0.000001,
+    "implication": "No directional signal - effectively buy-and-hold with risk controls",
+    "v30_success_factors": [
+      "SPY has 57.6% positive days (natural drift)",
+      "Always-long strategy captures this drift",
+      "Risk controls reduce exposure during volatility",
+      "DD-aware Kelly sizing protects capital"
+    ]
+  },
+  
+  "statistical_tests": {
+    "t_test": {
+      "statistic": 0.0,
+      "p_value": 1.0,
+      "significant": false
+    },
+    "variance_reduction": "0.0%"
+  },
+  
+  "decision": {
+    "v35_status": "NO-GO",
+    "v30_status": "CONDITIONAL GO (continue paper trading)",
+    "reason": "No signal quality improvement achieved; V3.0 represents optimal risk-managed momentum strategy given current features"
+  }
+}

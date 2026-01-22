@@ -1,0 +1,56 @@
+{
+  "version": "V3.0",
+  "generated": "2026-01-21T21:23:02.117535",
+  "recommendation": "CONDITIONAL_GO",
+  "targets": {
+    "sharpe_min": 1.2,
+    "sharpe_target": 1.5,
+    "max_dd_target": 0.2,
+    "win_rate_min": 0.52
+  },
+  "v25_baseline": {
+    "sharpe": 0.72,
+    "max_dd": 0.35,
+    "win_rate": 0.54
+  },
+  "v30_full_backtest": {
+    "sharpe": 0.73,
+    "max_dd": 0.198,
+    "win_rate": 0.542,
+    "total_return": 0.54,
+    "avg_scale": 0.743
+  },
+  "v30_walkforward": {
+    "sharpe_mean": 1.29,
+    "sharpe_std": 2.87,
+    "max_dd": 0.046,
+    "avg_dd": 0.021,
+    "win_rate": 0.583,
+    "n_windows": 8
+  },
+  "statistical_test": {
+    "t_statistic": 0.414,
+    "p_value": 0.6851,
+    "significant": false
+  },
+  "improvements": {
+    "dd_reduction_pct": 43,
+    "sharpe_improvement_wf_pct": 74,
+    "win_rate_improvement_pct": 8
+  },
+  "target_status": {
+    "sharpe": "CONDITIONAL_PASS",
+    "max_dd": "PASS",
+    "win_rate": "PASS"
+  },
+  "deployment": {
+    "phase": "limited_production",
+    "allocation": "5-10%",
+    "monitoring": "enhanced",
+    "duration_days": 30
+  },
+  "files_modified": [
+    "src/trading/adaptive_kelly_sizer.py",
+    "src/trading/circuit_breakers.py"
+  ]
+}

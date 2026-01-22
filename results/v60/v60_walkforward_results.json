@@ -1,0 +1,94 @@
+{
+  "windows": [
+    {
+      "window": 1,
+      "test_start": "2025-07-02",
+      "test_end": "2025-07-31",
+      "sharpe": 0,
+      "total_return": 0,
+      "max_dd": 0,
+      "win_rate": 0,
+      "calmar": 0,
+      "n_trades": 1,
+      "total_costs": 75.0,
+      "n_days": 20
+    },
+    {
+      "window": 2,
+      "test_start": "2025-08-01",
+      "test_end": "2025-08-29",
+      "sharpe": 0,
+      "total_return": 0,
+      "max_dd": 0,
+      "win_rate": 0,
+      "calmar": 0,
+      "n_trades": 1,
+      "total_costs": 74.99999999999999,
+      "n_days": 20
+    },
+    {
+      "window": 3,
+      "test_start": "2025-09-02",
+      "test_end": "2025-09-30",
+      "sharpe": 0,
+      "total_return": 0,
+      "max_dd": 0,
+      "win_rate": 0,
+      "calmar": 0,
+      "n_trades": 1,
+      "total_costs": 74.99999999999999,
+      "n_days": 20
+    },
+    {
+      "window": 4,
+      "test_start": "2025-10-01",
+      "test_end": "2025-10-29",
+      "sharpe": 0,
+      "total_return": 0,
+      "max_dd": 0,
+      "win_rate": 0,
+      "calmar": 0,
+      "n_trades": 0,
+      "total_costs": 0.0,
+      "n_days": 20
+    },
+    {
+      "window": 5,
+      "test_start": "2025-10-30",
+      "test_end": "2025-11-28",
+      "sharpe": -0.40289070510071634,
+      "total_return": -0.03401970987034553,
+      "max_dd": -0.19498536272483769,
+      "win_rate": 0.45,
+      "calmar": -1.8127152489732177,
+      "n_trades": 1,
+      "total_costs": 74.99999999999999,
+      "n_days": 20
+    },
+    {
+      "window": 6,
+      "test_start": "2025-12-01",
+      "test_end": "2025-12-30",
+      "sharpe": 0,
+      "total_return": 0,
+      "max_dd": 0,
+      "win_rate": 0,
+      "calmar": 0,
+      "n_trades": 0,
+      "total_costs": 0.0,
+      "n_days": 20
+    }
+  ],
+  "summary": {
+    "mean_sharpe": -0.06714845085011939,
+    "std_sharpe": 0.1501485006846705,
+    "min_sharpe": -0.40289070510071634,
+    "max_sharpe": 0.0,
+    "mean_return": -0.0056699516450575875,
+    "t_stat": -1.0,
+    "p_value": 0.3632174676491229,
+    "n_windows": 6,
+    "positive_sharpe_windows": 0,
+    "total_test_days": 120
+  }
+}

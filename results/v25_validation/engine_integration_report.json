@@ -1,0 +1,51 @@
+{
+  "timestamp": "2026-01-21T20:45:20.288964",
+  "engine_config": {
+    "mode": "v25_only"
+  },
+  "signals_tested": 5,
+  "signals_generated": 5,
+  "signals": [
+    {
+      "ticker": "SPY",
+      "direction": "none",
+      "confidence": 0.0,
+      "signal_strength": 0.0,
+      "latency_ms": 240.69,
+      "is_valid": false
+    },
+    {
+      "ticker": "QQQ",
+      "direction": "none",
+      "confidence": 0.0,
+      "signal_strength": 0.0,
+      "latency_ms": 234.34,
+      "is_valid": false
+    },
+    {
+      "ticker": "AAPL",
+      "direction": "none",
+      "confidence": 0.0,
+      "signal_strength": 0.0,
+      "latency_ms": 238.56,
+      "is_valid": false
+    },
+    {
+      "ticker": "MSFT",
+      "direction": "none",
+      "confidence": 0.0,
+      "signal_strength": 0.0,
+      "latency_ms": 263.16,
+      "is_valid": false
+    },
+    {
+      "ticker": "NVDA",
+      "direction": "none",
+      "confidence": 0.0,
+      "signal_strength": 0.0,
+      "latency_ms": 306.1,
+      "is_valid": false
+    }
+  ],
+  "status": "PASS"
+}

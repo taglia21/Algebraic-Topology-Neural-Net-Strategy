@@ -1,0 +1,84 @@
+{
+  "timestamp": "2026-01-21T19:50:51.378939",
+  "status": "CONDITIONAL",
+  "components": {
+    "feature_engineer": {
+      "available": true,
+      "features_generated": {
+        "SPY": 127,
+        "QQQ": 127,
+        "IWM": 127,
+        "AAPL": 127,
+        "MSFT": 127
+      },
+      "avg_feature_count": 127.0,
+      "latency_ms": {
+        "SPY": 1105.75,
+        "QQQ": 523.76,
+        "IWM": 620.65,
+        "AAPL": 505.37,
+        "MSFT": 530.51
+      },
+      "errors": [],
+      "avg_latency_ms": 657.21,
+      "max_latency_ms": 1105.75
+    },
+    "signal_validator": {
+      "available": true,
+      "validations_run": 0,
+      "pass_rate": 0.0,
+      "avg_confirmed": 0.0,
+      "latency_ms": [],
+      "errors": [
+        "SPY: 'MultiIndicatorValidator' object has no attribute 'validate'",
+        "QQQ: 'MultiIndicatorValidator' object has no attribute 'validate'",
+        "IWM: 'MultiIndicatorValidator' object has no attribute 'validate'",
+        "AAPL: 'MultiIndicatorValidator' object has no attribute 'validate'",
+        "MSFT: 'MultiIndicatorValidator' object has no attribute 'validate'"
+      ]
+    },
+    "quality_checker": {
+      "available": true,
+      "checks_run": 5,
+      "pass_rate": 0.0,
+      "quality_scores": {},
+      "latency_ms": [],
+      "errors": [
+        "SPY: 'DataQualityReport' object has no attribute 'is_acceptable'",
+        "QQQ: 'DataQualityReport' object has no attribute 'is_acceptable'",
+        "IWM: 'DataQualityReport' object has no attribute 'is_acceptable'",
+        "AAPL: 'DataQualityReport' object has no attribute 'is_acceptable'",
+        "MSFT: 'DataQualityReport' object has no attribute 'is_acceptable'"
+      ]
+    },
+    "ensemble_rf": {
+      "available": true,
+      "models_trained": 3,
+      "avg_prediction_corr": -0.0204,
+      "feature_importance_top5": {},
+      "latency_ms": {
+        "SPY": {
+          "train_ms": 2391.95,
+          "predict_ms": 23.11
+        },
+        "QQQ": {
+          "train_ms": 746.95,
+          "predict_ms": 56.58
+        },
+        "IWM": {
+          "train_ms": 801.66,
+          "predict_ms": 23.11
+        }
+      },
+      "errors": []
+    }
+  },
+  "backtest": {
+    "sharpe_ratio": -0.443,
+    "total_return": -0.016,
+    "max_drawdown": 0.0359,
+    "win_rate": 0.4364,
+    "n_trades": 55
+  },
+  "validation_time_seconds": 9.69
+}

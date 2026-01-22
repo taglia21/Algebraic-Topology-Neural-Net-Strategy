@@ -1,0 +1,14 @@
+{
+  "best_params": {
+    "hmm_weight": 0.4,
+    "gmm_weight": 0.25,
+    "transformer_d_model": 512,
+    "transformer_n_heads": 8,
+    "max_position_pct": 0.12,
+    "risk_off_cash_pct": 0.45,
+    "cluster_weight": 0.35
+  },
+  "best_sharpe": -0.5303161283837216,
+  "optimized_at": "2026-01-20T22:16:06.258117",
+  "n_trials": 30
+}

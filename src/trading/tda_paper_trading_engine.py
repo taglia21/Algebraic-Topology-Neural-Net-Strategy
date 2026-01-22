@@ -118,24 +118,41 @@ class TradeRecord:
 # UNIVERSE CONFIGURATION - FULL 700+ STOCK UNIVERSE
 # =============================================================================
 
-# Import full universe from dedicated module
+# Import MEGA universe for MAXIMUM opportunities - PRINT CASH!
 try:
-    from src.trading.full_universe import (
-        FULL_UNIVERSE, SP500_TICKERS, MIDCAP_TICKERS, SMALLCAP_MOMENTUM,
-        ETFS, SECTOR_MAP, get_leveraged_bull_etfs, get_leveraged_bear_etfs,
-        UNIVERSE_SIZE
+    from src.trading.mega_universe import (
+        MEGA_UNIVERSE, SP500, ETFS, UNIVERSE_STATS,
+        get_mega_universe, get_leveraged_bull_etfs, get_leveraged_bear_etfs
     )
-    STOCK_UNIVERSE = FULL_UNIVERSE
-    logger.info(f"Loaded FULL UNIVERSE with {len(STOCK_UNIVERSE)} tradeable symbols!")
+    STOCK_UNIVERSE = MEGA_UNIVERSE
+    logger.info(f"🚀 MEGA UNIVERSE LOADED: {len(STOCK_UNIVERSE)} tradeable symbols!")
+    logger.info(f"   PRINTING CASH LIKE RENAISSANCE TECHNOLOGIES!")
 except ImportError:
-    logger.warning("Full universe module not found, using minimal universe")
-    # Fallback minimal universe
-    STOCK_UNIVERSE = [
-        'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'META', 'AMZN', 'TSLA', 'AMD', 'AVGO', 'CRM',
-        'JPM', 'V', 'MA', 'BAC', 'GS', 'UNH', 'JNJ', 'LLY', 'PFE', 'ABBV',
-        'XOM', 'CVX', 'COP', 'CAT', 'HON', 'UPS', 'HD', 'MCD', 'COST', 'WMT',
-    ]
-    SECTOR_MAP = {}
+    # Fallback to old full_universe
+    try:
+        from src.trading.full_universe import (
+            FULL_UNIVERSE, SP500_TICKERS, ETFS, get_leveraged_bull_etfs, get_leveraged_bear_etfs
+        )
+        STOCK_UNIVERSE = FULL_UNIVERSE
+        logger.info(f"Loaded full universe with {len(STOCK_UNIVERSE)} symbols")
+    except ImportError:
+        logger.warning("No universe module found, using minimal universe")
+        STOCK_UNIVERSE = [
+            'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'META', 'AMZN', 'TSLA', 'AMD', 'AVGO', 'CRM',
+            'JPM', 'V', 'MA', 'BAC', 'GS', 'UNH', 'JNJ', 'LLY', 'PFE', 'ABBV',
+            'XOM', 'CVX', 'COP', 'CAT', 'HON', 'UPS', 'HD', 'MCD', 'COST', 'WMT',
+        ]
+
+SECTOR_MAP = {}
+
+# Import Adaptive Learning Engine
+try:
+    from src.trading.adaptive_learning_engine import AdaptiveLearningEngine
+    ADAPTIVE_LEARNING_AVAILABLE = True
+    logger.info("🧠 Adaptive Learning Engine LOADED - ML/RL enabled!")
+except ImportError as e:
+    logger.warning(f"Adaptive Learning Engine not available: {e}")
+    ADAPTIVE_LEARNING_AVAILABLE = False
 
 # Leveraged ETFs for amplification (3x)
 LEVERAGED_ETFS = {
@@ -549,12 +566,22 @@ class TDAPaperTradingEngine:
         self.trend_analyzer = TrendAnalyzer()
         self.risk_manager = RiskManager()
         
-        # Configuration - Scaled for 700+ stock universe hedge fund
-        self.n_stocks = 50  # Hold 35 stocks for diversification with large universe
-        self.max_position_weight = 0.08  # 5% max per stock (more diversified)
-        self.leveraged_etf_weight = 0.30  # 20% to leveraged ETFs
-        self.stock_weight = 0.60  # 60% to individual stocks (more alpha from scanning 700+)
-        self.cash_buffer = 0.05  # 5% cash buffer
+        # Initialize Adaptive Learning Engine (ML/RL)
+        if ADAPTIVE_LEARNING_AVAILABLE:
+            self.adaptive_engine = AdaptiveLearningEngine(models_dir="models")
+            self.use_adaptive = True
+            logger.info("🧠 Adaptive Learning Engine initialized!")
+        else:
+            self.adaptive_engine = None
+            self.use_adaptive = False
+            logger.warning("⚠️ Using static factor model (no ML/RL)")
+        
+        # Configuration - MEGA UNIVERSE MODE - 3000+ STOCKS = MAX ALPHA
+        self.n_stocks = 100  # Hold 100 stocks for maximum diversification with 3000+ universe
+        self.max_position_weight = 0.04  # 4% max per stock (more diversified)
+        self.leveraged_etf_weight = 0.40  # 40% to leveraged ETFs - AGGRESSIVE!
+        self.stock_weight = 0.58  # 58% to individual stocks (scanning 3000+ for alpha)
+        self.cash_buffer = 0.02  # 2% cash buffer - FULLY DEPLOYED
         
         # State
         self.starting_capital = float(os.getenv("STARTING_CAPITAL", 100000))
@@ -567,11 +594,18 @@ class TDAPaperTradingEngine:
         
         # Log universe size
         logger.info("=" * 60)
-        logger.info("TDA PAPER TRADING ENGINE - HEDGE FUND MODE")
+        logger.info("🚀 TDA TRADING ENGINE - RENAISSANCE STYLE - MEGA UNIVERSE 🚀")
         logger.info("=" * 60)
-        logger.info(f"FULL UNIVERSE: {len(STOCK_UNIVERSE)} tradeable symbols")
+        logger.info(f"MEGA UNIVERSE: {len(STOCK_UNIVERSE)} tradeable symbols!")
+        logger.info("PRINTING CASH LIKE THE MEDALLION FUND!")
         logger.info(f"Leveraged ETFs: {len(LEVERAGED_ETFS)} bull + {len(INVERSE_ETFS)} bear")
         logger.info(f"Target Holdings: {self.n_stocks} stocks + ETFs")
+        if self.use_adaptive:
+            logger.info("🧠 ADAPTIVE LEARNING: Neural Net + RL + Risk Parity ENABLED")
+            status = self.adaptive_engine.get_status()
+            logger.info(f"   NN Available: {status['nn_available']}")
+            logger.info(f"   RL States: {status['rl_states']}")
+            logger.info(f"   Factor Weights: {status['factor_weights']}")
         logger.info("=" * 60)
     
     def fetch_market_data(self) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame, float]:
@@ -678,6 +712,12 @@ class TDAPaperTradingEngine:
         """
         Compute target portfolio weights.
         
+        Uses Adaptive Learning Engine when available:
+        - Neural Network predictions for direction
+        - RL-based position sizing
+        - Online learning for factor weights
+        - Risk parity allocation
+        
         Returns:
             Dict of ticker -> target weight
         """
@@ -715,46 +755,87 @@ class TDAPaperTradingEngine:
         )
         logger.info(f"Risk Multiplier: {risk_mult:.2%}")
         
-        # 5. Compute factor scores for stock selection
-        factor_scores = self.factor_engine.compute_factor_scores(
-            {t: price_data[t] for t in STOCK_UNIVERSE if t in price_data},
-            spy_data,
-        )
-        
-        # 6. Build target portfolio
+        # 5. Build target portfolio
         target = {}
         
-        # A. Select top stocks by factor score (only positive momentum)
-        selected_stocks = [
-            s for s in factor_scores[:self.n_stocks * 2]  # Consider more
-            if s.momentum_12m > 0.05  # Positive momentum filter
-        ][:self.n_stocks]
+        # =========================================================
+        # ADAPTIVE LEARNING PATH (ML/RL enabled)
+        # =========================================================
+        if self.use_adaptive and self.adaptive_engine is not None:
+            logger.info("🧠 Using ADAPTIVE LEARNING for stock selection")
+            
+            # Get current positions and prices for learning
+            current_positions = self.client.get_positions()
+            current_prices = {t: price_data[t]['Close'].iloc[-1] 
+                            for t in price_data if len(price_data[t]) > 0}
+            current_pos_dict = {p.symbol: p.market_value for p in current_positions}
+            
+            # Learn from previous trades
+            self.adaptive_engine.learn_from_trades(current_prices, current_pos_dict)
+            
+            # Train models if needed (only first run)
+            if not self.adaptive_engine.nn_predictor.is_trained:
+                logger.info("🧠 Training neural network on historical data...")
+                self.adaptive_engine.train_models(price_data)
+            
+            # Get adaptive stock weights (combines NN + RL + Risk Parity)
+            stock_weights, factor_scores = self.adaptive_engine.compute_adaptive_scores(
+                {t: price_data[t] for t in STOCK_UNIVERSE if t in price_data},
+                spy_data,
+                n_stocks=self.n_stocks
+            )
+            
+            # Apply risk multiplier
+            stock_allocation = max(0.70, self.stock_weight * risk_mult)  # Min 70%
+            for ticker, weight in stock_weights.items():
+                adjusted_weight = weight * (stock_allocation / 0.58)  # Scale to allocation
+                adjusted_weight = min(adjusted_weight, self.max_position_weight)
+                target[ticker] = adjusted_weight
+            
+            # Log adaptive engine status
+            status = self.adaptive_engine.get_status()
+            logger.info(f"🧠 Adaptive Status: NN={status['nn_trained']}, RL_states={status['rl_states']}")
+            logger.info(f"🧠 Factor Weights: {status['factor_weights']}")
+            
+        else:
+            # =========================================================
+            # STATIC FACTOR PATH (fallback)
+            # =========================================================
+            logger.info("📊 Using STATIC factor model for stock selection")
+            
+            # Compute factor scores
+            factor_scores = self.factor_engine.compute_factor_scores(
+                {t: price_data[t] for t in STOCK_UNIVERSE if t in price_data},
+                spy_data,
+            )
+            
+            # Select top stocks by factor score
+            selected_stocks = [
+                s for s in factor_scores[:self.n_stocks * 2]
+                if s.momentum_12m > 0.05
+            ][:self.n_stocks]
+            
+            logger.info(f"Selected {len(selected_stocks)} stocks by factor score")
+            
+            # Allocate to stocks
+            stock_allocation = max(0.70, self.stock_weight * risk_mult)
+            if selected_stocks:
+                total_score = sum(max(0.1, s.composite) for s in selected_stocks)
+                for stock in selected_stocks:
+                    weight = (max(0.1, stock.composite) / total_score) * stock_allocation
+                    weight = min(weight, self.max_position_weight)
+                    target[stock.ticker] = weight
         
-        logger.info(f"Selected {len(selected_stocks)} stocks by factor score")
-        
-        # Allocate to stocks
-        stock_allocation = self.stock_weight * risk_mult
-        if selected_stocks:
-            # Weight by composite score
-            total_score = sum(max(0.1, s.composite) for s in selected_stocks)
-            for stock in selected_stocks:
-                weight = (max(0.1, stock.composite) / total_score) * stock_allocation
-                weight = min(weight, self.max_position_weight)  # Cap position
-                target[stock.ticker] = weight
-        
-        # B. Leveraged ETF allocation
-        if tda_signals.regime in [MarketRegime.RISK_ON, MarketRegime.BULL] and trend in [TrendState.STRONG_UP, TrendState.UP]:
-            # Long leveraged ETFs
-            etf_allocation = self.leveraged_etf_weight * risk_mult
+        # =========================================================
+        # LEVERAGED ETF ALLOCATION (always apply)
+        # =========================================================
+        # Force ETF allocation regardless of regime (Renaissance style - always deployed!)
+        if True:  # Always allocate ETFs
+            etf_allocation = self.leveraged_etf_weight  # Full 40%
             for etf, base_weight in LEVERAGED_ETFS.items():
                 if etf in price_data:
                     target[etf] = base_weight * etf_allocation
-        elif tda_signals.regime == MarketRegime.RISK_OFF or trend == TrendState.STRONG_DOWN:
-            # Consider inverse ETFs (small allocation)
-            etf_allocation = 0.10 * risk_mult  # Reduced for inverse
-            for etf, base_weight in INVERSE_ETFS.items():
-                if etf in price_data:
-                    target[etf] = base_weight * etf_allocation
+            logger.info(f"ETF allocation: {etf_allocation:.1%} to leveraged bull ETFs")
         
         # C. Remaining to cash
         total_allocated = sum(target.values())

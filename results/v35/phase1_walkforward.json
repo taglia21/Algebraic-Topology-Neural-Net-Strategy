@@ -1,0 +1,22 @@
+{
+  "phase": 1,
+  "timestamp": "2026-01-21T21:50:48.583070",
+  "n_windows": 10,
+  "v30_summary": {
+    "sharpe_mean": 1.034,
+    "sharpe_std": 2.618,
+    "max_dd": 0.0457,
+    "avg_dd": 0.0166,
+    "avg_wr": 0.4667
+  },
+  "v35_summary": {
+    "sharpe_mean": 1.034,
+    "sharpe_std": 2.618,
+    "max_dd": 0.0457,
+    "avg_dd": 0.0166,
+    "avg_wr": 0.4667
+  },
+  "statistical_test": {
+    "t_statistic": NaN,
+    "p_value": NaN,
+    "significant": 

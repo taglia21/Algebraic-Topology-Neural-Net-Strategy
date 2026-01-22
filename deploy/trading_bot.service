@@ -1,0 +1,57 @@
+[Unit]
+Description=TDA Trading Bot V2.1 Production Service
+Documentation=https://github.com/taglia21/Algebraic-Topology-Neural-Net-Strategy
+After=network.target network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tradingbot
+Group=tradingbot
+WorkingDirectory=/opt/trading-bot
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONDONTWRITEBYTECODE=1"
+EnvironmentFile=/opt/trading-bot/.env
+
+# Main execution command
+ExecStart=/opt/trading-bot/.venv/bin/python production_launcher.py --mode=live
+
+# Graceful shutdown handling
+ExecStop=/bin/kill -SIGTERM $MAINPID
+TimeoutStopSec=60
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Restart configuration
+Restart=always
+RestartSec=30
+RestartPreventExitStatus=0
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/trading-bot/logs
+ReadWritePaths=/opt/trading-bot/state
+ReadWritePaths=/opt/trading-bot/cache
+ReadWritePaths=/opt/trading-bot/results
+ReadWritePaths=/opt/trading-bot/backups
+
+# Resource limits (2GB RAM droplet)
+MemoryMax=1536M
+MemoryHigh=1280M
+CPUQuota=90%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-bot
+
+# Watchdog (optional - for advanced monitoring)
+WatchdogSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,41 @@
+{
+  "v13_baseline": {
+    "name": "V1.3_baseline",
+    "sharpe": 0.07006521934356139,
+    "cagr": 0.02523309141588692,
+    "max_dd": -0.5281053477340857,
+    "calmar": 0.04778041260925162,
+    "sortino": 0.10708737223310753,
+    "win_rate": 0.5083459787556904,
+    "recovery_days": 310,
+    "volatility": 0.2568945833180402,
+    "trades": 209,
+    "final_value": 113932.32067147703,
+    "total_return": 0.13932320671477028
+  },
+  "v21_optimized": {
+    "name": "V2.1_optimized",
+    "sharpe": 0.0508258817203189,
+    "cagr": 0.02012754418520113,
+    "max_dd": -0.521686027306247,
+    "calmar": 0.03858171990752896,
+    "sortino": 0.07779478797921958,
+    "win_rate": 0.5091047040971168,
+    "recovery_days": 311,
+    "volatility": 0.25716430495013703,
+    "trades": 205,
+    "final_value": 110993.77332506805,
+    "total_return": 0.10993773325068057
+  },
+  "hyperparameters": {
+    "hmm_weight": 0.4,
+    "gmm_weight": 0.25,
+    "transformer_d_model": 512,
+    "transformer_n_heads": 8,
+    "max_position_pct": 0.12,
+    "risk_off_cash_pct": 0.45,
+    "cluster_weight": 0.35
+  },
+  "go_decision": false,
+  "generated_at": "2026-01-20T22:18:45.793713"
+}

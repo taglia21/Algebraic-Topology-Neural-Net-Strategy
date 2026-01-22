@@ -1,0 +1,24 @@
+{
+  "iteration": 1,
+  "timestamp": "2026-01-21T21:06:58.146187",
+  "v25_baseline": {
+    "sharpe": 0.723,
+    "max_dd": 0.3497,
+    "win_rate": 0.5398,
+    "total_return": 0.7996,
+    "trades": 1030
+  },
+  "v30_iteration1": {
+    "sharpe": 0.695,
+    "max_dd": 0.201,
+    "win_rate": 0.5398,
+    "total_return": 0.4815,
+    "trades": 1030,
+    "halts": 0,
+    "avg_scale": 0.689
+  },
+  "improvement": {
+    "sharpe_pct": -3.9,
+    "dd_reduction_pct": 42.5
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "iteration": 2,
+  "timestamp": "2026-01-21T21:10:12.401695",
+  "v25_baseline": {
+    "sharpe": 0.723,
+    "max_dd": 0.3497,
+    "win_rate": 0.5398
+  },
+  "v30_iteration2": {
+    "sharpe": 0.434,
+    "max_dd": 0.1902,
+    "win_rate": 0.5405,
+    "total_return": 0.2806,
+    "kelly_halts": 0,
+    "risk_halts": 29
+  },
+  "improvement": {
+    "sharpe_pct": -40.0,
+    "dd_reduction_pct": 45.6
+  },
+  "targets": [
+    "Sharpe 0.43 < 1.2 \u274c",
+    "Max DD <= 20% \u2705",
+    "Win Rate >= 52% \u2705"
+  ]
+}

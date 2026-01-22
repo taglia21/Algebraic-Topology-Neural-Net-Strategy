@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-01-21T20:37:13.511924",
+  "data_source": "polygon",
+  "tickers_tested": 10,
+  "components": {
+    "feature_engineer": {
+      "status": "pass",
+      "features": 127
+    },
+    "quality_checker": {
+      "status": "critical",
+      "score": 72.99121534493875
+    },
+    "signal_validator": {
+      "status": "pass",
+      "confirmed": 3,
+      "total": 9
+    }
+  },
+  "metrics": {
+    "sharpe_ratio": 0.723,
+    "win_rate": 0.5398,
+    "profit_factor": 1.14,
+    "max_drawdown": 0.3497,
+    "total_return_pct": 79.96,
+    "total_trades": 1030
+  },
+  "recommendation": {
+    "status": "NO-GO",
+    "message": "Debug feature quality and ensemble"
+  }
+}

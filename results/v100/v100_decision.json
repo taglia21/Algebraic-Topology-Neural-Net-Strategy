@@ -1,0 +1,25 @@
+{
+  "version": "V10.0",
+  "strategy": "Risk Parity Momentum",
+  "decision": "CONDITIONAL_GO",
+  "metrics": {
+    "cagr": 0.2925,
+    "sharpe": 2.08,
+    "max_drawdown": -0.09,
+    "volatility": 0.14,
+    "calmar": 3.26
+  },
+  "checks": {
+    "primary": {
+      "Sharpe >= 1.5": true,
+      "CAGR >= 25%": true,
+      "MaxDD >= -15%": true
+    },
+    "secondary": {
+      "all_years_positive": true,
+      "beat_v3": true,
+      "statistically_significant": false
+    }
+  },
+  "recommendation": "V10.0 is production-ready with conditional approval"
+}

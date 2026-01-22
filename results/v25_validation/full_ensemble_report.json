@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-01-21T20:46:20.163772",
+  "ensemble_models": 4,
+  "metrics": {
+    "sharpe_ratio": 0.723,
+    "win_rate": 0.5398,
+    "profit_factor": 1.14,
+    "max_drawdown": 0.3497,
+    "total_return_pct": 79.96,
+    "total_trades": 1030
+  },
+  "recommendation": {
+    "status": "NO-GO",
+    "message": "Needs significant improvement"
+  }
+}

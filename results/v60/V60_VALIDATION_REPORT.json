@@ -1,0 +1,76 @@
+{
+  "timestamp": "2026-01-22T00:09:17.389812",
+  "decision": "NO_GO",
+  "decision_text": "\u274c NO-GO - Do not deploy V6.0",
+  "reason": "Failed criteria: Sharpe 0.36 < 1.5; MaxDD -26.5% exceeds -20%; p-value 0.7164 not significant; Underperforms V3.0 Sharpe (0.36 vs 1.29)",
+  "v60": {
+    "sharpe": 0.3553599310779628,
+    "ann_return": 0.05984904629467236,
+    "total_return": 0.06303186727914123,
+    "max_dd": -0.26501480509636083,
+    "win_rate": 0.5358490566037736,
+    "calmar": 0.22583284082151908,
+    "sortino": 0.4958917122579593
+  },
+  "benchmarks": {
+    "spy": {
+      "return": 0.13080786244055642,
+      "sharpe": 0.7037525157995076
+    },
+    "upro": {
+      "return": 0.28009094017505576,
+      "sharpe": 0.6871810307640923,
+      "max_dd": -0.487475811982307
+    },
+    "tqqq": {
+      "return": 0.28747817338650594,
+      "sharpe": 0.6824986798592594,
+      "max_dd": -0.56426002060026
+    }
+  },
+  "risk_metrics": {
+    "alpha": 0.10021140615699634,
+    "beta": 0.1905916301319001,
+    "up_capture": 1.344362978587527,
+    "down_capture": 1.4232280631130425
+  },
+  "statistical_test": {
+    "t_stat": 0.3637224853639665,
+    "p_value": 0.7163563552086273,
+    "significant_05": false,
+    "significant_01": false
+  },
+  "targets": {
+    "sharpe": 1.8,
+    "ann_return": 0.2,
+    "max_dd": -0.2,
+    "p_value": 0.01,
+    "win_rate": 0.55
+  },
+  "target_evaluation": {
+    "sharpe_pass": false,
+    "sharpe_conditional": false,
+    "return_pass": false,
+    "dd_pass": false,
+    "pval_pass": false,
+    "beats_v30": false,
+    "beats_upro_dd": true
+  },
+  "previous_versions": {
+    "v30": {
+      "sharpe": 1.29,
+      "return": 0.122,
+      "max_dd": -0.083
+    },
+    "v40": {
+      "sharpe": 0.37,
+      "return": 0.006,
+      "max_dd": -0.008
+    },
+    "v50": {
+      "sharpe": 0.98,
+      "return": 0.149,
+      "max_dd": -0.069
+    }
+  }
+}

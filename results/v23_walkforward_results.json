@@ -1,0 +1,856 @@
+{
+  "timestamp": "2026-01-21T16:32:19.920681",
+  "config": {
+    "start_date": "2021-01-01",
+    "end_date": "2024-12-31",
+    "train_months": 6,
+    "test_months": 1,
+    "min_train_samples": 100,
+    "n_assets": 10,
+    "symbols": [
+      "ASSET_0",
+      "ASSET_1",
+      "ASSET_2",
+      "ASSET_3",
+      "ASSET_4",
+      "ASSET_5",
+      "ASSET_6",
+      "ASSET_7",
+      "ASSET_8",
+      "ASSET_9"
+    ],
+    "n_characteristics": 16,
+    "n_factors": 5,
+    "seq_length": 60,
+    "tda_dim": 20,
+    "macro_dim": 4,
+    "target_sharpe": 1.8,
+    "max_drawdown_threshold": 0.05,
+    "min_win_rate": 0.52,
+    "significance_level": 0.05,
+    "output_dir": "results",
+    "save_detailed_results": true
+  },
+  "n_periods": 43,
+  "total_days": 903,
+  "metrics": {
+    "total_return": 3.051011710376609e-06,
+    "annualized_return": 8.514451284771933e-07,
+    "sharpe_ratio": 0.5594608635544164,
+    "sortino_ratio": 0.07957959442316523,
+    "max_drawdown": -1.5903035367260927e-06,
+    "win_rate": 0.006644518272425249,
+    "volatility": 1.521902931811381e-06
+  },
+  "period_sharpes": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    3.5496478698597684,
+    0.0,
+    -3.54964786985977,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    3.5496478698597707,
+    -3.5496478698597707,
+    3.5496478698597698,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    3.5496478698597707,
+    0.0,
+    0.0,
+    3.5496478698597693,
+    0.0,
+    3.5496478698597693,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -3.54964786985977,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "period_returns": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.1883533848896137e-06,
+    0.0,
+    -1.5903035367188836e-06,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.7817863916348437e-06,
+    -2.8215892237468517e-07,
+    4.655920403572917e-07,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    6.960421379958661e-07,
+    0.0,
+    0.0,
+    5.742916517684203e-07,
+    0.0,
+    2.8142360438647846e-07,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -6.401504156233579e-08,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "elapsed_time": 3.243821859359741,
+  "statistical_tests": {
+    "mean_return_t_stat": 1.0584557577857778,
+    "mean_return_p_value": 0.2901310772745578,
+    "sharpe_ci_95": [
+      -0.45098200464322735,
+      1.4222378870566306
+    ],
+    "n_bootstrap": 1000
+  },
+  "decision": {
+    "recommendation": "NO-GO",
+    "checks": {
+      "sharpe_check": false,
+      "drawdown_check": true,
+      "win_rate_check": false,
+      "significance_check": false
+    },
+    "criteria": {
+      "target_sharpe": 1.8,
+      "max_drawdown": 0.05,
+      "min_win_rate": 0.52
+    }
+  },
+  "period_details": [
+    {
+      "period_start": "2021-06-28",
+      "period_end": "2021-07-26",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 2.571595762111385
+    },
+    {
+      "period_start": "2021-07-27",
+      "period_end": "2021-08-24",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 19,
+        "BEAR_VOLATILE": 2
+      },
+      "component_contributions": null,
+      "latency_ms": 1.665388761813076
+    },
+    {
+      "period_start": "2021-08-25",
+      "period_end": "2021-09-22",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.8722642856855167
+    },
+    {
+      "period_start": "2021-09-23",
+      "period_end": "2021-10-21",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 20,
+        "BEAR_VOLATILE": 1
+      },
+      "component_contributions": null,
+      "latency_ms": 1.5888946663402574
+    },
+    {
+      "period_start": "2021-10-22",
+      "period_end": "2021-11-19",
+      "total_return": 1.1883533848896137e-06,
+      "sharpe_ratio": 3.5496478698597684,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.047619047619047616,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.5721492856668884
+    },
+    {
+      "period_start": "2021-11-22",
+      "period_end": "2021-12-20",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 20,
+        "BEAR_VOLATILE": 1
+      },
+      "component_contributions": null,
+      "latency_ms": 2.2642107619287257
+    },
+    {
+      "period_start": "2021-12-21",
+      "period_end": "2022-01-18",
+      "total_return": -1.5903035367188836e-06,
+      "sharpe_ratio": -3.54964786985977,
+      "sortino_ratio": 0.0,
+      "max_drawdown": -1.5903035367470508e-06,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 19,
+        "BEAR_VOLATILE": 2
+      },
+      "component_contributions": null,
+      "latency_ms": 1.7010162383008893
+    },
+    {
+      "period_start": "2022-01-19",
+      "period_end": "2022-02-16",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.607983571375371
+    },
+    {
+      "period_start": "2022-02-17",
+      "period_end": "2022-03-17",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.5817898094523808
+    },
+    {
+      "period_start": "2022-03-18",
+      "period_end": "2022-04-15",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.6122362381533353
+    },
+    {
+      "period_start": "2022-04-18",
+      "period_end": "2022-05-16",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.5722969045392736
+    },
+    {
+      "period_start": "2022-05-17",
+      "period_end": "2022-06-14",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.8170957141375679
+    },
+    {
+      "period_start": "2022-06-15",
+      "period_end": "2022-07-13",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.5776178099172067
+    },
+    {
+      "period_start": "2022-07-14",
+      "period_end": "2022-08-11",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 2.045064000326203
+    },
+    {
+      "period_start": "2022-08-12",
+      "period_end": "2022-09-09",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 20,
+        "BEAR_VOLATILE": 1
+      },
+      "component_contributions": null,
+      "latency_ms": 1.5774804764770947
+    },
+    {
+      "period_start": "2022-09-12",
+      "period_end": "2022-10-10",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.5695102383255115
+    },
+    {
+      "period_start": "2022-10-11",
+      "period_end": "2022-11-08",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.5761785714511505
+    },
+    {
+      "period_start": "2022-11-09",
+      "period_end": "2022-12-07",
+      "total_return": 1.7817863916348437e-06,
+      "sharpe_ratio": 3.5496478698597707,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.047619047619047616,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.568941095337366
+    },
+    {
+      "period_start": "2022-12-08",
+      "period_end": "2023-01-05",
+      "total_return": -2.8215892237468517e-07,
+      "sharpe_ratio": -3.5496478698597707,
+      "sortino_ratio": 0.0,
+      "max_drawdown": -2.8215892233784956e-07,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.5798314286387591
+    },
+    {
+      "period_start": "2023-01-06",
+      "period_end": "2023-02-03",
+      "total_return": 4.655920403572917e-07,
+      "sharpe_ratio": 3.5496478698597698,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.047619047619047616,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.8267408096497613
+    },
+    {
+      "period_start": "2023-02-06",
+      "period_end": "2023-03-06",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 2.2210930000299065
+    },
+    {
+      "period_start": "2023-03-07",
+      "period_end": "2023-04-04",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.7653017617877118
+    },
+    {
+      "period_start": "2023-04-05",
+      "period_end": "2023-05-03",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 20,
+        "BEAR_VOLATILE": 1
+      },
+      "component_contributions": null,
+      "latency_ms": 1.899302571213671
+    },
+    {
+      "period_start": "2023-05-04",
+      "period_end": "2023-06-01",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.7650028572201595
+    },
+    {
+      "period_start": "2023-06-02",
+      "period_end": "2023-06-30",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.6186393808138313
+    },
+    {
+      "period_start": "2023-07-03",
+      "period_end": "2023-07-31",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.6548558095174875
+    },
+    {
+      "period_start": "2023-08-01",
+      "period_end": "2023-08-29",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.6607043330406581
+    },
+    {
+      "period_start": "2023-08-30",
+      "period_end": "2023-09-27",
+      "total_return": 6.960421379958661e-07,
+      "sharpe_ratio": 3.5496478698597707,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.047619047619047616,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.7855094761866244
+    },
+    {
+      "period_start": "2023-09-28",
+      "period_end": "2023-10-26",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.6306877619388702
+    },
+    {
+      "period_start": "2023-10-27",
+      "period_end": "2023-11-24",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 20,
+        "BEAR_VOLATILE": 1
+      },
+      "component_contributions": null,
+      "latency_ms": 1.653044428513524
+    },
+    {
+      "period_start": "2023-11-27",
+      "period_end": "2023-12-25",
+      "total_return": 5.742916517684203e-07,
+      "sharpe_ratio": 3.5496478698597693,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.047619047619047616,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.5715575713589456
+    },
+    {
+      "period_start": "2023-12-26",
+      "period_end": "2024-01-23",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 2.413736714515835
+    },
+    {
+      "period_start": "2024-01-24",
+      "period_end": "2024-02-21",
+      "total_return": 2.8142360438647846e-07,
+      "sharpe_ratio": 3.5496478698597693,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.047619047619047616,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.6671181431212019
+    },
+    {
+      "period_start": "2024-02-22",
+      "period_end": "2024-03-21",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.582143381061282
+    },
+    {
+      "period_start": "2024-03-22",
+      "period_end": "2024-04-19",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.7182810003023838
+    },
+    {
+      "period_start": "2024-04-22",
+      "period_end": "2024-05-20",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.62782833355041
+    },
+    {
+      "period_start": "2024-05-21",
+      "period_end": "2024-06-18",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 2.0159501905471275
+    },
+    {
+      "period_start": "2024-06-19",
+      "period_end": "2024-07-17",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 2.0394062383794727
+    },
+    {
+      "period_start": "2024-07-18",
+      "period_end": "2024-08-15",
+      "total_return": -6.401504156233579e-08,
+      "sharpe_ratio": -3.54964786985977,
+      "sortino_ratio": 0.0,
+      "max_drawdown": -6.401504160091775e-08,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.7297641904969212
+    },
+    {
+      "period_start": "2024-08-16",
+      "period_end": "2024-09-13",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 1.7213971426653665
+    },
+    {
+      "period_start": "2024-09-16",
+      "period_end": "2024-10-14",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 2.4874111427163283
+    },
+    {
+      "period_start": "2024-10-15",
+      "period_end": "2024-11-12",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 3.1257149999180998
+    },
+    {
+      "period_start": "2024-11-13",
+      "period_end": "2024-12-11",
+      "total_return": 0.0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "max_drawdown": 0.0,
+      "win_rate": 0.0,
+      "n_trades": 21,
+      "avg_position": 0.1,
+      "regime_counts": {
+        "BULL_QUIET": 21
+      },
+      "component_contributions": null,
+      "latency_ms": 3.1536799048072206
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "regime_distribution": {
+    "BULL_LOW_VOL": 148,
+    "UNDEFINED": 49,
+    "BULL_NORMAL": 27,
+    "BEAR_HIGH_VOL": 25,
+    "BEAR_NORMAL": 17
+  },
+  "regime_performance": {
+    "BULL_LOW_VOL": {
+      "days": 148,
+      "sharpe": 1.6375778349966343,
+      "return": 0.3260888358452283,
+      "spy_return": 0.14046103158118606,
+      "top_allocation": "TQQQ"
+    },
+    "UNDEFINED": {
+      "days": 48,
+      "sharpe": -2.655113600344132,
+      "return": -0.14756513517605618,
+      "spy_return": -0.07553131340007346,
+      "top_allocation": "UPRO"
+    },
+    "BULL_NORMAL": {
+      "days": 27,
+      "sharpe": -2.5850502063551057,
+      "return": -0.10221731337225692,
+      "spy_return": 0.05654409820645334,
+      "top_allocation": "TQQQ"
+    },
+    "BEAR_HIGH_VOL": {
+      "days": 25,
+      "sharpe": 0.05758843366946574,
+      "return": -0.01401318218337888,
+      "spy_return": 0.0009565648692699824,
+      "top_allocation": "TMF"
+    },
+    "BEAR_NORMAL": {
+      "days": 17,
+      "sharpe": 2.385039051755946,
+      "return": 0.05262202127017823,
+      "spy_return": 0.014175939107289093,
+      "top_allocation": "UPRO"
+    }
+  },
+  "risk_off": {
+    "total_days": 25,
+    "pct_time": 9.398496240601503
+  },
+  "worst_periods": {
+    "worst_3m_return": -0.2635904854477831,
+    "max_losing_streak_months": 3,
+    "days_over_5pct_loss": 4
+  }
+}

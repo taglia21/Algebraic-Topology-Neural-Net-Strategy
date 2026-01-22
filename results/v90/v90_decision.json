@@ -1,0 +1,55 @@
+{
+  "version": "V9.0",
+  "strategy": "Bottom-Up Multi-Factor (Low Vol + Quality + Momentum)",
+  "decision": "NO-GO - REVERT TO V3.0",
+  "action": "Keep V3.0 as production strategy",
+  "metrics": {
+    "sharpe": 0.9918155892776203,
+    "total_return": 1.3166455109441415,
+    "ann_return": 0.19400333633287614,
+    "max_dd": -0.3015882267110966,
+    "p_value": 0.031127097852135636
+  },
+  "targets": {
+    "sharpe_pass": false,
+    "cagr_pass": true,
+    "dd_pass": false,
+    "p_pass": false,
+    "beat_v30": false
+  },
+  "regime_analysis": {
+    "BULL_LOW_VOL": {
+      "days": 700,
+      "pct_days": 58.57740585774059,
+      "sharpe": 2.6149826196833175,
+      "total_return": 1.7930531398375984,
+      "max_dd": -0.07114933460571592,
+      "win_rate": 0.5957142857142858
+    },
+    "BULL_HIGH_VOL": {
+      "days": 149,
+      "pct_days": 12.468619246861925,
+      "sharpe": 4.8426153084829195,
+      "total_return": 1.010484964123401,
+      "max_dd": -0.05376996057344223,
+      "win_rate": 0.6375838926174496
+    },
+    "BEAR_LOW_VOL": {
+      "days": 197,
+      "pct_days": 16.485355648535567,
+      "sharpe": -3.175432536222504,
+      "total_return": -0.40766649696220236,
+      "max_dd": -0.3845548395737631,
+      "win_rate": 0.4263959390862944
+    },
+    "BEAR_HIGH_VOL": {
+      "days": 149,
+      "pct_days": 12.468619246861925,
+      "sharpe": -1.876820470632665,
+      "total_return": -0.3035126092215844,
+      "max_dd": -0.35463185542750386,
+      "win_rate": 0.44966442953020136
+    }
+  },
+  "recommendation": "V9.0 shows promise (19.4% CAGR) but fails Sharpe and MaxDD targets. V3.0 remains production."
+}

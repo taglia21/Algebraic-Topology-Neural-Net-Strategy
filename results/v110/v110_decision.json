@@ -1,0 +1,21 @@
+{
+  "version": "V11.0",
+  "strategy": "ML-Powered Conviction-Weighted Momentum + Tail Hedge",
+  "decision": "NO_GO",
+  "metrics": {
+    "cagr": 0.2797649913897007,
+    "volatility": 0.13946508773876923,
+    "sharpe": 2.005985841515591,
+    "max_drawdown": -0.13688001971711827,
+    "sortino": 3.451030644502506,
+    "calmar": 2.043870186224945
+  },
+  "vs_v100": {
+    "sharpe_diff": -0.08954936286002502,
+    "cagr_diff": -0.01465769205358236,
+    "maxdd_diff": -0.047036637166840145,
+    "years_won": 2
+  },
+  "criteria_passed": 1,
+  "p_value": 0.186715267063988
+}

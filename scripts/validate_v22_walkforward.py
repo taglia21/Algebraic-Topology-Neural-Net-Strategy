@@ -1103,7 +1103,7 @@ def main():
         logger.info(f"Loading data from {data_path}")
         # Load parquet if available
         try:
-            import pyarrow.parquet as pq
+            import pyarrow.parquet as pq  # type: ignore[import-not-found]
             df = pq.read_table(data_path).to_pandas()
             # Parse into ticker dict format
             data = {}

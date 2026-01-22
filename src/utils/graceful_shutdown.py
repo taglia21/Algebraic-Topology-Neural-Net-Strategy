@@ -227,7 +227,7 @@ class GracefulShutdown:
     def _cancel_pending_orders(self):
         """Cancel pending orders via Alpaca API."""
         try:
-            import httpx
+            import httpx  # type: ignore[import-not-found]
             
             api_key = os.getenv("ALPACA_API_KEY", "")
             api_secret = os.getenv("ALPACA_SECRET_KEY", "")
@@ -338,7 +338,7 @@ class GracefulShutdown:
     def _send_shutdown_notification(self):
         """Send shutdown notification to Discord."""
         try:
-            import httpx
+            import httpx  # type: ignore[import-not-found]
             
             webhook_url = os.getenv("DISCORD_WEBHOOK_URL", "")
             
@@ -470,7 +470,7 @@ def check_for_duplicate_orders(positions: List[Dict[str, Any]]) -> bool:
         True if safe to resume, False if potential duplicates
     """
     try:
-        import httpx
+        import httpx  # type: ignore[import-not-found]
         
         api_key = os.getenv("ALPACA_API_KEY", "")
         api_secret = os.getenv("ALPACA_SECRET_KEY", "")

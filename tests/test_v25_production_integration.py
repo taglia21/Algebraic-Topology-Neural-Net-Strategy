@@ -10,7 +10,7 @@ Comprehensive tests for V2.5 production engine integration:
 5. Circuit breaker test (halts on excessive losses)
 """
 
-import pytest
+import pytest  # type: ignore[import-not-found]
 import numpy as np
 import pandas as pd
 import time

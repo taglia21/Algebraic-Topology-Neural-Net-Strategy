@@ -45,8 +45,11 @@ logger = logging.getLogger(__name__)
 
 # Type checking imports (for static analysis only)
 if TYPE_CHECKING:
-    import torch
-    from torch import Tensor
+    import torch as torch_typing
+    Tensor = torch_typing.Tensor
+else:
+    # Define Tensor as Any for runtime when torch may not be available
+    Tensor = Any
 
 # Try to import PyTorch at runtime
 try:
@@ -55,6 +58,8 @@ try:
     import torch.nn.functional as F
     from torch.utils.data import DataLoader, TensorDataset
     TORCH_AVAILABLE = True
+    # Use actual torch.Tensor at runtime
+    Tensor = torch.Tensor  # type: ignore[misc]
 except ImportError:
     TORCH_AVAILABLE = False
     class _DummyModule:
@@ -180,7 +185,7 @@ if TORCH_AVAILABLE:
             pe[:, 1::2] = torch.cos(position * div_term)
             self.register_buffer('pe_sinusoidal', pe.unsqueeze(0))
             
-        def forward(self, x: torch.Tensor, positions: Optional[torch.Tensor] = None) -> torch.Tensor:
+        def forward(self, x: "torch.Tensor", positions: Optional["torch.Tensor"] = None) -> "torch.Tensor":
             """
             Add positional encoding to input.
             
@@ -254,9 +259,9 @@ if TORCH_AVAILABLE:
             
         def forward(
             self, 
-            macro: torch.Tensor, 
-            price_embed: Optional[torch.Tensor] = None
-        ) -> torch.Tensor:
+            macro: "torch.Tensor", 
+            price_embed: Optional["torch.Tensor"] = None
+        ) -> "torch.Tensor":
             """
             Encode macro variables with optional price context.
             
@@ -316,9 +321,9 @@ if TORCH_AVAILABLE:
             
         def forward(
             self, 
-            tda: torch.Tensor, 
-            price_embed: torch.Tensor
-        ) -> torch.Tensor:
+            tda: "torch.Tensor", 
+            price_embed: "torch.Tensor"
+        ) -> "torch.Tensor":
             """
             Fuse TDA features with price embeddings.
             
@@ -377,9 +382,9 @@ if TORCH_AVAILABLE:
             
         def forward(
             self, 
-            x: torch.Tensor,
-            mask: Optional[torch.Tensor] = None,
-            key_padding_mask: Optional[torch.Tensor] = None
+            x: "torch.Tensor",
+            mask: Optional["torch.Tensor"] = None,
+            key_padding_mask: Optional["torch.Tensor"] = None
         ) -> Tuple[torch.Tensor, torch.Tensor]:
             """Forward with attention weights output."""
             # Pre-norm self-attention
@@ -417,7 +422,7 @@ if TORCH_AVAILABLE:
                 nn.Linear(d_model // 2, n_quantiles * forecast_horizon),
             )
             
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
+        def forward(self, x: "torch.Tensor") -> "torch.Tensor":
             """
             Predict quantiles.
             
@@ -430,7 +435,7 @@ if TORCH_AVAILABLE:
             out = self.head(x)
             return out.view(-1, self.forecast_horizon, self.n_quantiles)
         
-        def quantile_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        def quantile_loss(self, pred: "torch.Tensor", target: "torch.Tensor") -> "torch.Tensor":
             """
             Pinball loss for quantile regression.
             
@@ -540,10 +545,10 @@ if TORCH_AVAILABLE:
                     
         def forward(
             self,
-            price: torch.Tensor,
-            tda: Optional[torch.Tensor] = None,
-            macro: Optional[torch.Tensor] = None,
-            mask: Optional[torch.Tensor] = None,
+            price: "torch.Tensor",
+            tda: Optional["torch.Tensor"] = None,
+            macro: Optional["torch.Tensor"] = None,
+            mask: Optional["torch.Tensor"] = None,
             return_attention: bool = False
         ) -> Dict[str, torch.Tensor]:
             """
@@ -619,7 +624,7 @@ if TORCH_AVAILABLE:
         def compute_loss(
             self,
             predictions: Dict[str, torch.Tensor],
-            targets: torch.Tensor
+            targets: "torch.Tensor"
         ) -> Tuple[torch.Tensor, Dict[str, float]]:
             """
             Compute combined loss.
@@ -660,9 +665,9 @@ if TORCH_AVAILABLE:
         
         def predict_with_uncertainty(
             self,
-            price: torch.Tensor,
-            tda: Optional[torch.Tensor] = None,
-            macro: Optional[torch.Tensor] = None,
+            price: "torch.Tensor",
+            tda: Optional["torch.Tensor"] = None,
+            macro: Optional["torch.Tensor"] = None,
             n_samples: int = 20
         ) -> Dict[str, torch.Tensor]:
             """

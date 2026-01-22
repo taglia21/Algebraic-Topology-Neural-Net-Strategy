@@ -44,8 +44,11 @@ logger = logging.getLogger(__name__)
 
 # Type checking imports (for static analysis only)
 if TYPE_CHECKING:
-    import torch
-    from torch import Tensor
+    import torch as torch_typing
+    Tensor = torch_typing.Tensor
+else:
+    # Define Tensor as Any for runtime when torch may not be available
+    Tensor = Any
 
 # Try to import PyTorch at runtime
 try:
@@ -55,6 +58,8 @@ try:
     from torch.utils.data import DataLoader, TensorDataset
     from torch.optim.lr_scheduler import CosineAnnealingLR
     TORCH_AVAILABLE = True
+    # Use actual torch.Tensor at runtime
+    Tensor = torch.Tensor  # type: ignore[misc]
 except ImportError:
     TORCH_AVAILABLE = False
     # Create dummy classes for type hints
@@ -216,7 +221,7 @@ if TORCH_AVAILABLE:
             
             self.register_buffer('pe', pe)
             
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
+        def forward(self, x: "torch.Tensor") -> "torch.Tensor":
             """Add positional encoding to input."""
             x = x + self.pe[:, :x.size(1), :]
             return self.dropout(x)
@@ -237,7 +242,7 @@ if TORCH_AVAILABLE:
                 nn.LayerNorm(embed_dim),
             )
             
-        def forward(self, characteristics: torch.Tensor) -> torch.Tensor:
+        def forward(self, characteristics: "torch.Tensor") -> "torch.Tensor":
             """Encode firm characteristics: [batch, n_assets, n_char] -> [batch, n_assets, embed_dim]"""
             return self.encoder(characteristics)
 
@@ -293,8 +298,8 @@ if TORCH_AVAILABLE:
             
         def forward(
             self, 
-            asset_embeddings: torch.Tensor,
-            mask: Optional[torch.Tensor] = None
+            asset_embeddings: "torch.Tensor",
+            mask: Optional["torch.Tensor"] = None
         ) -> Tuple[torch.Tensor, torch.Tensor]:
             """Compute factor representations and loadings."""
             batch_size = asset_embeddings.size(0)
@@ -355,7 +360,7 @@ if TORCH_AVAILABLE:
                 nn.LayerNorm(model_dim),
             )
             
-        def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        def forward(self, x: "torch.Tensor", mask: Optional["torch.Tensor"] = None) -> "torch.Tensor":
             """Encode temporal dynamics: [batch, n_assets, seq_len, features] -> [batch, n_assets, model_dim]"""
             batch_size, n_assets, seq_len, input_dim = x.shape
             
@@ -407,9 +412,9 @@ if TORCH_AVAILABLE:
             
         def forward(
             self,
-            factors: torch.Tensor,
-            loadings: torch.Tensor,
-            prev_weights: Optional[torch.Tensor] = None
+            factors: "torch.Tensor",
+            loadings: "torch.Tensor",
+            prev_weights: Optional["torch.Tensor"] = None
         ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
             """Compute optimal portfolio weights."""
             batch_size = factors.size(0)
@@ -441,9 +446,9 @@ if TORCH_AVAILABLE:
         
         def _apply_constraints(
             self,
-            weights: torch.Tensor,
-            prev_weights: Optional[torch.Tensor] = None
-        ) -> torch.Tensor:
+            weights: "torch.Tensor",
+            prev_weights: Optional["torch.Tensor"] = None
+        ) -> "torch.Tensor":
             """Apply position and leverage constraints."""
             weights = torch.clamp(weights, -self.max_position, self.max_position)
             total_leverage = torch.abs(weights).sum(dim=-1, keepdim=True)
@@ -514,10 +519,10 @@ if TORCH_AVAILABLE:
                     
         def forward(
             self,
-            price_history: torch.Tensor,
-            characteristics: torch.Tensor,
-            prev_weights: Optional[torch.Tensor] = None,
-            mask: Optional[torch.Tensor] = None
+            price_history: "torch.Tensor",
+            characteristics: "torch.Tensor",
+            prev_weights: Optional["torch.Tensor"] = None,
+            mask: Optional["torch.Tensor"] = None
         ) -> Tuple[torch.Tensor, Dict[str, Any]]:
             """Forward pass."""
             temporal_embed = self.temporal_encoder(price_history)
@@ -550,9 +555,9 @@ if TORCH_AVAILABLE:
         
         def compute_sharpe_loss(
             self,
-            weights: torch.Tensor,
-            returns: torch.Tensor,
-            prev_weights: Optional[torch.Tensor] = None,
+            weights: "torch.Tensor",
+            returns: "torch.Tensor",
+            prev_weights: Optional["torch.Tensor"] = None,
             info: Optional[Dict] = None
         ) -> Tuple[torch.Tensor, Dict[str, float]]:
             """Compute Sharpe-aware loss with transaction costs."""

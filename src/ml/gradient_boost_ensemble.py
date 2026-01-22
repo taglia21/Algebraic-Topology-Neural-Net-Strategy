@@ -329,12 +329,12 @@ class LSTMModel(BaseModel):
             
             # Try to use TensorFlow/Keras LSTM
             try:
-                import tensorflow as tf
+                import tensorflow as tf  # type: ignore[import-not-found]
                 tf.get_logger().setLevel('ERROR')
                 
-                from tensorflow.keras.models import Sequential
-                from tensorflow.keras.layers import LSTM, Dense, Dropout
-                from tensorflow.keras.callbacks import EarlyStopping
+                from tensorflow.keras.models import Sequential  # type: ignore[import-not-found]
+                from tensorflow.keras.layers import LSTM, Dense, Dropout  # type: ignore[import-not-found]
+                from tensorflow.keras.callbacks import EarlyStopping  # type: ignore[import-not-found]
                 
                 model = Sequential([
                     LSTM(self.config.lstm_units, 

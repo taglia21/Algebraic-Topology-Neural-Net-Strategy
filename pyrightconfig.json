@@ -1,0 +1,14 @@
+{
+  "include": ["src", "scripts", "tests"],
+  "exclude": ["**/__pycache__", "**/node_modules", ".venv", "cache", "results", "data"],
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportGeneralTypeIssues": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportArgumentType": "none",
+  "reportReturnType": "none",
+  "reportOperatorIssue": "none",
+  "reportAttributeAccessIssue": "none",
+  "typeCheckingMode": "off",
+  "pythonVersion": "3.12"
+}

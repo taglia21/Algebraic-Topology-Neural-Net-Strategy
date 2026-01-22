@@ -651,7 +651,7 @@ class V25Backtester:
     
     def get_latency_metrics(self) -> LatencyMetrics:
         """Get latency metrics."""
-        import psutil
+        import psutil  # type: ignore[import-not-found]
         
         return LatencyMetrics(
             feature_gen_mean_ms=round(np.mean(self.latencies['feature_gen']) if self.latencies['feature_gen'] else 0, 2),

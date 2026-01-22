@@ -14,7 +14,7 @@ Target Coverage: >80%
 import os
 import sys
 import json
-import pytest
+import pytest  # type: ignore[import-not-found]
 import numpy as np
 from pathlib import Path
 from datetime import datetime

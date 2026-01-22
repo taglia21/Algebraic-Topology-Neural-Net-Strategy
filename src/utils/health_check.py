@@ -39,9 +39,9 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.absolute()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
-    from fastapi import FastAPI, Response
-    from fastapi.responses import JSONResponse
-    import uvicorn
+    from fastapi import FastAPI, Response  # type: ignore[import-not-found]
+    from fastapi.responses import JSONResponse  # type: ignore[import-not-found]
+    import uvicorn  # type: ignore[import-not-found]
 except ImportError:
     print("FastAPI not installed. Run: pip install fastapi uvicorn")
     sys.exit(1)
@@ -139,7 +139,7 @@ health_state = HealthState()
 async def check_polygon_status() -> str:
     """Check Polygon API connectivity."""
     try:
-        import httpx
+        import httpx  # type: ignore[import-not-found]
         api_key = os.getenv("POLYGON_API_KEY_OTREP", "")
         
         if not api_key or api_key == "your_polygon_api_key_here":
@@ -167,7 +167,7 @@ async def check_polygon_status() -> str:
 async def check_alpaca_status() -> str:
     """Check Alpaca API connectivity."""
     try:
-        import httpx
+        import httpx  # type: ignore[import-not-found]
         api_key = os.getenv("ALPACA_API_KEY", "")
         api_secret = os.getenv("ALPACA_SECRET_KEY", "")
         base_url = os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
@@ -208,7 +208,7 @@ async def check_alpaca_status() -> str:
 async def send_discord_alert(title: str, message: str, color: int = 0xFF0000):
     """Send alert to Discord webhook."""
     try:
-        import httpx
+        import httpx  # type: ignore[import-not-found]
         webhook_url = os.getenv("DISCORD_WEBHOOK_URL", "")
         
         if not webhook_url or webhook_url == "your_discord_webhook_url_here":
@@ -330,7 +330,7 @@ async def health_check() -> JSONResponse:
 @app.get("/health/detailed")
 async def detailed_health() -> JSONResponse:
     """Detailed health check with additional diagnostics."""
-    import psutil
+    import psutil  # type: ignore[import-not-found]
     
     # Get basic health
     basic_health = await health_check()
@@ -437,7 +437,7 @@ class HealthCheckServer:
         import threading
         
         def run_server():
-            import uvicorn
+            import uvicorn  # type: ignore[import-not-found]
             config = uvicorn.Config(
                 app,
                 host="0.0.0.0",

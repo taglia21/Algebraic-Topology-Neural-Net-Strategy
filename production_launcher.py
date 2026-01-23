@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 """
-V2.1 Production Launcher - Complete Trading System Orchestrator
+V2.5 Production Launcher - Adaptive Trading System Orchestrator
 ================================================================
 
 Production-ready launcher that orchestrates the full trading pipeline:
 1. Data Validation - Verify data quality and freshness
 2. TDA Computation - Calculate topological features
-3. Signal Generation - V2.1 ensemble regime + transformer predictions
+3. Signal Generation - V2.5 adaptive regime + ensemble predictions
 4. Trade Execution - Alpaca integration with execution alpha optimization
 5. Discord Notifications - Real-time trade alerts and daily summaries
 
-Target Performance (V2.1):
-- Sharpe: > 1.55 (V1.3's 1.35 + proven enhancements)
-- Max Drawdown: < 5%
+V2.5 Adaptive Features:
+- Phase 1: Enhanced Regime Detection (OnlineRegimeLearner)
+- Phase 2: Pattern Memory System (LSH similarity search)
+- Phase 3: Adaptive Position Sizing (DD/Vol-aware)
+- Phase 4: Continuous Learning Loop (daily updates)
+
+Target Performance (V2.5):
+- Sharpe: > 0.85 (adaptive improvement from V2.1)
+- Max Drawdown: < 15% (with DD-aware sizing)
 - Win Rate: > 55%
 
 Risk Controls:
-- Position limits: 2-3% capital per position
+- Position limits: 2-5% capital per position
 - Stop-loss: 3-4 sigma moves
 - Portfolio exposure caps
 - Circuit breakers at 5%/8% drawdown
@@ -111,7 +117,7 @@ logger = setup_logging()
 
 # Import trading components
 try:
-    from src.trading.v21_production_engine import V21ProductionEngine, V21Config
+    from src.trading.v25_production_engine import V25ProductionEngine, V25EngineConfig
     from src.trading.alpaca_client import AlpacaClient, OrderSide
     from src.trading.notifications import (
         send_discord, notify_trade_executed, notify_rebalance_summary,
@@ -121,7 +127,7 @@ try:
     from src.trading.daily_validator import DailyValidator
 except ImportError as e:
     logger.error(f"Failed to import trading components: {e}")
-    logger.error("Ensure all V2.1 modules are installed")
+    logger.error("Ensure all V2.5 modules are installed")
     sys.exit(1)
 
 # Import V2.2 RL components (optional enhancement)
@@ -234,19 +240,27 @@ class ProductionLauncher:
     def _initialize_components(self):
         """Initialize all trading components."""
         logger.info("=" * 60)
-        logger.info("V2.1 PRODUCTION LAUNCHER - INITIALIZING")
+        logger.info("V2.5 PRODUCTION LAUNCHER - INITIALIZING")
         logger.info("=" * 60)
         
-        # 1. V2.1 Trading Engine
-        v21_config = V21Config(
-            use_ensemble_regime=self.config.use_ensemble_regime,
-            use_transformer=self.config.use_transformer,
-            fallback_to_v13=self.config.fallback_to_v13,
+        # 1. V2.5 Adaptive Trading Engine
+        v25_config = V25EngineConfig(
+            use_v25_elite=True,
+            signal_mode="hybrid",
+            use_elite_features=True,
+            use_gradient_ensemble=True,
+            use_signal_validator=True,
+            use_data_quality=True,
+            use_attention_factor=self.config.use_ensemble_regime,
+            use_temporal_transformer=self.config.use_transformer,
+            use_tca_optimizer=True,
+            use_kelly_sizer=True,
             max_position_pct=self.config.max_position_pct,
             max_portfolio_heat=self.config.max_portfolio_heat,
+            max_daily_loss=self.config.circuit_breaker_dd_pct,
         )
-        self.engine = V21ProductionEngine(v21_config)
-        logger.info("✅ V2.1 Trading Engine initialized")
+        self.engine = V25ProductionEngine(v25_config)
+        logger.info("✅ V2.5 Adaptive Trading Engine initialized")
         
         # 2. Alpaca Client (paper or live)
         try:

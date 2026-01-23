@@ -1,0 +1,15 @@
+{
+  "timestamp": "2026-01-23T17:21:47.110118",
+  "phase": 3,
+  "baseline_sharpe": 0.646990417397113,
+  "sized_sharpe": 0.707156070827171,
+  "sharpe_cost": -0.060165653430057975,
+  "baseline_dd": 0.18528815696759948,
+  "sized_dd": 0.008861593845160673,
+  "dd_reduction": 0.17642656312243882,
+  "baseline_cagr": 0.09796162547839904,
+  "sized_cagr": 0.005597181779494198,
+  "dd_passed": true,
+  "sharpe_acceptable": true,
+  "passed": true
+}

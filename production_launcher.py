@@ -139,6 +139,17 @@ except ImportError as e:
     RL_AVAILABLE = False
     logger.info(f"V2.2 RL components not available: {e} (using V2.1 baseline)")
 
+# Import V26 components (adaptive learning)
+try:
+    from src.ml.continuous_learner import ContinuousLearner, ContinuousLearnerConfig, TradeResult
+    from src.risk.circuit_breakers import V26CircuitBreakers, V26CircuitBreakerConfig
+    from src.monitoring.model_health import ModelHealthMonitor, ModelHealthConfig
+    V26_AVAILABLE = True
+    logger.info("V26 Adaptive Learning components available")
+except ImportError as e:
+    V26_AVAILABLE = False
+    logger.info(f"V26 components not available: {e}")
+
 
 # =============================================================================
 # CONFIGURATION
@@ -182,6 +193,12 @@ class LauncherConfig:
     use_hierarchical_regime: bool = True  # Enable hierarchical controller
     use_anomaly_detection: bool = True    # Enable anomaly-aware sizing
     rl_blend_weight: float = 0.6          # Weight for RL vs base signal
+    
+    # V26 Adaptive Learning enhancements
+    use_v26_continuous_learning: bool = True   # Enable continuous learner
+    use_v26_circuit_breakers: bool = True      # Enable 3-level circuit breakers
+    use_v26_model_health: bool = True          # Enable model health monitoring
+    v26_metrics_log_path: str = "logs/v26_metrics.jsonl"
     
     # Monitoring
     enable_dashboard: bool = True
@@ -339,6 +356,49 @@ class ProductionLauncher:
             )
             self.graceful_shutdown.register()
             logger.info("✅ Graceful shutdown handler registered")
+        
+        # 9. V26 Continuous Learner
+        self.continuous_learner = None
+        if V26_AVAILABLE and self.config.use_v26_continuous_learning:
+            try:
+                learner_config = ContinuousLearnerConfig(
+                    metrics_log_path=self.config.v26_metrics_log_path
+                )
+                self.continuous_learner = ContinuousLearner(learner_config)
+                self.continuous_learner.discord_callback = send_discord if self.config.discord_notifications else None
+                logger.info("✅ V26 Continuous Learner initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  V26 Continuous Learner failed: {e}")
+        
+        # 10. V26 Circuit Breakers
+        self.v26_circuit_breakers = None
+        if V26_AVAILABLE and self.config.use_v26_circuit_breakers:
+            try:
+                breaker_config = V26CircuitBreakerConfig(
+                    max_position_pct=self.config.max_position_pct
+                )
+                self.v26_circuit_breakers = V26CircuitBreakers(breaker_config)
+                self.v26_circuit_breakers.discord_callback = send_discord if self.config.discord_notifications else None
+                if self.alpaca:
+                    account = self.alpaca.get_account()
+                    self.v26_circuit_breakers.reset_daily(float(account.equity))
+                logger.info("✅ V26 Circuit Breakers initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  V26 Circuit Breakers failed: {e}")
+        
+        # 11. V26 Model Health Monitor
+        self.model_health_monitor = None
+        if V26_AVAILABLE and self.config.use_v26_model_health:
+            try:
+                health_config = ModelHealthConfig(
+                    metrics_log_path=self.config.v26_metrics_log_path.replace('.jsonl', '_health.jsonl')
+                )
+                self.model_health_monitor = ModelHealthMonitor(health_config)
+                self.model_health_monitor.set_discord_callback(send_discord if self.config.discord_notifications else None)
+                self.model_health_monitor.start_background_monitoring(interval_seconds=300)  # 5 min
+                logger.info("✅ V26 Model Health Monitor initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  V26 Model Health Monitor failed: {e}")
                 
         logger.info("=" * 60)
         logger.info("INITIALIZATION COMPLETE - READY FOR TRADING")
@@ -520,6 +580,14 @@ class ProductionLauncher:
             self._update_drawdown(equity)
             if self._is_halted:
                 return []
+            
+            # V26: Update circuit breakers and check if trading allowed
+            if self.v26_circuit_breakers:
+                breaker_state = self.v26_circuit_breakers.update(equity)
+                can_trade, reason = self.v26_circuit_breakers.can_trade()
+                if not can_trade:
+                    logger.warning(f"V26 Circuit Breaker: {reason}")
+                    return []
                 
             # Check if in high-liquidity hours
             current_hour = datetime.now().hour
@@ -533,11 +601,24 @@ class ProductionLauncher:
                 try:
                     target_weight = signal.get("weight", 0.0)
                     direction = signal.get("direction", "flat")
+                    confidence = signal.get("confidence", 0.5)
+                    
+                    # V26: Check signal against circuit breaker confidence filter
+                    if self.v26_circuit_breakers:
+                        should_trade, reason = self.v26_circuit_breakers.should_trade_signal(confidence)
+                        if not should_trade:
+                            logger.info(f"V26 Signal filtered for {ticker}: {reason}")
+                            continue
                     
                     # Calculate target shares
                     current_pos = current_positions.get(ticker)
                     current_value = float(current_pos.market_value) if current_pos else 0.0
                     target_value = equity * target_weight
+                    
+                    # V26: Adjust position size using circuit breaker scaling
+                    if self.v26_circuit_breakers:
+                        kelly_scale = self.v26_circuit_breakers.get_state().kelly_scale
+                        target_value = target_value * kelly_scale
                     
                     trade_value = target_value - current_value
                     
@@ -591,6 +672,19 @@ class ProductionLauncher:
                         executed_trades.append(trade_record)
                         self._daily_trades.append(trade_record)
                         
+                        # V26: Record trade for circuit breaker Kelly calculation
+                        if self.v26_circuit_breakers:
+                            # PnL will be updated later when we know actual fill
+                            pass
+                        
+                        # V26: Record trade for model health monitoring
+                        if self.model_health_monitor:
+                            self.model_health_monitor.record_trade(
+                                predicted_direction=direction,
+                                actual_return=0.0,  # Updated later with actual
+                                confidence=confidence
+                            )
+                        
                         # Notify
                         if self.config.discord_notifications:
                             notify_trade_executed(
@@ -611,6 +705,38 @@ class ProductionLauncher:
             logger.error(f"Trade execution error: {e}")
             traceback.print_exc()
             return []
+    
+    def record_trade_result(self, ticker: str, direction: str, 
+                           predicted_return: float, actual_return: float,
+                           confidence: float):
+        """
+        V26: Record trade result for continuous learning.
+        
+        Called when trade outcome is known (e.g., after position closed).
+        """
+        if self.continuous_learner:
+            result = TradeResult(
+                timestamp=datetime.now(),
+                ticker=ticker,
+                signal_direction=direction,
+                signal_confidence=confidence,
+                predicted_return=predicted_return,
+                actual_return=actual_return,
+                is_hit=(predicted_return > 0) == (actual_return > 0)
+            )
+            update = self.continuous_learner.record_trade(result)
+            
+            # Check if recalibration needed
+            if update.get('needs_recalibration'):
+                self.continuous_learner.trigger_recalibration(reason="accuracy_drop")
+        
+        # Update circuit breaker Kelly
+        if self.v26_circuit_breakers:
+            self.v26_circuit_breakers.record_trade(actual_return)
+        
+        # Update model health
+        if self.model_health_monitor:
+            self.model_health_monitor.record_trade(direction, actual_return, confidence)
             
     def _update_drawdown(self, current_equity: float):
         """Update drawdown and check circuit breakers."""

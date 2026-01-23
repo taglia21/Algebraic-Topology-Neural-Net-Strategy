@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-01-23T17:21:42.081264",
+  "phase": 2,
+  "base_sharpe": 1.7593653718619062,
+  "augmented_sharpe": 1.8024486317390467,
+  "sharpe_improvement": 0.043083259877140456,
+  "pattern_matches": 142,
+  "pattern_trades_made": 140,
+  "pattern_win_rate": 0.5357142857142857,
+  "win_rate_passed": false,
+  "sharpe_passed": true,
+  "passed": true
+}

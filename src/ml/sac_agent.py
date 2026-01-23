@@ -357,9 +357,221 @@ class SACConfig:
     warmup_steps: int = 1000
     update_every: int = 1
     
+    # V26 Enhancements
+    use_curiosity: bool = True              # Intrinsic curiosity rewards
+    curiosity_scale: float = 0.1            # Curiosity reward scaling
+    curiosity_lr: float = 1e-4              # Curiosity module learning rate
+    
+    use_multi_timeframe: bool = True        # Multi-timeframe actions
+    hourly_weight: float = 0.5              # Weight for 1hr entry signals
+    daily_weight: float = 0.3               # Weight for daily sizing
+    weekly_weight: float = 0.2              # Weight for weekly rotation
+    
     def __post_init__(self):
         if self.hidden_dims is None:
             self.hidden_dims = [256, 256]
+
+
+# =============================================================================
+# V26 INTRINSIC CURIOSITY MODULE (ICM)
+# =============================================================================
+
+if TORCH_AVAILABLE:
+    class IntrinsicCuriosityModule(nn.Module):
+        """
+        Intrinsic Curiosity Module for exploration.
+        
+        Provides intrinsic reward based on prediction error of next state.
+        Encourages exploration of novel states.
+        
+        Based on: Pathak et al., "Curiosity-driven Exploration" (2017)
+        """
+        
+        def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 128):
+            super().__init__()
+            
+            # State encoder (inverse model)
+            self.state_encoder = nn.Sequential(
+                nn.Linear(state_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim // 2)
+            )
+            
+            # Forward model: predict next encoded state from current + action
+            self.forward_model = nn.Sequential(
+                nn.Linear(hidden_dim // 2 + action_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim // 2)
+            )
+            
+            # Inverse model: predict action from state pair
+            self.inverse_model = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, action_dim)
+            )
+        
+        def forward(self, state, action, next_state):
+            """
+            Compute curiosity reward.
+            
+            Returns:
+                curiosity_reward: Intrinsic reward based on prediction error
+                forward_loss: Forward model loss for training
+                inverse_loss: Inverse model loss for training
+            """
+            # Encode states
+            phi_state = self.state_encoder(state)
+            phi_next_state = self.state_encoder(next_state)
+            
+            # Forward model prediction
+            forward_input = torch.cat([phi_state, action], dim=-1)
+            pred_phi_next = self.forward_model(forward_input)
+            
+            # Forward loss (prediction error = curiosity)
+            forward_loss = 0.5 * (pred_phi_next - phi_next_state.detach()).pow(2).sum(-1)
+            
+            # Inverse model prediction
+            inverse_input = torch.cat([phi_state, phi_next_state], dim=-1)
+            pred_action = self.inverse_model(inverse_input)
+            
+            # Inverse loss
+            inverse_loss = 0.5 * (pred_action - action).pow(2).sum(-1)
+            
+            # Curiosity reward is forward loss (novel = high error = high reward)
+            curiosity_reward = forward_loss.detach()
+            
+            return curiosity_reward, forward_loss.mean(), inverse_loss.mean()
+else:
+    IntrinsicCuriosityModule = None
+
+
+# =============================================================================
+# V26 MULTI-TIMEFRAME CONTROLLER
+# =============================================================================
+
+class MultiTimeframeController:
+    """
+    Multi-timeframe action controller.
+    
+    Combines signals from multiple timeframes:
+    - 1hr: Entry timing
+    - Daily: Position sizing
+    - Weekly: Sector rotation
+    """
+    
+    def __init__(self, config: 'SACConfig'):
+        self.config = config
+        
+        # Historical signals by timeframe
+        self.hourly_signals: List[float] = []
+        self.daily_signals: List[float] = []
+        self.weekly_signals: List[float] = []
+        
+        # Current combined signal
+        self.current_signal: float = 0.0
+    
+    def update_hourly(self, signal: float):
+        """Update 1hr entry signal."""
+        self.hourly_signals.append(signal)
+        if len(self.hourly_signals) > 24:  # Keep last 24 hours
+            self.hourly_signals = self.hourly_signals[-24:]
+    
+    def update_daily(self, signal: float):
+        """Update daily sizing signal."""
+        self.daily_signals.append(signal)
+        if len(self.daily_signals) > 20:  # Keep last 20 days
+            self.daily_signals = self.daily_signals[-20:]
+    
+    def update_weekly(self, signal: float):
+        """Update weekly rotation signal."""
+        self.weekly_signals.append(signal)
+        if len(self.weekly_signals) > 12:  # Keep last 12 weeks
+            self.weekly_signals = self.weekly_signals[-12:]
+    
+    def get_combined_signal(self) -> float:
+        """
+        Get weighted combination of signals.
+        
+        Returns:
+            Combined signal in [0, 1]
+        """
+        signals = []
+        weights = []
+        
+        if self.hourly_signals:
+            # Use most recent hourly + short-term momentum
+            hourly_val = np.mean(self.hourly_signals[-4:]) if len(self.hourly_signals) >= 4 else self.hourly_signals[-1]
+            signals.append(hourly_val)
+            weights.append(self.config.hourly_weight)
+        
+        if self.daily_signals:
+            # Use daily trend
+            daily_val = np.mean(self.daily_signals[-5:]) if len(self.daily_signals) >= 5 else self.daily_signals[-1]
+            signals.append(daily_val)
+            weights.append(self.config.daily_weight)
+        
+        if self.weekly_signals:
+            # Use weekly regime
+            weekly_val = np.mean(self.weekly_signals[-2:]) if len(self.weekly_signals) >= 2 else self.weekly_signals[-1]
+            signals.append(weekly_val)
+            weights.append(self.config.weekly_weight)
+        
+        if not signals:
+            return 0.5  # Neutral
+        
+        # Normalize weights
+        total_weight = sum(weights)
+        weights = [w / total_weight for w in weights]
+        
+        # Weighted average
+        combined = sum(s * w for s, w in zip(signals, weights))
+        self.current_signal = float(np.clip(combined, 0, 1))
+        
+        return self.current_signal
+    
+    def get_entry_timing_multiplier(self) -> float:
+        """Get entry timing multiplier from hourly signals."""
+        if len(self.hourly_signals) < 4:
+            return 1.0
+        
+        # Check for momentum alignment
+        recent = self.hourly_signals[-4:]
+        trend = (recent[-1] - recent[0]) / 4  # Slope
+        
+        if trend > 0.05:  # Strong uptrend
+            return 1.2
+        elif trend < -0.05:  # Strong downtrend
+            return 0.8
+        return 1.0
+    
+    def get_sizing_multiplier(self) -> float:
+        """Get position sizing multiplier from daily signals."""
+        if len(self.daily_signals) < 5:
+            return 1.0
+        
+        # Higher sizing when daily trend is strong
+        daily_std = np.std(self.daily_signals[-20:]) if len(self.daily_signals) >= 20 else 0.1
+        daily_mean = np.mean(self.daily_signals[-5:])
+        
+        if daily_mean > 0.6 and daily_std < 0.15:  # Strong, stable trend
+            return 1.3
+        elif daily_mean < 0.4 or daily_std > 0.25:  # Weak or volatile
+            return 0.7
+        return 1.0
+    
+    def get_rotation_signal(self) -> str:
+        """Get weekly rotation signal."""
+        if len(self.weekly_signals) < 2:
+            return "hold"
+        
+        recent_avg = np.mean(self.weekly_signals[-2:])
+        
+        if recent_avg > 0.65:
+            return "aggressive"
+        elif recent_avg < 0.35:
+            return "defensive"
+        return "neutral"
 
 
 class SACAgent:
@@ -449,9 +661,30 @@ class SACAgent:
             beta_frames=100000
         )
         
+        # V26: Intrinsic Curiosity Module
+        self.curiosity_module = None
+        self.curiosity_optimizer = None
+        if self.config.use_curiosity and IntrinsicCuriosityModule is not None:
+            self.curiosity_module = IntrinsicCuriosityModule(
+                self.config.state_dim,
+                self.config.action_dim
+            ).to(self.device)
+            self.curiosity_optimizer = torch.optim.Adam(
+                self.curiosity_module.parameters(),
+                lr=self.config.curiosity_lr
+            )
+            logger.info("V26: Intrinsic Curiosity Module enabled")
+        
+        # V26: Multi-timeframe controller
+        self.mtf_controller = None
+        if self.config.use_multi_timeframe:
+            self.mtf_controller = MultiTimeframeController(self.config)
+            logger.info("V26: Multi-timeframe controller enabled")
+        
         # Training state
         self.total_steps = 0
         self.updates = 0
+        self.curiosity_rewards_total = 0.0
         
         # Try to load saved model
         self._load_model()
@@ -552,6 +785,25 @@ class SACAgent:
         dones = torch.FloatTensor(np.array([[e.done] for e in experiences])).to(self.device)
         weights_t = torch.FloatTensor(weights).unsqueeze(1).to(self.device)
         
+        # V26: Add intrinsic curiosity rewards
+        curiosity_loss = 0.0
+        if self.curiosity_module is not None:
+            curiosity_reward, forward_loss, inverse_loss = self.curiosity_module(
+                states, actions, next_states
+            )
+            # Scale and add to extrinsic rewards
+            intrinsic_rewards = curiosity_reward.unsqueeze(1) * self.config.curiosity_scale
+            rewards = rewards + intrinsic_rewards
+            self.curiosity_rewards_total += intrinsic_rewards.mean().item()
+            
+            # Update curiosity module
+            curiosity_loss = forward_loss + 0.2 * inverse_loss
+            self.curiosity_optimizer.zero_grad()
+            curiosity_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.curiosity_module.parameters(), 1.0)
+            self.curiosity_optimizer.step()
+            curiosity_loss = curiosity_loss.item()
+        
         # Update critic
         with torch.no_grad():
             next_actions, next_log_probs = self.actor.sample(next_states)
@@ -604,21 +856,26 @@ class SACAgent:
             'actor_loss': actor_loss.item(),
             'alpha': self.alpha,
             'mean_q': q1.mean().item(),
-            'mean_td_error': td_errors.mean()
+            'mean_td_error': td_errors.mean(),
+            'curiosity_loss': curiosity_loss if isinstance(curiosity_loss, float) else 0.0
         }
     
     def compute_position_multiplier(self, state: np.ndarray, 
                                     vol_20d: float = 0.02, 
                                     vix: float = 20.0,
-                                    deterministic: bool = True) -> float:
+                                    deterministic: bool = True,
+                                    hourly_signal: Optional[float] = None) -> float:
         """
         Compute position sizing multiplier with dynamic scaling.
+        
+        V26 Enhanced: Includes multi-timeframe adjustments.
         
         Args:
             state: Current state features
             vol_20d: 20-day realized volatility
             vix: Current VIX level
             deterministic: Use deterministic action
+            hourly_signal: Optional 1hr signal for MTF (V26)
         
         Returns:
             Position multiplier (typically 0.25-2.0)
@@ -638,21 +895,55 @@ class SACAgent:
         else:  # Normal
             regime_scale = 1.0
         
+        # V26: Multi-timeframe adjustment
+        mtf_scale = 1.0
+        if self.mtf_controller is not None:
+            if hourly_signal is not None:
+                self.mtf_controller.update_hourly(hourly_signal)
+            mtf_scale = self.mtf_controller.get_entry_timing_multiplier() * \
+                       self.mtf_controller.get_sizing_multiplier()
+        
         # Final multiplier
-        multiplier = base_action * vol_scale * regime_scale
+        multiplier = base_action * vol_scale * regime_scale * mtf_scale
         
         # Clamp to safe range
         return float(np.clip(multiplier, 0.25, 2.0))
     
+    def update_daily_signal(self, signal: float):
+        """V26: Update daily signal for multi-timeframe controller."""
+        if self.mtf_controller is not None:
+            self.mtf_controller.update_daily(signal)
+    
+    def update_weekly_signal(self, signal: float):
+        """V26: Update weekly signal for multi-timeframe controller."""
+        if self.mtf_controller is not None:
+            self.mtf_controller.update_weekly(signal)
+    
+    def get_rotation_recommendation(self) -> str:
+        """V26: Get weekly rotation recommendation."""
+        if self.mtf_controller is not None:
+            return self.mtf_controller.get_rotation_signal()
+        return "neutral"
+    
     def get_stats(self) -> Dict[str, any]:
         """Get current agent statistics."""
-        return {
+        stats = {
             'total_steps': self.total_steps,
             'updates': self.updates,
             'buffer_size': len(self.buffer),
             'alpha': self.alpha,
             'beta': self.buffer.beta,
         }
+        
+        # V26 stats
+        if self.curiosity_module is not None:
+            stats['curiosity_rewards_total'] = self.curiosity_rewards_total
+        
+        if self.mtf_controller is not None:
+            stats['mtf_combined_signal'] = self.mtf_controller.current_signal
+            stats['rotation_signal'] = self.mtf_controller.get_rotation_signal()
+        
+        return stats
 
 
 # =============================================================================

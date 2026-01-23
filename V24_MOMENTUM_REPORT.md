@@ -1,4 +1,4 @@
-# V24 Low-Beta Momentum Strategy Report
+ls -la src/ml/ && cat production_launcher.py | head -100# V24 Low-Beta Momentum Strategy Report
 
 ## Executive Summary
 

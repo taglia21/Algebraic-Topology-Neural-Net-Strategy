@@ -1,0 +1,102 @@
+{
+  "summary": {
+    "total": 15,
+    "passed": 15,
+    "failed": 0,
+    "pass_rate": 100.0,
+    "failed_tests": []
+  },
+  "results": [
+    {
+      "name": "Kelly Calculator",
+      "success": true,
+      "message": "Kelly fraction: 10.00%",
+      "timestamp": "2026-01-23T01:38:49.961153"
+    },
+    {
+      "name": "Position Sizer - Drawdown",
+      "success": true,
+      "message": "Normal: $5,500, Drawdown: $3,233",
+      "timestamp": "2026-01-23T01:38:49.961587"
+    },
+    {
+      "name": "Position Sizer - Halt",
+      "success": true,
+      "message": "Position sizing halted at -16% drawdown",
+      "timestamp": "2026-01-23T01:38:49.962006"
+    },
+    {
+      "name": "Circuit Breaker States",
+      "success": true,
+      "message": "States: normal -> warning -> halted",
+      "timestamp": "2026-01-23T01:38:49.962775"
+    },
+    {
+      "name": "Pre-Trade Validation",
+      "success": true,
+      "message": "Pre-trade validation passed (except market hours)",
+      "timestamp": "2026-01-23T01:38:49.963199"
+    },
+    {
+      "name": "Order Submission",
+      "success": true,
+      "message": "Order submitted: V23-20260123013849-000001",
+      "timestamp": "2026-01-23T01:38:49.963901"
+    },
+    {
+      "name": "Order Type Selection",
+      "success": true,
+      "message": "Small order: market, Large order: twap",
+      "timestamp": "2026-01-23T01:38:49.964863"
+    },
+    {
+      "name": "Alert System",
+      "success": true,
+      "message": "Alerts sent: 2",
+      "timestamp": "2026-01-23T01:38:49.965805"
+    },
+    {
+      "name": "Metrics Tracker",
+      "success": true,
+      "message": "Tracked 10 trades, Win rate: 70.0%",
+      "timestamp": "2026-01-23T01:38:49.966367"
+    },
+    {
+      "name": "Paper Validator",
+      "success": true,
+      "message": "Validation: 12/12 checks passed",
+      "timestamp": "2026-01-23T01:38:49.971761"
+    },
+    {
+      "name": "Full Order Flow",
+      "success": true,
+      "message": "Full flow completed: $5,083 -> 33.9 shares",
+      "timestamp": "2026-01-23T01:38:49.972813"
+    },
+    {
+      "name": "Circuit Breaker Blocks Execution",
+      "success": true,
+      "message": "Execution blocked: Trading halted: Daily loss limit: -6.0%",
+      "timestamp": "2026-01-23T01:38:49.973227"
+    },
+    {
+      "name": "Monitoring Integration",
+      "success": true,
+      "message": "Dashboard healthy, 3 components",
+      "timestamp": "2026-01-23T01:38:49.975338"
+    },
+    {
+      "name": "State Persistence",
+      "success": true,
+      "message": "State persistence verified",
+      "timestamp": "2026-01-23T01:38:49.979197"
+    },
+    {
+      "name": "Emergency Kill Switch",
+      "success": true,
+      "message": "Kill switch ready, not activated",
+      "timestamp": "2026-01-23T01:38:49.979406"
+    }
+  ],
+  "timestamp": "2026-01-23T01:38:49.979914"
+}

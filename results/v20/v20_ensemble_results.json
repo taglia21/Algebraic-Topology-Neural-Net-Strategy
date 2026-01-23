@@ -1,0 +1,28 @@
+{
+  "phase": "Phase 2: Enhanced Ensemble",
+  "total_return": 0.235585807744767,
+  "cagr": 0.29373486825855966,
+  "sharpe": 1.2835413469189139,
+  "max_drawdown": -0.11468080729192888,
+  "annual_vol": 0.21934070973417397,
+  "win_rate": 0.5507246376811594,
+  "trading_days": 207,
+  "avg_weights": {
+    "reversal": 0.34430246179589785,
+    "meanrev": 0.3273027753619033,
+    "volrev": 0.328394762842199
+  },
+  "targets_met": {
+    "cagr_gt_32pct": false,
+    "sharpe_gt_1.35": false,
+    "maxdd_gt_minus18": true
+  },
+  "v19_comparison": {
+    "v19_cagr": 0.235,
+    "v19_sharpe": 1.15,
+    "v19_maxdd": -0.135,
+    "cagr_improvement": 0.05873486825855967,
+    "sharpe_improvement": 0.13354134691891395
+  },
+  "timestamp": "2026-01-22T20:39:17.491481"
+}

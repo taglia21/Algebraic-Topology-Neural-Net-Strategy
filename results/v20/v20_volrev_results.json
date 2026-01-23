@@ -1,0 +1,16 @@
+{
+  "phase": "Phase 1: Volatility Reversal",
+  "total_return": 0.35588567427886497,
+  "cagr": 0.4486625005630638,
+  "sharpe": 1.3018496417188736,
+  "max_drawdown": -0.20325523728686812,
+  "annual_vol": 0.32502433580408985,
+  "win_rate": 0.5362318840579711,
+  "trading_days": 207,
+  "avg_positions": 34.83558994197292,
+  "targets_met": {
+    "cagr_gt_20pct": true,
+    "sharpe_gt_1": true
+  },
+  "timestamp": "2026-01-22T20:39:13.012246"
+}

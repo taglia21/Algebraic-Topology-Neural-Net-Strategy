@@ -1,0 +1,451 @@
+{
+  "paper_stats": {
+    "start_date": "2026-01-06",
+    "end_date": "2026-01-22",
+    "trading_days": 12,
+    "total_trades": 25,
+    "signals_generated": 25,
+    "orders_filled": 22,
+    "orders_rejected": 3,
+    "orders_cancelled": 0,
+    "total_return_pct": -3.8637934900523807,
+    "annualized_return_pct": -56.28539057032307,
+    "sharpe_ratio": -3.116805903214496,
+    "max_drawdown_pct": -2.907259133212176,
+    "win_rate_pct": 44.0,
+    "avg_slippage_bps": 11.24881950381759,
+    "max_slippage_bps": 19.54376941646838,
+    "critical_errors": 0,
+    "total_errors": 1,
+    "uptime_pct": 100.0
+  },
+  "signals": [
+    {
+      "symbol": "STOCK0",
+      "signal": "buy",
+      "strength": 0.6872700594236812,
+      "timestamp": "2026-01-23T01:37:14.615054"
+    },
+    {
+      "symbol": "STOCK1",
+      "signal": "buy",
+      "strength": 0.8659969709057025,
+      "timestamp": "2026-01-23T01:37:14.615088"
+    },
+    {
+      "symbol": "STOCK2",
+      "signal": "buy",
+      "strength": 0.9330880728874675,
+      "timestamp": "2026-01-23T01:37:14.615199"
+    },
+    {
+      "symbol": "STOCK3",
+      "signal": "buy",
+      "strength": 0.5102922471479012,
+      "timestamp": "2026-01-23T01:37:14.615260"
+    },
+    {
+      "symbol": "STOCK4",
+      "signal": "buy",
+      "strength": 0.9162213204002109,
+      "timestamp": "2026-01-23T01:37:14.615278"
+    },
+    {
+      "symbol": "STOCK5",
+      "signal": "buy",
+      "strength": 0.762378215816119,
+      "timestamp": "2026-01-23T01:37:14.615333"
+    },
+    {
+      "symbol": "STOCK6",
+      "signal": "buy",
+      "strength": 0.8059264473611898,
+      "timestamp": "2026-01-23T01:37:14.615379"
+    },
+    {
+      "symbol": "STOCK7",
+      "signal": "buy",
+      "strength": 0.8925879806965068,
+      "timestamp": "2026-01-23T01:37:14.615418"
+    },
+    {
+      "symbol": "STOCK8",
+      "signal": "buy",
+      "strength": 0.7962072844310213,
+      "timestamp": "2026-01-23T01:37:14.615457"
+    },
+    {
+      "symbol": "STOCK9",
+      "signal": "buy",
+      "strength": 0.9744427686266666,
+      "timestamp": "2026-01-23T01:37:14.615504"
+    },
+    {
+      "symbol": "STOCK0",
+      "signal": "buy",
+      "strength": 0.9041986740582306,
+      "timestamp": "2026-01-23T01:37:14.615541"
+    },
+    {
+      "symbol": "STOCK1",
+      "signal": "buy",
+      "strength": 0.8421165132560784,
+      "timestamp": "2026-01-23T01:37:14.615596"
+    },
+    {
+      "symbol": "STOCK2",
+      "signal": "buy",
+      "strength": 0.954660201039391,
+      "timestamp": "2026-01-23T01:37:14.615654"
+    },
+    {
+      "symbol": "STOCK3",
+      "signal": "buy",
+      "strength": 0.6558555380447055,
+      "timestamp": "2026-01-23T01:37:14.615701"
+    },
+    {
+      "symbol": "STOCK4",
+      "signal": "buy",
+      "strength": 0.8875664116805573,
+      "timestamp": "2026-01-23T01:37:14.615741"
+    },
+    {
+      "symbol": "STOCK5",
+      "signal": "buy",
+      "strength": 0.7989499894055425,
+      "timestamp": "2026-01-23T01:37:14.615781"
+    },
+    {
+      "symbol": "STOCK6",
+      "signal": "buy",
+      "strength": 0.6356745158869479,
+      "timestamp": "2026-01-23T01:37:14.615819"
+    },
+    {
+      "symbol": "STOCK7",
+      "signal": "buy",
+      "strength": 0.6404672548436904,
+      "timestamp": "2026-01-23T01:37:14.615856"
+    },
+    {
+      "symbol": "STOCK8",
+      "signal": "buy",
+      "strength": 0.9934434683002586,
+      "timestamp": "2026-01-23T01:37:14.615901"
+    },
+    {
+      "symbol": "STOCK9",
+      "signal": "buy",
+      "strength": 0.5027610585618012,
+      "timestamp": "2026-01-23T01:37:14.615938"
+    },
+    {
+      "symbol": "STOCK0",
+      "signal": "buy",
+      "strength": 0.5370223258670452,
+      "timestamp": "2026-01-23T01:37:14.615976"
+    },
+    {
+      "symbol": "STOCK1",
+      "signal": "buy",
+      "strength": 0.9315517129377968,
+      "timestamp": "2026-01-23T01:37:14.616020"
+    },
+    {
+      "symbol": "STOCK2",
+      "signal": "buy",
+      "strength": 0.6625916610133735,
+      "timestamp": "2026-01-23T01:37:14.616067"
+    },
+    {
+      "symbol": "STOCK3",
+      "signal": "buy",
+      "strength": 0.9436063712881633,
+      "timestamp": "2026-01-23T01:37:14.616119"
+    },
+    {
+      "symbol": "STOCK4",
+      "signal": "buy",
+      "strength": 0.7806385987847482,
+      "timestamp": "2026-01-23T01:37:14.616162"
+    }
+  ],
+  "trades": [
+    {
+      "symbol": "STOCK0",
+      "status": "rejected",
+      "reason": "Insufficient liquidity",
+      "timestamp": "2026-01-23T01:37:14.615072"
+    },
+    {
+      "symbol": "STOCK1",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 3.1693250553328056,
+      "slippage_bps": 5.871254182522992,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615106"
+    },
+    {
+      "symbol": "STOCK2",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 3.1726086101638913,
+      "slippage_bps": 15.621088666940683,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615215"
+    },
+    {
+      "symbol": "STOCK3",
+      "status": "rejected",
+      "reason": "Insufficient liquidity",
+      "timestamp": "2026-01-23T01:37:14.615268"
+    },
+    {
+      "symbol": "STOCK4",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -42.68353856249246,
+      "slippage_bps": 9.563633644393066,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615291"
+    },
+    {
+      "symbol": "STOCK5",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -43.14595071405137,
+      "slippage_bps": 9.368437102970628,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615348"
+    },
+    {
+      "symbol": "STOCK6",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -131.6048151042422,
+      "slippage_bps": 11.841049763255539,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615391"
+    },
+    {
+      "symbol": "STOCK7",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -232.46074026705827,
+      "slippage_bps": 12.713516576204174,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615429"
+    },
+    {
+      "symbol": "STOCK8",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -180.19871548446056,
+      "slippage_bps": 5.975773894779193,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615472"
+    },
+    {
+      "symbol": "STOCK9",
+      "status": "rejected",
+      "reason": "Insufficient liquidity",
+      "timestamp": "2026-01-23T01:37:14.615510"
+    },
+    {
+      "symbol": "STOCK0",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 125.13960366913439,
+      "slippage_bps": 6.465081710095758,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615555"
+    },
+    {
+      "symbol": "STOCK1",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 47.300555052413216,
+      "slippage_bps": 5.515827816728276,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615614"
+    },
+    {
+      "symbol": "STOCK2",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -161.54218579118006,
+      "slippage_bps": 14.93783426530973,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615668"
+    },
+    {
+      "symbol": "STOCK3",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -215.6372097796861,
+      "slippage_bps": 19.54376941646838,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615714"
+    },
+    {
+      "symbol": "STOCK4",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 89.3722471738247,
+      "slippage_bps": 18.422410256414732,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615753"
+    },
+    {
+      "symbol": "STOCK5",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 26.870343522351895,
+      "slippage_bps": 10.830159345342231,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615793"
+    },
+    {
+      "symbol": "STOCK6",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -10.220739117857761,
+      "slippage_bps": 10.35129990040384,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615831"
+    },
+    {
+      "symbol": "STOCK7",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 114.816793878959,
+      "slippage_bps": 6.118259655196562,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615873"
+    },
+    {
+      "symbol": "STOCK8",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -27.016456083263307,
+      "slippage_bps": 7.980735223012586,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615913"
+    },
+    {
+      "symbol": "STOCK9",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 256.1999044991902,
+      "slippage_bps": 16.569055200289185,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615950"
+    },
+    {
+      "symbol": "STOCK0",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 236.2560238232397,
+      "slippage_bps": 6.738035892876946,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.615987"
+    },
+    {
+      "symbol": "STOCK1",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -45.834847569057985,
+      "slippage_bps": 9.664734825734932,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.616032"
+    },
+    {
+      "symbol": "STOCK2",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 12.868204667236576,
+      "slippage_bps": 14.563362070328196,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.616081"
+    },
+    {
+      "symbol": "STOCK3",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": 122.32720500952684,
+      "slippage_bps": 16.411775729253463,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.616132"
+    },
+    {
+      "symbol": "STOCK4",
+      "side": "buy",
+      "quantity": 100,
+      "pnl": -79.02395092102486,
+      "slippage_bps": 12.40693394546586,
+      "status": "filled",
+      "timestamp": "2026-01-23T01:37:14.616173"
+    }
+  ],
+  "daily_returns": [
+    [
+      "2026-01-06",
+      -3.729617656134616
+    ],
+    [
+      "2026-01-07",
+      1.4328537565628356
+    ],
+    [
+      "2026-01-08",
+      0.3305706023572569
+    ],
+    [
+      "2026-01-09",
+      -0.24851102569880118
+    ],
+    [
+      "2026-01-10",
+      0.33764116480325346
+    ],
+    [
+      "2026-01-11",
+      -2.7813533719013392
+    ],
+    [
+      "2026-01-12",
+      -0.1295078317562679
+    ],
+    [
+      "2026-01-13",
+      0.7356688572676195
+    ],
+    [
+      "2026-01-14",
+      2.416841067112274
+    ],
+    [
+      "2026-01-15",
+      -0.5774053274104711
+    ],
+    [
+      "2026-01-16",
+      -1.0127404043397814
+    ],
+    [
+      "2026-01-17",
+      -0.5526355653768049
+    ]
+  ],
+  "errors": [
+    {
+      "type": "api_timeout",
+      "severity": "warning",
+      "message": "API timeout during quote fetch",
+      "timestamp": "2026-01-23T01:37:14.617703"
+    }
+  ],
+  "timestamp": "2026-01-23T01:37:14.620337"
+}

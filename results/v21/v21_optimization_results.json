@@ -1,0 +1,216 @@
+{
+  "best_config": {
+    "params": {
+      "n_positions": 30,
+      "holding_period": 5,
+      "vol_threshold": 0.3,
+      "rsi_threshold": 35,
+      "drawdown_min": -0.12,
+      "drawdown_max": -0.5
+    },
+    "metrics": {
+      "cagr": 0.552126257635277,
+      "sharpe": 1.5376879007542086,
+      "max_drawdown": -0.2230548986103513,
+      "win_rate": 0.5507246376811594,
+      "annual_vol": 0.31879615734620853,
+      "avg_positions": 29.97584541062802
+    }
+  },
+  "top_10": [
+    {
+      "rank": 1,
+      "params": {
+        "n_positions": 30,
+        "holding_period": 5,
+        "vol_threshold": 0.3,
+        "rsi_threshold": 35,
+        "drawdown_min": -0.12,
+        "drawdown_max": -0.5
+      },
+      "cagr": 0.552126257635277,
+      "sharpe": 1.5376879007542086,
+      "max_dd": -0.2230548986103513,
+      "win_rate": 0.5507246376811594
+    },
+    {
+      "rank": 2,
+      "params": {
+        "n_positions": 30,
+        "holding_period": 5,
+        "vol_threshold": 0.3,
+        "rsi_threshold": 35,
+        "drawdown_min": -0.12,
+        "drawdown_max": -0.55
+      },
+      "cagr": 0.5361195850001146,
+      "sharpe": 1.4987958959308791,
+      "max_dd": -0.2243496527116198,
+      "win_rate": 0.5458937198067633
+    },
+    {
+      "rank": 3,
+      "params": {
+        "n_positions": 30,
+        "holding_period": 5,
+        "vol_threshold": 0.3,
+        "rsi_threshold": 35,
+        "drawdown_min": -0.12,
+        "drawdown_max": -0.45
+      },
+      "cagr": 0.5255532985779467,
+      "sharpe": 1.4781621981171311,
+      "max_dd": -0.2230548986103513,
+      "win_rate": 0.5507246376811594
+    },
+    {
+      "rank": 4,
+      "params": {
+        "n_positions": 40,
+        "holding_period": 5,
+        "vol_threshold": 0.3,
+        "rsi_threshold": 35,
+        "drawdown_min": -0.12,
+        "drawdown_max": -0.55
+      },
+      "cagr": 0.5171484794284642,
+      "sharpe": 1.474812731352956,
+      "max_dd": -0.21311379289468105,
+      "win_rate": 0.5458937198067633
+    },
+    {
+      "rank": 5,
+      "params": {
+        "n_positions": 30,
+        "holding_period": 5,
+        "vol_threshold": 0.3,
+        "rsi_threshold": 35,
+        "drawdown_min": -0.18,
+        "drawdown_max": -0.5
+      },
+      "cagr": 0.5875842617477276,
+      "sharpe": 1.463050844256706,
+      "max_dd": -0.2134681054697842,
+      "win_rate": 0.5507246376811594
+    },
+    {
+      "rank": 6,
+      "params": {
+        "n_positions": 40,
+        "holding_period": 5,
+        "vol_threshold": 0.3,
+        "rsi_threshold": 35,
+        "drawdown_min": -0.12,
+        "drawdown_max": -0.5
+      },
+      "cagr": 0.5068738736960934,
+      "sharpe": 1.4601752720386953,
+      "max_dd": -0.21593345074298903,
+      "win_rate": 0.5458937198067633
+    },
+    {
+      "rank": 7,
+      "params": {
+        "n_positions": 40,
+        "holding_period": 5,
+        "vol_threshold": 0.3,
+        "rsi_threshold": 35,
+        "drawdown_min": -0.12,
+        "drawdown_max": -0.45
+      },
+      "cagr": 0.5076832878457986,
+      "sharpe": 1.4600956579964757,
+      "max_dd": -0.21593345074298903,
+      "win_rate": 0.5458937198067633
+    },
+    {
+      "rank": 8,
+      "params": {
+        "n_positions": 30,
+        "holding_period": 5,
+        "vol_threshold": 0.3,
+        "rsi_threshold": 35,
+        "drawdown_min": -0.18,
+        "drawdown_max": -0.55
+      },
+      "cagr": 0.5812252751514391,
+      "sharpe": 1.4597016324238368,
+      "max_dd": -0.20880628985421432,
+      "win_rate": 0.5410628019323671
+    },
+    {
+      "rank": 9,
+      "params": {
+        "n_positions": 30,
+        "holding_period": 5,
+        "vol_threshold": 0.3,
+        "rsi_threshold": 35,
+        "drawdown_min": -0.18,
+        "drawdown_max": -0.45
+      },
+      "cagr": 0.5896868704119271,
+      "sharpe": 1.4596043342665448,
+      "max_dd": -0.2134681054697842,
+      "win_rate": 0.5458937198067633
+    },
+    {
+      "rank": 10,
+      "params": {
+        "n_positions": 30,
+        "holding_period": 5,
+        "vol_threshold": 0.2,
+        "rsi_threshold": 35,
+        "drawdown_min": -0.12,
+        "drawdown_max": -0.5
+      },
+      "cagr": 0.5098986057000516,
+      "sharpe": 1.4539037040414902,
+      "max_dd": -0.2230548986103513,
+      "win_rate": 0.5507246376811594
+    }
+  ],
+  "targets_met": {
+    "cagr_gt_50pct": true,
+    "sharpe_gt_1.35": true,
+    "maxdd_gt_minus25": true,
+    "beat_v20_cagr": true,
+    "beat_v20_sharpe": true
+  },
+  "sweep_info": {
+    "total_combinations": 729,
+    "valid_results": 729,
+    "param_grid": {
+      "n_positions": [
+        30,
+        40,
+        50
+      ],
+      "holding_period": [
+        3,
+        5,
+        7
+      ],
+      "vol_threshold": [
+        0.2,
+        0.25,
+        0.3
+      ],
+      "rsi_threshold": [
+        25,
+        30,
+        35
+      ],
+      "drawdown_min": [
+        -0.12,
+        -0.15,
+        -0.18
+      ],
+      "drawdown_max": [
+        -0.45,
+        -0.5,
+        -0.55
+      ]
+    }
+  },
+  "timestamp": "2026-01-22T21:15:31.435967"
+}

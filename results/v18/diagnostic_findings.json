@@ -1,0 +1,531 @@
+{
+  "regime_attribution": {
+    "0": {
+      "name": "LowVolTrend",
+      "days": "176",
+      "total_return": -0.22609912571991408,
+      "avg_daily_return": -0.12919950041137948,
+      "pct_of_total_loss": 134.92564710424094
+    },
+    "1": {
+      "name": "HighVolTrend",
+      "days": "56",
+      "total_return": 0.06142048368794639,
+      "avg_daily_return": 0.10967943515704712,
+      "pct_of_total_loss": -36.652943617825464
+    },
+    "2": {
+      "name": "LowVolMeanRevert",
+      "days": "69",
+      "total_return": 0.012017432998484678,
+      "avg_daily_return": 0.017416569563021272,
+      "pct_of_total_loss": -7.171455965119598
+    },
+    "3": {
+      "name": "Crisis",
+      "days": "20",
+      "total_return": -0.01491191777556189,
+      "avg_daily_return": -0.07455958887780945,
+      "pct_of_total_loss": 8.898752478704125
+    }
+  },
+  "cost_attribution": {
+    "total_return": -0.15947071408887814,
+    "gross_return_before_costs": -0.1526198511874541,
+    "total_transaction_costs": 6850.862901424037,
+    "cost_as_pct_of_capital": 0.6850862901424037,
+    "signal_pnl": -152619.8511874541,
+    "signal_is_profitable": false,
+    "cost_impact_pct": 4.29600064222816,
+    "pct_loss_from_costs": 4.29600064222816,
+    "pct_loss_from_signals": 95.70399935777183
+  },
+  "factor_ic": [
+    {
+      "factor": "distance_from_high",
+      "mean_ic": -0.19087168366813564,
+      "std_ic": 0.11356128915734463,
+      "n_symbols": 100,
+      "avg_pval": 0.10425648194669854,
+      "t_stat": -16.807812335035553,
+      "significant": false
+    },
+    {
+      "factor": "price_vs_ma200",
+      "mean_ic": -0.16515977481840668,
+      "std_ic": 0.10381675899373687,
+      "n_symbols": 100,
+      "avg_pval": 0.0859427807581752,
+      "t_stat": -15.908777775307989,
+      "significant": false
+    },
+    {
+      "factor": "distance_from_low",
+      "mean_ic": -0.1408444064205747,
+      "std_ic": 0.12888716251286567,
+      "n_symbols": 100,
+      "avg_pval": 0.14751400723980507,
+      "t_stat": -10.927729626021943,
+      "significant": false
+    },
+    {
+      "factor": "momentum_12m",
+      "mean_ic": -0.1278093429903037,
+      "std_ic": 0.10841114320691002,
+      "n_symbols": 100,
+      "avg_pval": 0.1794193563305009,
+      "t_stat": -11.789317888325455,
+      "significant": false
+    },
+    {
+      "factor": "momentum_6m",
+      "mean_ic": -0.12155833519104245,
+      "std_ic": 0.09043072790666393,
+      "n_symbols": 100,
+      "avg_pval": 0.15210582168712464,
+      "t_stat": -13.44214936724895,
+      "significant": false
+    },
+    {
+      "factor": "ma_cross_50_200",
+      "mean_ic": -0.11505547747461888,
+      "std_ic": 0.10406296278328392,
+      "n_symbols": 100,
+      "avg_pval": 0.17112166426447978,
+      "t_stat": -11.056333050427114,
+      "significant": false
+    },
+    {
+      "factor": "momentum_3m",
+      "mean_ic": -0.10497087578369724,
+      "std_ic": 0.08667476162131395,
+      "n_symbols": 100,
+      "avg_pval": 0.16955693413321987,
+      "t_stat": -12.110892931245644,
+      "significant": false
+    },
+    {
+      "factor": "risk_adjusted_momentum",
+      "mean_ic": -0.10277942606089571,
+      "std_ic": 0.08933205653233993,
+      "n_symbols": 100,
+      "avg_pval": 0.1683312329166071,
+      "t_stat": -11.50532407408393,
+      "significant": false
+    },
+    {
+      "factor": "momentum_consistency",
+      "mean_ic": -0.09287615332843568,
+      "std_ic": 0.08505516434437929,
+      "n_symbols": 100,
+      "avg_pval": 0.1930808669625116,
+      "t_stat": -10.919519589944008,
+      "significant": false
+    },
+    {
+      "factor": "channel_position",
+      "mean_ic": -0.08601464973773112,
+      "std_ic": 0.08392949953152885,
+      "n_symbols": 100,
+      "avg_pval": 0.2175730664780947,
+      "t_stat": -10.24844068150543,
+      "significant": false
+    },
+    {
+      "factor": "zscore_50d",
+      "mean_ic": -0.08491455193501912,
+      "std_ic": 0.0794177483262793,
+      "n_symbols": 100,
+      "avg_pval": 0.23531525111259996,
+      "t_stat": -10.692137931959087,
+      "significant": false
+    },
+    {
+      "factor": "momentum_1m",
+      "mean_ic": -0.08014706818819457,
+      "std_ic": 0.07627684750026047,
+      "n_symbols": 100,
+      "avg_pval": 0.2555416924050275,
+      "t_stat": -10.507391274648691,
+      "significant": false
+    },
+    {
+      "factor": "new_high_count",
+      "mean_ic": -0.07945355863404834,
+      "std_ic": 0.0941305005129306,
+      "n_symbols": 100,
+      "avg_pval": 0.18279523096326528,
+      "t_stat": -8.440787863773643,
+      "significant": false
+    },
+    {
+      "factor": "breakout_20d",
+      "mean_ic": -0.07693174428632088,
+      "std_ic": 0.07851891155587785,
+      "n_symbols": 100,
+      "avg_pval": 0.20414017076718838,
+      "t_stat": -9.797861784109491,
+      "significant": false
+    },
+    {
+      "factor": "relative_strength",
+      "mean_ic": -0.07443065981835663,
+      "std_ic": 0.07540835331697851,
+      "n_symbols": 100,
+      "avg_pval": 0.26774880213146734,
+      "t_stat": -9.870346791089291,
+      "significant": false
+    },
+    {
+      "factor": "zscore_20d",
+      "mean_ic": -0.07424945638875563,
+      "std_ic": 0.07509903250033176,
+      "n_symbols": 100,
+      "avg_pval": 0.24858300679652864,
+      "t_stat": -9.886872562363253,
+      "significant": false
+    },
+    {
+      "factor": "betti_0_estimate",
+      "mean_ic": -0.05444991913244471,
+      "std_ic": 0.08938802260356184,
+      "n_symbols": 100,
+      "avg_pval": 0.2887313424350044,
+      "t_stat": -6.091411080199356,
+      "significant": false
+    },
+    {
+      "factor": "macd_histogram",
+      "mean_ic": -0.05426089931788153,
+      "std_ic": 0.07992504647113478,
+      "n_symbols": 100,
+      "avg_pval": 0.26352196979440945,
+      "t_stat": -6.7889731334066905,
+      "significant": false
+    },
+    {
+      "factor": "ma_cross_20_50",
+      "mean_ic": -0.05332076590604371,
+      "std_ic": 0.0882540581141704,
+      "n_symbols": 100,
+      "avg_pval": 0.2582912410301805,
+      "t_stat": -6.041735308881204,
+      "significant": false
+    },
+    {
+      "factor": "momentum_6_1",
+      "mean_ic": -0.053200775100726586,
+      "std_ic": 0.08571063112977566,
+      "n_symbols": 100,
+      "avg_pval": 0.3079072630006521,
+      "t_stat": -6.207021742749106,
+      "significant": false
+    },
+    {
+      "factor": "momentum_12_1",
+      "mean_ic": -0.04448901515689593,
+      "std_ic": 0.11224839068401792,
+      "n_symbols": 100,
+      "avg_pval": 0.3366320007558211,
+      "t_stat": -3.963443474404336,
+      "significant": false
+    },
+    {
+      "factor": "obv_momentum",
+      "mean_ic": -0.04097511970503534,
+      "std_ic": 0.08460886497473596,
+      "n_symbols": 100,
+      "avg_pval": 0.33511571466304624,
+      "t_stat": -4.842887292870603,
+      "significant": false
+    },
+    {
+      "factor": "tda_complexity",
+      "mean_ic": -0.035951192159349936,
+      "std_ic": 0.09527623438206559,
+      "n_symbols": 100,
+      "avg_pval": 0.27716543772337476,
+      "t_stat": -3.7733640915301794,
+      "significant": false
+    },
+    {
+      "factor": "vwap_distance",
+      "mean_ic": -0.030567461931099736,
+      "std_ic": 0.03491459549405369,
+      "n_symbols": 100,
+      "avg_pval": 0.46031528856257437,
+      "t_stat": -8.754923692673364,
+      "significant": false
+    },
+    {
+      "factor": "betti_1_estimate",
+      "mean_ic": -0.021956520460852252,
+      "std_ic": 0.08042745150079846,
+      "n_symbols": 100,
+      "avg_pval": 0.29922919277219595,
+      "t_stat": -2.7299783906038946,
+      "significant": false
+    },
+    {
+      "factor": "dollar_volume",
+      "mean_ic": -0.01984278652386299,
+      "std_ic": 0.07554242048683141,
+      "n_symbols": 100,
+      "avg_pval": 0.30873572978910596,
+      "t_stat": -2.6267078015221914,
+      "significant": false
+    },
+    {
+      "factor": "persistence_entropy",
+      "mean_ic": -0.015169936994905797,
+      "std_ic": 0.10027176332859722,
+      "n_symbols": 100,
+      "avg_pval": 0.3118987676427922,
+      "t_stat": -1.512882240356431,
+      "significant": false
+    },
+    {
+      "factor": "price_gap",
+      "mean_ic": -0.011540052148320948,
+      "std_ic": 0.043202695973353515,
+      "n_symbols": 100,
+      "avg_pval": 0.46571948248293427,
+      "t_stat": -2.671141670288031,
+      "significant": false
+    },
+    {
+      "factor": "trend_strength_adx",
+      "mean_ic": -0.0008304854662592509,
+      "std_ic": 0.09011622722806428,
+      "n_symbols": 100,
+      "avg_pval": 0.30065803641681554,
+      "t_stat": -0.09215714991679307,
+      "significant": false
+    },
+    {
+      "factor": "skewness_60d",
+      "mean_ic": 0.0015503281213010344,
+      "std_ic": 0.09786017956468498,
+      "n_symbols": 100,
+      "avg_pval": 0.2829987262239436,
+      "t_stat": 0.15842277504470312,
+      "significant": false
+    },
+    {
+      "factor": "relative_volume",
+      "mean_ic": 0.009155110316879753,
+      "std_ic": 0.08073877138426182,
+      "n_symbols": 100,
+      "avg_pval": 0.3580057657338474,
+      "t_stat": 1.1339174673971237,
+      "significant": false
+    },
+    {
+      "factor": "kurtosis_60d",
+      "mean_ic": 0.010567174936437152,
+      "std_ic": 0.09581257985579449,
+      "n_symbols": 100,
+      "avg_pval": 0.29998145237303947,
+      "t_stat": 1.102900574469614,
+      "significant": false
+    },
+    {
+      "factor": "wasserstein_distance",
+      "mean_ic": 0.016549252954237204,
+      "std_ic": 0.08314178461849932,
+      "n_symbols": 100,
+      "avg_pval": 0.3571072836064967,
+      "t_stat": 1.9904856541358076,
+      "significant": false
+    },
+    {
+      "factor": "volume_volatility",
+      "mean_ic": 0.018473550922955956,
+      "std_ic": 0.10107125719506588,
+      "n_symbols": 100,
+      "avg_pval": 0.2830228051745115,
+      "t_stat": 1.8277749219347599,
+      "significant": false
+    },
+    {
+      "factor": "mean_reversion_speed",
+      "mean_ic": 0.019705807821863836,
+      "std_ic": 0.09457369195733821,
+      "n_symbols": 100,
+      "avg_pval": 0.281345290974505,
+      "t_stat": 2.0836458230638857,
+      "significant": false
+    },
+    {
+      "factor": "momentum_acceleration",
+      "mean_ic": 0.019984652102412744,
+      "std_ic": 0.09032629428408964,
+      "n_symbols": 100,
+      "avg_pval": 0.3403586116725942,
+      "t_stat": 2.2124955153765122,
+      "significant": false
+    },
+    {
+      "factor": "bollinger_width",
+      "mean_ic": 0.02362538798570646,
+      "std_ic": 0.08703134892310892,
+      "n_symbols": 100,
+      "avg_pval": 0.30844273203498146,
+      "t_stat": 2.714583684848914,
+      "significant": false
+    },
+    {
+      "factor": "upside_vol",
+      "mean_ic": 0.02385878881514967,
+      "std_ic": 0.09848992503673912,
+      "n_symbols": 100,
+      "avg_pval": 0.2516272835832448,
+      "t_stat": 2.4224598410700144,
+      "significant": false
+    },
+    {
+      "factor": "volatility_ratio",
+      "mean_ic": 0.026804781915873762,
+      "std_ic": 0.09460599093950288,
+      "n_symbols": 100,
+      "avg_pval": 0.2692782015962234,
+      "t_stat": 2.833307029468615,
+      "significant": false
+    },
+    {
+      "factor": "volume_momentum",
+      "mean_ic": 0.028653898597664932,
+      "std_ic": 0.07427219855608408,
+      "n_symbols": 100,
+      "avg_pval": 0.3360558798566304,
+      "t_stat": 3.8579575069435887,
+      "significant": false
+    },
+    {
+      "factor": "volume_price_trend",
+      "mean_ic": 0.03979610250110355,
+      "std_ic": 0.07381823459209468,
+      "n_symbols": 100,
+      "avg_pval": 0.30732007509190584,
+      "t_stat": 5.391093775272347,
+      "significant": false
+    },
+    {
+      "factor": "volatility_20d",
+      "mean_ic": 0.04935771935093435,
+      "std_ic": 0.08224731256867897,
+      "n_symbols": 100,
+      "avg_pval": 0.2838664965064676,
+      "t_stat": 6.001134603604121,
+      "significant": false
+    },
+    {
+      "factor": "idio_vol",
+      "mean_ic": 0.05225124226824609,
+      "std_ic": 0.08748289345966324,
+      "n_symbols": 100,
+      "avg_pval": 0.2626617691828688,
+      "t_stat": 5.972738235085718,
+      "significant": false
+    },
+    {
+      "factor": "reversal_5d",
+      "mean_ic": 0.060954793802485134,
+      "std_ic": 0.06505112259805275,
+      "n_symbols": 100,
+      "avg_pval": 0.2884011768772242,
+      "t_stat": 9.3702908371192,
+      "significant": false
+    },
+    {
+      "factor": "landscape_distance",
+      "mean_ic": 0.06998497502640759,
+      "std_ic": 0.08201224008492379,
+      "n_symbols": 100,
+      "avg_pval": 0.20306621018365026,
+      "t_stat": 8.533479265282603,
+      "significant": false
+    },
+    {
+      "factor": "volatility_60d",
+      "mean_ic": 0.07011796023081045,
+      "std_ic": 0.10326727623423057,
+      "n_symbols": 100,
+      "avg_pval": 0.1740299987965967,
+      "t_stat": 6.78994961305739,
+      "significant": false
+    },
+    {
+      "factor": "overbought_oversold",
+      "mean_ic": 0.07066122015868362,
+      "std_ic": 0.072583461267094,
+      "n_symbols": 100,
+      "avg_pval": 0.22078389820325434,
+      "t_stat": 9.735168167120484,
+      "significant": false
+    },
+    {
+      "factor": "atr_ratio",
+      "mean_ic": 0.07941867599821835,
+      "std_ic": 0.0867539898852578,
+      "n_symbols": 100,
+      "avg_pval": 0.19769688145233505,
+      "t_stat": 9.154469564253903,
+      "significant": false
+    },
+    {
+      "factor": "amihud_illiquidity",
+      "mean_ic": 0.08765991199226875,
+      "std_ic": 0.07584277741109281,
+      "n_symbols": 100,
+      "avg_pval": 0.1572864422228772,
+      "t_stat": 11.558109418530808,
+      "significant": false
+    },
+    {
+      "factor": "downside_vol",
+      "mean_ic": 0.08838420542277926,
+      "std_ic": 0.09961845332736062,
+      "n_symbols": 100,
+      "avg_pval": 0.1883504987985134,
+      "t_stat": 8.87227240241685,
+      "significant": false
+    }
+  ],
+  "hmm_validation": {
+    "0": {
+      "name": "LowVolTrend",
+      "n_days": "298",
+      "avg_vix": 15.372114107912818,
+      "median_vix": 15.105000019073486,
+      "max_vix": 22.639999389648438,
+      "min_vix": 11.859999656677246
+    },
+    "1": {
+      "name": "HighVolTrend",
+      "n_days": "86",
+      "avg_vix": 17.564302366833353,
+      "median_vix": 16.494999885559082,
+      "max_vix": 25.149999618530273,
+      "min_vix": 12.420000076293945
+    },
+    "2": {
+      "name": "LowVolMeanRevert",
+      "n_days": "104",
+      "avg_vix": 18.803461542496315,
+      "median_vix": 18.295000076293945,
+      "max_vix": 27.6200008392334,
+      "min_vix": 14.270000457763672
+    },
+    "3": {
+      "name": "Crisis",
+      "n_days": "28",
+      "avg_vix": 30.28214304787772,
+      "median_vix": 29.050000190734863,
+      "max_vix": 52.33000183105469,
+      "min_vix": 16.190000534057617
+    },
+    "issues": [],
+    "hmm_is_valid": true
+  }
+}

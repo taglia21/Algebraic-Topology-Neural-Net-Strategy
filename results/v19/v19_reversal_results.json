@@ -1,0 +1,22 @@
+{
+  "phase": "Phase 1: Pure Reversal",
+  "total_return": 0.3256296711045954,
+  "cagr": 0.40940478442502437,
+  "sharpe": 1.2027990757117537,
+  "max_drawdown": -0.2070703097336243,
+  "annual_vol": 0.3303169429197361,
+  "win_rate": 0.5314009661835749,
+  "trading_days": 207,
+  "avg_turnover": 0.324100580270793,
+  "n_long": 50,
+  "n_short": 0,
+  "rebal_period": 5,
+  "cost_bps": 10,
+  "n_symbols": 1084,
+  "targets_met": {
+    "cagr_gt_5pct": true,
+    "sharpe_gt_0.5": true,
+    "maxdd_gt_minus30": true
+  },
+  "timestamp": "2026-01-22T19:33:00.199982"
+}

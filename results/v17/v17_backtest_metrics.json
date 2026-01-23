@@ -1,0 +1,19 @@
+{
+  "total_return": -0.1864263651909671,
+  "cagr": -0.5451387470180703,
+  "annual_volatility": 0.20383052311313593,
+  "sharpe": -3.7579923946797615,
+  "sortino": -4.773451297623197,
+  "max_drawdown": -0.2061681544940198,
+  "calmar": -2.644146223047667,
+  "win_rate": 0.45454545454545453,
+  "trading_days": 66,
+  "years": 0.2619047619047619,
+  "total_trades": 1183,
+  "total_commission": 10302.826276597509,
+  "total_slippage": 10334.60088028216,
+  "total_costs": 20637.42715687967,
+  "cost_drag": 0.020675724919027545,
+  "annualized_turnover": 43.52294447602973,
+  "is_realistic": "True"
+}

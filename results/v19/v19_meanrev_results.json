@@ -1,0 +1,21 @@
+{
+  "phase": "Phase 2: Mean Reversion",
+  "total_return": 0.1818000632752852,
+  "cagr": 0.2255031887288319,
+  "sharpe": 1.0002827903590665,
+  "max_drawdown": -0.16005859599580113,
+  "annual_vol": 0.22950304618757686,
+  "win_rate": 0.5555555555555556,
+  "trading_days": 207,
+  "avg_positions": 46.0174081237911,
+  "zscore_entry": -2.0,
+  "zscore_exit": 0.0,
+  "max_positions": 50,
+  "cost_bps": 10,
+  "n_symbols": 1084,
+  "targets_met": {
+    "cagr_positive": true,
+    "sharpe_positive": true
+  },
+  "timestamp": "2026-01-22T19:33:02.221299"
+}

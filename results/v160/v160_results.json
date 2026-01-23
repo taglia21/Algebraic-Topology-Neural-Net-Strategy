@@ -1,0 +1,23 @@
+{
+  "version": "16.0",
+  "timestamp": "2026-01-22T17:03:12.640045",
+  "config": {
+    "total_capital": 100000,
+    "layer1_allocation": 0.7,
+    "layer2_allocation": 0.3
+  },
+  "metrics": {
+    "sharpe": 3.3457794595979657,
+    "cagr": 0.8655876949097681,
+    "max_drawdown": -0.17705228912169058,
+    "volatility": 0.24376612528064548,
+    "total_return": 0.8065293383931063,
+    "final_equity": 180652.93383931063,
+    "trading_days": 239
+  },
+  "state": {
+    "layer1_equity": 70000.0,
+    "layer2_equity": 30000.0,
+    "opportunities_captured": 661
+  }
+}

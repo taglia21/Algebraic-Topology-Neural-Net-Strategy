@@ -1,0 +1,46 @@
+{
+  "phase": "Phase 3: Ensemble",
+  "total_return": 0.18921871206267604,
+  "cagr": 0.23487494940892928,
+  "sharpe": 1.1478262183444967,
+  "max_drawdown": -0.13482269804681465,
+  "annual_vol": 0.20162696394661053,
+  "win_rate": 0.5555555555555556,
+  "trading_days": 207,
+  "avg_turnover": 0.19030383307957208,
+  "n_symbols": 1084,
+  "regime_weights": {
+    "0": {
+      "reversal": 0.4,
+      "meanrev": 0.4,
+      "cash": 0.2,
+      "name": "LowVolTrend"
+    },
+    "1": {
+      "reversal": 0.6,
+      "meanrev": 0.2,
+      "cash": 0.2,
+      "name": "HighVolTrend"
+    },
+    "2": {
+      "reversal": 0.5,
+      "meanrev": 0.5,
+      "cash": 0.0,
+      "name": "LowVolMeanRev"
+    },
+    "3": {
+      "reversal": 0.2,
+      "meanrev": 0.2,
+      "cash": 0.6,
+      "name": "Crisis"
+    }
+  },
+  "targets_met": {
+    "cagr_gt_15pct": true,
+    "sharpe_gt_1": true,
+    "maxdd_gt_minus25": true,
+    "winrate_gt_48": true
+  },
+  "overfit_check": true,
+  "timestamp": "2026-01-22T19:33:05.655918"
+}

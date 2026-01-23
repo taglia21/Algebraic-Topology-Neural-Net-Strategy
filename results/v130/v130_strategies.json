@@ -1,0 +1,72 @@
+{
+  "generated": "2026-01-22T15:17:17.117676",
+  "tier1": {
+    "momentum": {
+      "picks": [
+        "MSTR",
+        "HOOD",
+        "PLTR",
+        "SOFI",
+        "AVGO",
+        "TSLA",
+        "NFLX",
+        "WFC",
+        "META",
+        "C"
+      ],
+      "allocation": "equal_weight",
+      "description": "Top 10 by 12M momentum, above MA200"
+    },
+    "quality": {
+      "picks": [
+        "AVGO",
+        "NVDA",
+        "WMT",
+        "MSTR",
+        "XOM",
+        "PLTR",
+        "XLE",
+        "WFC",
+        "AAPL",
+        "META"
+      ],
+      "allocation": "risk_parity",
+      "description": "Top 10 by Sharpe ratio"
+    },
+    "pairs": {
+      "pairs": [],
+      "allocation": "equal_capital",
+      "description": "Top 3 cointegrated pairs"
+    },
+    "breakout": {
+      "candidates": [],
+      "allocation": "opportunistic",
+      "description": "Breakout signals near 52w high"
+    }
+  },
+  "tier2": {
+    "momentum_rank": [
+      "COIN",
+      "UPST",
+      "CHWY",
+      "MRVL",
+      "AR",
+      "GE",
+      "AXP",
+      "GS",
+      "DASH",
+      "MS",
+      "EBAY",
+      "MMM",
+      "IP",
+      "EXEL",
+      "JPM",
+      "CFG",
+      "BK",
+      "BKR",
+      "COF",
+      "PYPL"
+    ],
+    "status": "MONITOR_ONLY"
+  }
+}

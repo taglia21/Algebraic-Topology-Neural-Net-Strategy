@@ -1,0 +1,375 @@
+[
+  {
+    "phase": 1,
+    "timestamp": "2026-01-22T16:35:02.265128",
+    "success": true,
+    "messages": [
+      "\u2705 numpy available",
+      "\u2705 pandas available",
+      "\u2705 sklearn available",
+      "\u2705 hmmlearn available",
+      "\u2705 yfinance available"
+    ]
+  },
+  {
+    "phase": 2,
+    "timestamp": "2026-01-22T16:35:03.183008",
+    "bars_downloaded": 8048,
+    "tickers": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "AAPL",
+      "MSFT",
+      "GOOGL",
+      "AMZN",
+      "NVDA",
+      "META",
+      "TSLA",
+      "XLF",
+      "XLE",
+      "XLK",
+      "XLV",
+      "GLD",
+      "TLT"
+    ],
+    "success": true,
+    "date_range": "2024-01-22 00:00:00 to 2026-01-22 00:00:00"
+  },
+  {
+    "phase": 3,
+    "timestamp": "2026-01-22T16:35:06.455076",
+    "signals_generated": 8048,
+    "regime_stats": {
+      "bull": 23,
+      "neutral": 475,
+      "bear": 5
+    },
+    "success": true
+  },
+  {
+    "phase": 4,
+    "timestamp": "2026-01-22T16:35:08.539903",
+    "ticker_results": {
+      "SPY": {
+        "features": 32,
+        "rf_accuracy": 0.5714285714285714,
+        "rf_precision": 0.6194690265486725,
+        "gbm_accuracy": 0.518796992481203,
+        "gbm_precision": 0.6136363636363636,
+        "lr_accuracy": 0.5789473684210527,
+        "lr_precision": 0.6272727272727273,
+        "ensemble_accuracy": 0.5338345864661654,
+        "ensemble_precision": 0.6122448979591837
+      },
+      "QQQ": {
+        "features": 32,
+        "rf_accuracy": 0.631578947368421,
+        "rf_precision": 0.635593220338983,
+        "gbm_accuracy": 0.5639097744360902,
+        "gbm_precision": 0.6116504854368932,
+        "lr_accuracy": 0.556390977443609,
+        "lr_precision": 0.5948275862068966,
+        "ensemble_accuracy": 0.5939849624060151,
+        "ensemble_precision": 0.6194690265486725
+      },
+      "AAPL": {
+        "features": 32,
+        "rf_accuracy": 0.3533834586466165,
+        "rf_precision": 0.4025974025974026,
+        "gbm_accuracy": 0.41353383458646614,
+        "gbm_precision": 0.43137254901960786,
+        "lr_accuracy": 0.47368421052631576,
+        "lr_precision": 0.5064935064935064,
+        "ensemble_accuracy": 0.42105263157894735,
+        "ensemble_precision": 0.4444444444444444
+      },
+      "MSFT": {
+        "features": 32,
+        "rf_accuracy": 0.5413533834586466,
+        "rf_precision": 0.5257731958762887,
+        "gbm_accuracy": 0.5338345864661654,
+        "gbm_precision": 0.5277777777777778,
+        "lr_accuracy": 0.5338345864661654,
+        "lr_precision": 0.5217391304347826,
+        "ensemble_accuracy": 0.5338345864661654,
+        "ensemble_precision": 0.524390243902439
+      },
+      "NVDA": {
+        "features": 32,
+        "rf_accuracy": 0.5112781954887218,
+        "rf_precision": 0.5130434782608696,
+        "gbm_accuracy": 0.49624060150375937,
+        "gbm_precision": 0.5045871559633027,
+        "lr_accuracy": 0.5488721804511278,
+        "lr_precision": 0.5327868852459017,
+        "ensemble_accuracy": 0.49624060150375937,
+        "ensemble_precision": 0.5045045045045045
+      },
+      "GOOGL": {
+        "features": 32,
+        "rf_accuracy": 0.5338345864661654,
+        "rf_precision": 0.7954545454545454,
+        "gbm_accuracy": 0.44360902255639095,
+        "gbm_precision": 0.71875,
+        "lr_accuracy": 0.5488721804511278,
+        "lr_precision": 0.6842105263157895,
+        "ensemble_accuracy": 0.46616541353383456,
+        "ensemble_precision": 0.7297297297297297
+      },
+      "META": {
+        "features": 32,
+        "rf_accuracy": 0.45112781954887216,
+        "rf_precision": 0.4608695652173913,
+        "gbm_accuracy": 0.42105263157894735,
+        "gbm_precision": 0.4329896907216495,
+        "lr_accuracy": 0.47368421052631576,
+        "lr_precision": 0.4716981132075472,
+        "ensemble_accuracy": 0.45864661654135336,
+        "ensemble_precision": 0.46153846153846156
+      }
+    },
+    "avg_accuracy": 0.5005370569280344,
+    "features_used": 32,
+    "success": "False"
+  },
+  {
+    "phase": 5,
+    "timestamp": "2026-01-22T16:35:21.208663",
+    "ticker_results": [
+      {
+        "total_return": 0.2601653691916104,
+        "cagr": 0.12282894294617863,
+        "sharpe": 1.8401918350037012,
+        "sortino": 3.3893536522966268,
+        "calmar": 6.415782762289564,
+        "max_drawdown": -0.01914481014976657,
+        "volatility": 0.03957682104704706,
+        "win_rate": 0.5876494023904383,
+        "trading_days": 503,
+        "final_equity": 126016.53691916104,
+        "ticker": "SPY"
+      },
+      {
+        "total_return": 0.3435720412284966,
+        "cagr": 0.15946588508838366,
+        "sharpe": 2.374649123988147,
+        "sortino": 4.338441075634015,
+        "calmar": 11.908056438815304,
+        "max_drawdown": -0.013391428392007892,
+        "volatility": 0.04609770933422754,
+        "win_rate": 0.5677290836653387,
+        "trading_days": 503,
+        "final_equity": 134357.20412284965,
+        "ticker": "QQQ"
+      },
+      {
+        "total_return": 0.3761918244945772,
+        "cagr": 0.17348444876351055,
+        "sharpe": 2.8928623273175993,
+        "sortino": 5.784473614555661,
+        "calmar": 10.24234906363097,
+        "max_drawdown": -0.016937955120034674,
+        "volatility": 0.042685905788683434,
+        "win_rate": 0.5816733067729084,
+        "trading_days": 503,
+        "final_equity": 137619.18244945773,
+        "ticker": "IWM"
+      },
+      {
+        "total_return": 0.3563605106343861,
+        "cagr": 0.16498183641515607,
+        "sharpe": 1.8580370325865772,
+        "sortino": 3.5664060882239035,
+        "calmar": 2.967628246296275,
+        "max_drawdown": -0.05559383545464643,
+        "volatility": 0.06188350091983345,
+        "win_rate": 0.5338645418326693,
+        "trading_days": 503,
+        "final_equity": 135636.05106343862,
+        "ticker": "AAPL"
+      },
+      {
+        "total_return": 0.3258717885849034,
+        "cagr": 0.15178796391916194,
+        "sharpe": 2.236263643819389,
+        "sortino": 4.447748311365615,
+        "calmar": 3.7064997684078267,
+        "max_drawdown": -0.0409518341840783,
+        "volatility": 0.045516978376178796,
+        "win_rate": 0.5438247011952191,
+        "trading_days": 503,
+        "final_equity": 132587.17885849034,
+        "ticker": "MSFT"
+      },
+      {
+        "total_return": 0.5610999203654279,
+        "cagr": 0.24999313491212272,
+        "sharpe": 3.1220068280788196,
+        "sortino": 6.557557273380921,
+        "calmar": 5.2471198987913725,
+        "max_drawdown": -0.047643876971385085,
+        "volatility": 0.0640591599971586,
+        "win_rate": 0.5856573705179283,
+        "trading_days": 503,
+        "final_equity": 156109.9920365428,
+        "ticker": "GOOGL"
+      },
+      {
+        "total_return": 0.5516273347128549,
+        "cagr": 0.24618741320852888,
+        "sharpe": 3.105929965833056,
+        "sortino": 4.724248405875478,
+        "calmar": 7.975193701653817,
+        "max_drawdown": -0.03086914530458075,
+        "volatility": 0.0631654336597086,
+        "win_rate": 0.5836653386454184,
+        "trading_days": 503,
+        "final_equity": 155162.7334712855,
+        "ticker": "AMZN"
+      },
+      {
+        "total_return": 1.5964339966527037,
+        "cagr": 0.6128744022892931,
+        "sharpe": 5.022025450326318,
+        "sortino": 9.74495339156633,
+        "calmar": 19.629105847717142,
+        "max_drawdown": -0.031222736636298192,
+        "volatility": 0.11208115288478258,
+        "win_rate": 0.5816733067729084,
+        "trading_days": 503,
+        "final_equity": 259643.39966527038,
+        "ticker": "NVDA"
+      },
+      {
+        "total_return": 0.7210258728463028,
+        "cagr": 0.31258694594646097,
+        "sharpe": 3.090465637811969,
+        "sortino": 4.1918624029362,
+        "calmar": 3.819357536203638,
+        "max_drawdown": -0.08184280811195432,
+        "volatility": 0.0849667903547282,
+        "win_rate": 0.5796812749003984,
+        "trading_days": 503,
+        "final_equity": 172102.58728463028,
+        "ticker": "META"
+      },
+      {
+        "total_return": 1.8194182454792713,
+        "cagr": 0.6808433009871604,
+        "sharpe": 4.413462206473049,
+        "sortino": 7.678485966774959,
+        "calmar": 8.438548877673561,
+        "max_drawdown": -0.08068250961827257,
+        "volatility": 0.14293615113819885,
+        "win_rate": 0.5836653386454184,
+        "trading_days": 503,
+        "final_equity": 281941.8245479271,
+        "ticker": "TSLA"
+      },
+      {
+        "total_return": 0.36480125230703386,
+        "cagr": 0.16860830926513093,
+        "sharpe": 2.9665587707145336,
+        "sortino": 4.965232019285963,
+        "calmar": 11.628173409466676,
+        "max_drawdown": -0.014499982355600604,
+        "volatility": 0.039981783080118315,
+        "win_rate": 0.6095617529880478,
+        "trading_days": 503,
+        "final_equity": 136480.1252307034,
+        "ticker": "XLF"
+      },
+      {
+        "total_return": 0.3550711312098629,
+        "cagr": 0.16442687811421974,
+        "sharpe": 2.046620341298178,
+        "sortino": 3.7757959171015125,
+        "calmar": 2.3078431572962606,
+        "max_drawdown": -0.07124698989807134,
+        "volatility": 0.05591016360251672,
+        "win_rate": 0.5756972111553785,
+        "trading_days": 503,
+        "final_equity": 135507.1131209863,
+        "ticker": "XLE"
+      },
+      {
+        "total_return": 0.4135165180192726,
+        "cagr": 0.18932308421055444,
+        "sharpe": 2.7330051306600276,
+        "sortino": 5.08739141521708,
+        "calmar": 8.553123129239426,
+        "max_drawdown": -0.022134965362925824,
+        "volatility": 0.05097798121473251,
+        "win_rate": 0.5737051792828686,
+        "trading_days": 503,
+        "final_equity": 141351.65180192725,
+        "ticker": "XLK"
+      },
+      {
+        "total_return": 0.19192201465609537,
+        "cagr": 0.09194235918536253,
+        "sharpe": 1.3458591095840786,
+        "sortino": 2.273354223546644,
+        "calmar": 3.2150364133493907,
+        "max_drawdown": -0.028597610528951354,
+        "volatility": 0.031164004379570093,
+        "win_rate": 0.5836653386454184,
+        "trading_days": 503,
+        "final_equity": 119192.20146560954,
+        "ticker": "XLV"
+      },
+      {
+        "total_return": 0.33992062655692434,
+        "cagr": 0.15788614546076896,
+        "sharpe": 2.5557913533600756,
+        "sortino": 4.185261173490618,
+        "calmar": 4.410800307140545,
+        "max_drawdown": -0.03579535106252048,
+        "volatility": 0.04221242290335321,
+        "win_rate": 0.5577689243027888,
+        "trading_days": 503,
+        "final_equity": 133992.06265569243,
+        "ticker": "GLD"
+      },
+      {
+        "total_return": 0.1772568819192062,
+        "cagr": 0.08519071063234729,
+        "sharpe": 1.3580682457264373,
+        "sortino": 2.142296776263427,
+        "calmar": 4.461871470607451,
+        "max_drawdown": -0.019093044520340968,
+        "volatility": 0.025912328591059578,
+        "win_rate": 0.5637450199203188,
+        "trading_days": 503,
+        "final_equity": 117725.68819192062,
+        "ticker": "TLT"
+      }
+    ],
+    "portfolio_metrics": {
+      "sharpe": 5.39312717785645,
+      "cagr": 0.23921660524755572,
+      "max_drawdown": -0.0092628588738181,
+      "volatility": 0.035084766037867046,
+      "win_rate": 0.7051792828685259,
+      "final_equity": 153435.13389515324
+    },
+    "success": "True",
+    "decision": {
+      "sharpe_ok": "True",
+      "cagr_ok": "False",
+      "dd_ok": "True"
+    }
+  },
+  {
+    "phase": 6,
+    "timestamp": "2026-01-22T16:35:21.295120",
+    "alpaca_status": "skipped",
+    "security_check": {
+      "env_exists": true,
+      "env_gitignored": true
+    },
+    "cleanup": {},
+    "success": true
+  }
+]

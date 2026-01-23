@@ -1,0 +1,38 @@
+{
+  "covered_call": {
+    "underlying": "SPY",
+    "price": 590.64404296875,
+    "strike": 605.3828758124138,
+    "days_to_expiry": 30,
+    "premium_pct": 0.01996306644466555,
+    "annualized_yield": 0.2395567973359866,
+    "signal": "ACTIVE"
+  },
+  "put_spread": {
+    "underlying": "SPY",
+    "near_strike": 561.1118408203125,
+    "far_strike": 531.579638671875,
+    "spread_width": 29.532202148437477,
+    "net_debit": 4.421649853099143,
+    "max_profit": 25.110552295338334,
+    "signal": "WAIT"
+  },
+  "collar": {
+    "underlying": "SPY",
+    "call_strike": 620.1762451171875,
+    "put_strike": 561.1118408203125,
+    "call_premium": 10.317182990564667,
+    "put_cost": 8.843299706198286,
+    "net_cost": -1.4738832843663818,
+    "max_upside": 0.050000000000000044,
+    "max_downside": -0.04999999999999993,
+    "signal": "WAIT"
+  },
+  "summary": {
+    "vix_proxy": 17.998182599089493,
+    "underlying_vol": 0.17408167861671167,
+    "estimated_annual_income": 0.12,
+    "recommendation": "COVERED_CALL",
+    "generated": "2026-01-22T15:18:26.916319"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "total_return": -0.017155104338178795,
+  "cagr": -0.017155104338178795,
+  "sharpe": -0.2558864145963792,
+  "max_drawdown": -0.0686733416898669,
+  "annual_vol": 0.0605125596649942,
+  "trading_days": 252,
+  "factors_flipped": 25,
+  "factors_removed": 4,
+  "factors_kept": 21,
+  "v17_cagr": -0.128,
+  "improvement": 0.11084489566182121,
+  "success": false,
+  "timestamp": "2026-01-22T19:11:42.488998"
+}

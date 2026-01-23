@@ -1,0 +1,17 @@
+{
+  "phase": "Phase 1: Pairs Trading",
+  "total_return": -0.01791591234290868,
+  "cagr": -0.011979892983367435,
+  "sharpe": -0.03629542938574796,
+  "max_drawdown": -0.10823891508997861,
+  "annual_vol": 0.1234082599821217,
+  "win_rate": 0.4618055555555556,
+  "trading_days": 378,
+  "n_trades": 944,
+  "n_windows": 9,
+  "targets_met": {
+    "cagr_gt_15pct": false,
+    "sharpe_gt_0.8": false
+  },
+  "timestamp": "2026-01-22T20:34:31.470777"
+}

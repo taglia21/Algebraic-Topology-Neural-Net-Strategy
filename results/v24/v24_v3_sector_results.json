@@ -1,0 +1,52 @@
+{
+  "timestamp": "2026-01-23T16:18:19.102730",
+  "strategy": "V24_SectorMomentum_V3",
+  "config": {
+    "n_top_sectors": 3,
+    "stocks_per_sector": 10,
+    "rebal_period": 20,
+    "momentum_lookback": 50
+  },
+  "v24_metrics": {
+    "cagr": 0.08744581971619825,
+    "volatility": 0.1337592714854235,
+    "sharpe": 0.6936675210755238,
+    "max_dd": -0.14850051816116672,
+    "win_rate": 0.4539614561027837,
+    "n_days": 467
+  },
+  "correlation": {
+    "correlation": 0.5628476450165203,
+    "rolling_mean": 0.5370917245021661,
+    "n_days": 467,
+    "passed": "False"
+  },
+  "combined": {
+    "v21": {
+      "name": "V21",
+      "cagr": 0.1493771101609731,
+      "sharpe": 0.6832471027657226,
+      "max_dd": -0.2720675106562146
+    },
+    "v24": {
+      "name": "V24",
+      "cagr": 0.08744581971619825,
+      "sharpe": 0.6936675210755238,
+      "max_dd": -0.14850051816116672
+    },
+    "combined": {
+      "name": "Combined",
+      "cagr": 0.12391718011032693,
+      "sharpe": 0.7673643681422848,
+      "max_dd": -0.17958806843337982
+    },
+    "sharpe_improvement": 0.08411726537656217,
+    "dd_improvement": 0.09247944222283477
+  },
+  "walk_forward": {
+    "is_sharpe": 0,
+    "oos_sharpe": 0,
+    "oos_is_ratio": 0,
+    "n_windows": 0
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "timestamp": "2026-01-23T16:11:57.842665",
+  "config": {
+    "n_positions": 30,
+    "rebal_period": 10,
+    "momentum_lookback": 50,
+    "sma_short": 50,
+    "sma_long": 200
+  },
+  "v24_metrics": {
+    "cagr": 0.12236064218030318,
+    "annual_volatility": 0.13566941094335513,
+    "sharpe_ratio": 0.9189974485726342,
+    "max_drawdown": -0.20447704952264648,
+    "win_rate": 0.3307543520309478,
+    "profit_factor": 1.2236880182050955,
+    "calmar_ratio": 0.5984077062240247,
+    "total_return": 0.26721718689571317,
+    "trading_days": 517,
+    "best_month": 0.12404376407965394,
+    "worst_month": -0.07754614072812399,
+    "pct_positive_months": 0.38461538461538464
+  },
+  "correlation": {
+    "v24_v21_correlation": 0.4065790800277747,
+    "passed": 

@@ -1,0 +1,56 @@
+{
+  "timestamp": "2026-01-23T16:20:15.587629",
+  "strategy": "V24_MarketNeutral_V4",
+  "design": "Long/Short momentum, 50% each leg, monthly rebalance",
+  "config": {
+    "long_pct": 0.2,
+    "short_pct": 0.2,
+    "max_positions": 30,
+    "rebal_period": 20,
+    "momentum_lookback": 90
+  },
+  "v24_metrics": {
+    "cagr": -0.012170446405052493,
+    "volatility": 0.13669385997863132,
+    "sharpe": -0.021181249235548368,
+    "sortino": -0.02826417777493173,
+    "max_dd": -0.17955572336046466,
+    "win_rate": 0.531615925058548,
+    "n_days": 427
+  },
+  "correlation": {
+    "correlation": -0.1718381167635283,
+    "beta": -0.0925545344989556,
+    "n_days": 427,
+    "passed": "True"
+  },
+  "combined": {
+    "v21": {
+      "name": "V21 (long-only)",
+      "cagr": 0.16475619809296682,
+      "sharpe": 0.7275397297971837,
+      "max_dd": -0.2720675106562138,
+      "vol": 0.2537878408553878
+    },
+    "v24": {
+      "name": "V24 (L/S neutral)",
+      "cagr": -0.012170446405052493,
+      "sharpe": -0.021181249235548368,
+      "max_dd": -0.17955572336046466,
+      "vol": 0.13669385997863132
+    },
+    "combined": {
+      "name": "Combined 50/50",
+      "cagr": 0.08543225252032416,
+      "sharpe": 0.6812587600057676,
+      "max_dd": -0.168821554153062,
+      "vol": 0.13338939703544087
+    },
+    "sharpe_improvement": -0.04628096979141616,
+    "dd_improvement": 0.10324595650315183
+  },
+  "walk_forward": {
+    "oos_sharpe": 0,
+    "n_windows": 0
+  }
+}

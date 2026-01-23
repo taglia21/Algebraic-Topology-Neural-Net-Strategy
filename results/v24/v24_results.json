@@ -1,0 +1,143 @@
+{
+  "timestamp": "2026-01-23T15:38:56.510736",
+  "parameters": {
+    "n_positions": 30,
+    "breakout_period": 20,
+    "exit_period": 10,
+    "vol_ratio_threshold": 1.5,
+    "rsi_threshold": 50,
+    "atr_multiplier": 2.0,
+    "max_holding": 20,
+    "cost_bps": 10
+  },
+  "standalone_metrics": {
+    "name": "V24 Momentum",
+    "total_return": 23.55320565929089,
+    "cagr": 10.859310008449885,
+    "annual_volatility": 20.17504066746389,
+    "sharpe": 0.6123012185476289,
+    "max_drawdown": -33.008398499356005,
+    "calmar": 0.32898627325593366,
+    "win_rate": 53.964757709251096,
+    "profit_factor": 1.1169977633640777,
+    "trading_days": 517,
+    "years": 2.0515873015873014
+  },
+  "walkforward": {
+    "is_sharpe": -0.22284158454613956,
+    "oos_sharpe": 0,
+    "oos_is_ratio": 0,
+    "windows": [
+      {
+        "window": 1,
+        "train_start": "2023-12-28",
+        "train_end": "2024-06-28",
+        "test_start": "2024-06-28",
+        "test_end": "2024-08-28",
+        "is_sharpe": -0.8447402070451128,
+        "oos_sharpe": 0,
+        "sharpe_decay": 0
+      },
+      {
+        "window": 2,
+        "train_start": "2024-02-28",
+        "train_end": "2024-08-28",
+        "test_start": "2024-08-28",
+        "test_end": "2024-10-28",
+        "is_sharpe": 0.14635954041665,
+        "oos_sharpe": 0,
+        "sharpe_decay": 0.0
+      },
+      {
+        "window": 3,
+        "train_start": "2024-04-28",
+        "train_end": "2024-10-28",
+        "test_start": "2024-10-28",
+        "test_end": "2024-12-28",
+        "is_sharpe": 0.2504388484761444,
+        "oos_sharpe": 0,
+        "sharpe_decay": 0.0
+      },
+      {
+        "window": 4,
+        "train_start": "2024-06-28",
+        "train_end": "2024-12-28",
+        "test_start": "2024-12-28",
+        "test_end": "2025-02-28",
+        "is_sharpe": 0.861397015656731,
+        "oos_sharpe": 0,
+        "sharpe_decay": 0.0
+      },
+      {
+        "window": 5,
+        "train_start": "2024-08-28",
+        "train_end": "2025-02-28",
+        "test_start": "2025-02-28",
+        "test_end": "2025-04-28",
+        "is_sharpe": -2.2530595991270386,
+        "oos_sharpe": 0,
+        "sharpe_decay": 0
+      },
+      {
+        "window": 6,
+        "train_start": "2024-10-28",
+        "train_end": "2025-04-28",
+        "test_start": "2025-04-28",
+        "test_end": "2025-06-28",
+        "is_sharpe": -2.4176904268680124,
+        "oos_sharpe": 0,
+        "sharpe_decay": 0
+      },
+      {
+        "window": 7,
+        "train_start": "2024-12-28",
+        "train_end": "2025-06-28",
+        "test_start": "2025-06-28",
+        "test_end": "2025-08-28",
+        "is_sharpe": 0.48423807837506383,
+        "oos_sharpe": 0,
+        "sharpe_decay": 0.0
+      },
+      {
+        "window": 8,
+        "train_start": "2025-02-28",
+        "train_end": "2025-08-28",
+        "test_start": "2025-08-28",
+        "test_end": "2025-10-28",
+        "is_sharpe": 2.2307629537458022,
+        "oos_sharpe": 0,
+        "sharpe_decay": 0.0
+      },
+      {
+        "window": 9,
+        "train_start": "2025-04-28",
+        "train_end": "2025-10-28",
+        "test_start": "2025-10-28",
+        "test_end": "2025-12-28",
+        "is_sharpe": 0.3394778754259478,
+        "oos_sharpe": 0,
+        "sharpe_decay": 0.0
+      }
+    ]
+  },
+  "correlation": {
+    "v21_correlation": 0.6212698437478955,
+    "correlation_pass": "False",
+    "correlation_fail": "True"
+  },
+  "combined_portfolio": {
+    "v21_sharpe": 0.7708740741148271,
+    "v24_sharpe": 0.6123012185476289,
+    "combined_sharpe": 0.7716128743268348,
+    "sharpe_improvement": 0.0007388002120076731,
+    "diversification_benefit": "True"
+  },
+  "success_criteria": {
+    "cagr_pass": "False",
+    "sharpe_pass": "True",
+    "max_dd_pass": "True",
+    "correlation_pass": "False",
+    "oos_is_pass": false,
+    "all_pass": false
+  }
+}

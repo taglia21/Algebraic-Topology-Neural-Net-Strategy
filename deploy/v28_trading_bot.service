@@ -1,0 +1,59 @@
+[Unit]
+Description=V28 Production Trading Bot
+Documentation=https://github.com/taglia21/Algebraic-Topology-Neural-Net-Strategy
+After=network.target network-online.target redis.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tradingbot
+Group=tradingbot
+WorkingDirectory=/opt/trading-bot
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONDONTWRITEBYTECODE=1"
+Environment="V28_ENV=production"
+Environment="V28_VERSION=28.0.0"
+EnvironmentFile=/opt/trading-bot/.env
+
+# Main execution command
+ExecStart=/opt/trading-bot/.venv/bin/python run_v28_production.py --mode=live
+
+# Graceful shutdown handling
+ExecStop=/bin/kill -SIGTERM $MAINPID
+TimeoutStopSec=60
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Restart configuration
+Restart=always
+RestartSec=30
+RestartPreventExitStatus=0
+
+# Pre-start health check
+ExecStartPre=/opt/trading-bot/.venv/bin/python -c "import v28_production_system; print('V28 modules loaded')"
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/trading-bot/logs
+ReadWritePaths=/opt/trading-bot/state
+ReadWritePaths=/opt/trading-bot/cache
+ReadWritePaths=/opt/trading-bot/results
+ReadWritePaths=/opt/trading-bot/data
+
+# Resource limits
+MemoryMax=2G
+MemoryHigh=1536M
+CPUQuota=200%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=v28-trading-bot
+
+[Install]
+WantedBy=multi-user.target

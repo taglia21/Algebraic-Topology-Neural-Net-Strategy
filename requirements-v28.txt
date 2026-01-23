@@ -1,0 +1,48 @@
+# V28 Additional Requirements
+# Core dependencies for V28 production system
+
+# Web Framework & WebSocket
+aiohttp>=3.9.0
+aiohttp-cors>=0.7.0
+websockets>=12.0
+
+# Redis for caching
+redis>=5.0.0
+hiredis>=2.3.0
+
+# HMM Regime Detection
+hmmlearn>=0.3.0
+
+# GARCH Volatility
+arch>=6.2.0
+
+# Additional ML/Stats
+scipy>=1.11.0
+statsmodels>=0.14.0
+
+# Monitoring & Metrics
+prometheus-client>=0.19.0
+psutil>=5.9.0
+
+# API Client
+httpx>=0.26.0
+
+# Configuration
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Async utilities
+asyncio-throttle>=1.0.2
+
+# Logging & Tracing
+structlog>=24.1.0
+python-json-logger>=2.0.0
+
+# Data validation
+marshmallow>=3.20.0
+
+# Task scheduling
+apscheduler>=3.10.0
+
+# Environment
+python-dotenv>=1.0.0

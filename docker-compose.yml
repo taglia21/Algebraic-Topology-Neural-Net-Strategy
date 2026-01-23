@@ -1,0 +1,196 @@
+# V28 Production Trading System
+# Docker Compose configuration with Redis caching
+
+services:
+  # =============================================================================
+  # Trading Bot - Main Application
+  # =============================================================================
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: v28-trading-bot
+    restart: unless-stopped
+    
+    environment:
+      - V28_ENV=production
+      - V28_VERSION=28.0.0
+      - REDIS_URL=redis://redis:6379/0
+      - API_HOST=0.0.0.0
+      - API_PORT=8080
+      - METRICS_PORT=8081
+      - LOG_LEVEL=INFO
+      # API Keys (use secrets in production)
+      - ALPACA_API_KEY=${ALPACA_API_KEY:-}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY:-}
+      - POLYGON_API_KEY=${POLYGON_API_KEY:-}
+      # Alert configuration
+      - ALERT_EMAIL_SENDER=${ALERT_EMAIL_SENDER:-}
+      - ALERT_EMAIL_RECIPIENT=${ALERT_EMAIL_RECIPIENT:-}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+    
+    ports:
+      - "8080:8080"   # REST/WebSocket API
+      - "8081:8081"   # Metrics/Prometheus
+    
+    volumes:
+      - ./logs:/app/logs
+      - ./state:/app/state
+      - ./cache:/app/cache
+      - ./results:/app/results
+      - ./data:/app/data
+    
+    depends_on:
+      redis:
+        condition: service_healthy
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    networks:
+      - trading-network
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # =============================================================================
+  # Redis - Caching & Message Queue
+  # =============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: v28-redis
+    restart: unless-stopped
+    
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+      --save 300 10
+    
+    ports:
+      - "6379:6379"
+    
+    volumes:
+      - redis-data:/data
+    
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    
+    networks:
+      - trading-network
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 300M
+
+  # =============================================================================
+  # Prometheus - Metrics Collection (optional)
+  # =============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: v28-prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    
+    ports:
+      - "9090:9090"
+    
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    
+    networks:
+      - trading-network
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # =============================================================================
+  # Grafana - Dashboards (optional)
+  # =============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: v28-grafana
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    
+    ports:
+      - "3000:3000"
+    
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    
+    depends_on:
+      - prometheus
+    
+    networks:
+      - trading-network
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  trading-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  redis-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local

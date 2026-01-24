@@ -246,8 +246,16 @@ class TechnicalIndicators:
         if len(prices) < long_period:
             return np.nan
         
-        long_return = (prices.iloc[-1] / prices.iloc[-long_period]) - 1
-        short_return = (prices.iloc[-1] / prices.iloc[-short_period]) - 1
+        price_long_ago = prices.iloc[-long_period]
+        price_short_ago = prices.iloc[-short_period]
+        current_price = prices.iloc[-1]
+        
+        # Guard against division by zero
+        if price_long_ago == 0 or price_short_ago == 0 or pd.isna(price_long_ago) or pd.isna(price_short_ago):
+            return np.nan
+        
+        long_return = (current_price / price_long_ago) - 1
+        short_return = (current_price / price_short_ago) - 1
         
         return long_return - short_return
     
@@ -293,11 +301,15 @@ class TechnicalIndicators:
         """
         lower, middle, upper = TechnicalIndicators.bollinger_bands(prices, period, std_dev)
         
-        if pd.isna(middle) or upper == lower:
+        if pd.isna(middle) or pd.isna(upper) or pd.isna(lower):
+            return 0.0
+        
+        band_width = upper - lower
+        if band_width == 0 or pd.isna(band_width):
             return 0.0
         
         current = prices.iloc[-1]
-        return (current - middle) / ((upper - lower) / 2)
+        return (current - middle) / (band_width / 2)
     
     @staticmethod
     def atr(high: pd.Series, low: pd.Series, close: pd.Series, 
@@ -571,7 +583,12 @@ class PairsTrader:
         try:
             beta = np.linalg.lstsq(X, y, rcond=None)[0]
             residuals = y - X @ beta
-            se = np.sqrt(np.sum(residuals**2) / (len(y) - 2) / np.sum((lag - lag.mean())**2))
+            denominator = np.sum((lag - lag.mean())**2)
+            if denominator < 1e-10 or len(y) <= 2:
+                return (0, 1.0)
+            se = np.sqrt(np.sum(residuals**2) / (len(y) - 2) / denominator)
+            if se < 1e-10:
+                return (0, 1.0)
             t_stat = beta[1] / se
             
             # Approximate p-value (simplified)
@@ -661,7 +678,7 @@ class PairsTrader:
             
             mean, std = self.spread_stats[pair]
             
-            if std == 0:
+            if std < 1e-10:
                 return 0.0
             
             return (spread - mean) / std

@@ -1,0 +1,3 @@
+{"symbol": "AAPL", "entry": 150, "exit": 152, "pnl": 200, "strategy": "mean_reversion", "signals": {}, "timestamp": "2026-02-01T20:24:03.516937"}
+{"symbol": "NVDA", "entry": 400, "exit": 395, "pnl": -500, "strategy": "momentum", "signals": {}, "timestamp": "2026-02-01T20:24:03.517176"}
+{"symbol": "TSLA", "entry": 200, "exit": 205, "pnl": 500, "strategy": "mean_reversion", "signals": {}, "timestamp": "2026-02-01T20:24:03.517286"}

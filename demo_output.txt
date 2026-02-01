@@ -1,0 +1,83 @@
+PyTorch not available - SAC will use simplified fallback
+[!] WARNING: OPENAI_API_KEY not set
+    Add to .env: OPENAI_API_KEY=sk-...
+    Running in demo mode...
+
+============================================================
+INITIALIZING AI TRADING OFFICE
+Team of Rivals Architecture
+============================================================
+
+Initializing departments...
+  [OK] Chief Orchestrator
+  [OK] Risk Team (VETO authority)
+  [OK] Strategy Team
+  [OK] Data Team
+  [OK] Execution Team
+  [OK] Research Team
+
+[OK] All departments initialized
+============================================================
+
+
+************************************************************
+TEAM OF RIVALS DEMO
+************************************************************
+
+============================================================
+MORNING STANDUP - 2026-02-01 19:32
+============================================================
+
+DEPARTMENT STATUS:
+  [GREEN] STRATEGY
+  [GREEN] DATA
+  [GREEN] RISK
+  [GREEN] EXECUTION
+  [GREEN] RESEARCH
+
+[OK] No critical alerts
+
+============================================================
+
+----------------------------------------
+TESTING TRADE APPROVAL PROCESS
+----------------------------------------
+
+[Test 1] Reasonable trade - should PASS
+
+TRADE PROPOSAL: BUY 10 AAPL
+  Strategy: momentum
+  Expected Price: $180.00
+
+  -> Data Team: Validating...
+  [OK] Data Team: Approved
+  -> Risk Team: Reviewing...
+  [OK] Risk Team: Approved
+  -> Execution Team: Placing order...
+  [OK] Trade EXECUTED: FILLED
+
+[Test 2] Oversized position - should be VETOED
+
+TRADE PROPOSAL: BUY 100 NVDA
+  Strategy: mean_reversion
+  Expected Price: $800.00
+
+  -> Data Team: Validating...
+  [OK] Data Team: Approved
+  -> Risk Team: Reviewing...
+  [X] VETOED by Risk Team
+      - Position 80.0% exceeds 10.0% limit
+
+============================================================
+END OF DAY REVIEW - 2026-02-01 19:32
+============================================================
+
+TODAY'S P&L: $0.00
+  Trades Executed: 1
+  Vetoes: 1
+
+============================================================
+
+************************************************************
+DEMO COMPLETE
+************************************************************

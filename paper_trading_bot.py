@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import logging
+import signal
 from datetime import datetime, time as dt_time
 from typing import Dict, List
 
@@ -49,6 +50,11 @@ class PaperTradingBot:
         self.is_market_hours = False
         self.positions: Dict[str, int] = {}
         self.trade_log: List[Dict] = []
+        self.running = True
+        
+        # Setup graceful shutdown
+        signal.signal(signal.SIGTERM, self._shutdown)
+        signal.signal(signal.SIGINT, self._shutdown)
         
         send_message_to_discord(
             f"🤖 **Paper Trading Bot Started**\n"
@@ -56,6 +62,11 @@ class PaperTradingBot:
             f"Mode: PAPER TRADING\n"
             f"Testing until: Feb 10, 2026"
         )
+    
+    def _shutdown(self, signum, frame):
+        """Handle graceful shutdown."""
+        logger.info("Shutdown signal received, stopping bot...")
+        self.running = False
     
     def check_market_hours(self) -> bool:
         """Check if market is open (simplified - 9:30 AM - 4:00 PM ET)."""
@@ -223,7 +234,7 @@ class PaperTradingBot:
             return
         
         # Normal operation loop
-        while True:
+        while self.running:
             try:
                 if self.check_market_hours():
                     if not self.is_market_hours:

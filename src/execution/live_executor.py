@@ -109,7 +109,11 @@ class LiveExecutor:
         
         # Simulate immediate fill at market price for simplicity
         # In reality would use limit prices and market data
-        fill_price = order.limit_price if order.limit_price else 100.0  # Placeholder
+        # Get real market price
+        from market_data import MarketDataFetcher
+        fetcher = MarketDataFetcher()
+        market_price = fetcher.get_current_price(order.symbol) or 100.0
+        fill_price = order.limit_price if order.limit_price else market_price
         
         # Calculate cost
         cost = order.quantity * fill_price
@@ -173,8 +177,17 @@ class LiveExecutor:
     
     def get_account_value(self) -> float:
         """Get total account value (cash + positions)."""
-        # TODO: Add position valuations
-        return self.cash_balance
+        total = self.cash_balance
+        
+        # Add position values
+        if self.positions and self.paper_trading:
+            from market_data import MarketDataFetcher
+            fetcher = MarketDataFetcher()
+            for symbol, quantity in self.positions.items():
+                price = fetcher.get_current_price(symbol) or 100.0
+                total += quantity * price
+        
+        return total
     
     def get_pnl(self) -> float:
         """Get total P&L."""

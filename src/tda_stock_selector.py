@@ -392,6 +392,7 @@ class TDAStockSelector:
                 # In BEAR, prioritize low volatility and defensive positions
                 total_score = cluster_score * 0.1 + momentum_score * 0.3 + risk_score * 0.6
             else:  # TRANSITION
+cat src/options_engine.py
                 total_score = cluster_score * 0.2 + momentum_score * 0.5 + risk_score * 0.3
             
             # Bonus for being in strong cluster

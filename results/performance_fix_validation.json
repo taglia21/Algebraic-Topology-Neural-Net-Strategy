@@ -1,0 +1,59 @@
+{
+  "timestamp": "2026-02-02T19:20:57.629781",
+  "old_config": {
+    "universe": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "XLF",
+      "XLK"
+    ],
+    "tda_enabled": true,
+    "risk_parity_enabled": true,
+    "thresholds": {
+      "buy": 0.52,
+      "sell": 0.48
+    },
+    "sharpe": 0.35640746534477263,
+    "total_return": 0.08186504685671792,
+    "max_drawdown": -0.0845918005088915,
+    "volatility": 0.13634685738006552,
+    "n_days": 249,
+    "signals": {
+      "long": 392,
+      "short": 3,
+      "neutral": 850
+    },
+    "win_rate": 0.3493975903614458
+  },
+  "new_config": {
+    "universe": [
+      "SPY",
+      "IWM",
+      "XLF",
+      "XLK"
+    ],
+    "tda_enabled": false,
+    "risk_parity_enabled": false,
+    "thresholds": {
+      "buy": 0.55,
+      "sell": 0.45
+    },
+    "sharpe": 0.8392405348320142,
+    "total_return": 0.11376975400318345,
+    "max_drawdown": -0.05357754690642663,
+    "volatility": 0.11851656534372726,
+    "n_days": 205,
+    "signals": {
+      "long": 505,
+      "short": 215,
+      "neutral": 276
+    },
+    "win_rate": 0.4682926829268293
+  },
+  "improvement": {
+    "sharpe_delta": 0.4828330694872416,
+    "sharpe_pct": 135.4722098820715,
+    "passes_gate": "True"
+  }
+}

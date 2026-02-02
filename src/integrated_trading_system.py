@@ -20,6 +20,15 @@ from src.tda_strategy import TDAStrategy
 from src.v50_options_alpha_engine import V50OptionsAlphaEngine, OptionsSignal
 from src.risk.risk_manager import RiskManager
 
+# Import universe config
+import sys
+sys.path.insert(0, '.')
+try:
+    from config.universe import get_core_universe, get_full_universe
+    DEFAULT_UNIVERSE = get_core_universe()
+except ImportError:
+    DEFAULT_UNIVERSE = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'META', 'TSLA', 'AMD']
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -76,7 +85,7 @@ class IntegratedTradingSystem:
             'min_confidence': 0.6,
             'tda_lookback': 60,
             'prediction_horizon': 5,
-            'universe': ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AMD']
+            'universe': 'core'  # Use config/universe.py get_core_universe() - 51 symbols
         }
     
     def analyze_symbol(self, symbol: str, price_data: pd.DataFrame) -> Dict[str, Any]:
@@ -311,7 +320,7 @@ def demo_integrated_system():
     config = {
         'paper_trading': True,
         'initial_capital': 100000,
-        'universe': ['SPY', 'QQQ', 'AAPL']
+        'universe': DEFAULT_UNIVERSE  # 51 symbols from config/universe.py
     }
     
     system = IntegratedTradingSystem(config)

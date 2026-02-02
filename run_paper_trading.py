@@ -47,7 +47,10 @@ def run_full_system_test():
     print("   ✓ Risk Manager")
     
     # Test universe
-    universe = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA']
+    # Import expanded universe
+    sys.path.insert(0, '.')
+    from config.universe import get_core_universe
+    universe = get_core_universe()  # 51 symbols
     print(f"\n[2] Analyzing Universe: {universe}")
     
     for symbol in universe:

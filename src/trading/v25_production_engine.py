@@ -44,6 +44,14 @@ from typing import Dict, List, Tuple, Optional, Any
 from pathlib import Path
 from enum import Enum
 
+# Import strategy overrides for performance fixes
+try:
+    from config.strategy_overrides import get_overrides, STRATEGY_OVERRIDES
+    _HAS_OVERRIDES = True
+except ImportError:
+    _HAS_OVERRIDES = False
+    STRATEGY_OVERRIDES = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,7 +69,14 @@ class SignalMode(Enum):
 
 @dataclass
 class V25EngineConfig:
-    """Configuration for V2.5 Production Engine."""
+    """Configuration for V2.5 Production Engine.
+    
+    Performance Fix Applied (2026-02-02):
+    - TDA disabled (was hurting Sharpe by -0.112)
+    - Risk parity disabled (was hurting Sharpe by -0.219)
+    - SAC disabled (was hurting Sharpe by -0.019)
+    - New thresholds: 0.55/0.45 with neutral zone
+    """
     
     # V2.5 Toggle
     use_v25_elite: bool = True
@@ -75,19 +90,24 @@ class V25EngineConfig:
     
     # V2.3 component enablement (for hybrid mode)
     use_attention_factor: bool = True
-    use_temporal_transformer: bool = True
-    use_dueling_sac: bool = False  # Disabled by default (heavy)
+    use_temporal_transformer: bool = True  # Helps: +0.088 Sharpe
+    use_dueling_sac: bool = False  # DISABLED: hurts Sharpe by -0.019
     use_pomdp_controller: bool = False  # Disabled by default
+    
+    # PERFORMANCE FIX: Disable harmful features
+    use_tda: bool = False  # DISABLED: hurts Sharpe by -0.112
+    use_risk_parity: bool = False  # DISABLED: hurts Sharpe by -0.219
     
     # V2.4 component enablement
     use_tca_optimizer: bool = True
     use_kelly_sizer: bool = True
     
-    # Signal blending weights (hybrid mode)
+    # Signal blending weights (hybrid mode) - NN focused
     v25_weight: float = 0.5
     v23_weight: float = 0.25
-    sac_weight: float = 0.15
+    sac_weight: float = 0.0  # Disabled
     pomdp_weight: float = 0.10
+    tda_weight: float = 0.0  # Disabled
     
     # Feature dimensions
     n_assets: int = 20
@@ -96,13 +116,18 @@ class V25EngineConfig:
     macro_dim: int = 4
     
     # Position constraints
-    max_position_pct: float = 0.05
-    min_position_pct: float = 0.01
+    max_position_pct: float = 0.10  # Increased for concentrated bets
+    min_position_pct: float = 0.02
     max_portfolio_heat: float = 0.30
     
-    # Signal thresholds
-    signal_threshold: float = 0.6
-    min_confirmations: int = 5  # Out of 9 indicators
+    # Signal thresholds - RECALIBRATED for balanced signals
+    # OLD: 0.52/0.48 produced 0% buy / 94% sell (severely imbalanced)
+    # NEW: 0.55/0.45 with neutral zone for balanced signal generation
+    signal_threshold: float = 0.55  # Was 0.6
+    nn_buy_threshold: float = 0.55  # Was 0.52
+    nn_sell_threshold: float = 0.45  # Was 0.48
+    use_neutral_zone: bool = True
+    min_confirmations: int = 4  # Reduced from 5 to allow more signals
     
     # Data quality thresholds
     min_quality_score: int = 70

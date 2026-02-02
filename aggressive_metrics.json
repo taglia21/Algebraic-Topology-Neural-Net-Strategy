@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-02-02T20:55:50.585956",
+  "runtime_minutes": 23.195569983333332,
+  "portfolio_value": 49030.15868967927,
+  "total_pnl": -50969.84131032073,
+  "total_pnl_pct": -0.5096984131032073,
+  "cash": 27608.97512644685,
+  "positions": 2,
+  "total_trades": 11,
+  "cycles": 41,
+  "daily_pnl": {
+    "2026-02-02": -50969.84131032073
+  },
+  "open_positions": {
+    "META": {
+      "shares": 20,
+      "entry": 706.4376831054688
+    },
+    "AAPL": {
+      "shares": 27,
+      "entry": 270.0899963378906
+    }
+  }
+}

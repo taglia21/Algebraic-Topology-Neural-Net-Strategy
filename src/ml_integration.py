@@ -98,8 +98,18 @@ class MLIntegration:
         """
         try:
             if self.enhanced_ml is not None:
+                # Convert dict to DataFrame for enhanced ML
+                import pandas as pd
+                df = pd.DataFrame({
+                    'Close': price_data.get('close', []),
+                    'High': price_data.get('high', []),
+                    'Low': price_data.get('low', []),
+                    'Volume': price_data.get('volume', [])
+                })
+                if len(df) < 20:
+                    return 'neutral', 0.5, 0.0
                 # Use enhanced ML system
-                signal, prob, conf = self.enhanced_ml.predict(ticker, price_data)
+                signal, prob, conf = self.enhanced_ml.predict(df)
             else:
                 # Fallback to simple momentum
                 signal, prob, conf = self._fallback_signal(price_data)

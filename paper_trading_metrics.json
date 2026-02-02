@@ -1,0 +1,12 @@
+{
+  "runtime_minutes": 6.58586405,
+  "total_trades": 2,
+  "win_rate": 0.0,
+  "total_pnl": 0,
+  "sharpe_ratio": 0.0,
+  "cash": 80000.0,
+  "positions": 2,
+  "daily_pnl": {
+    "2026-02-02": 0
+  }
+}

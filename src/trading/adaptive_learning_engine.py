@@ -895,29 +895,54 @@ class AdaptiveLearningEngine:
         if not selected:
             return {}, {}
         
-        # 6. Apply risk parity allocation
-        self.risk_parity.compute_volatilities(price_data)
-        base_weights = self.risk_parity.allocate(selected, total_allocation=0.58)
+        # 6. Apply allocation (momentum-weighted if risk parity disabled)
+        # Check if risk parity is disabled via overrides
+        try:
+            from config.strategy_overrides import get_overrides
+            use_risk_parity = get_overrides().enable_risk_parity
+        except ImportError:
+            use_risk_parity = False  # Default to disabled for performance
         
-        # 7. Apply RL position sizing adjustments
+        if use_risk_parity:
+            self.risk_parity.compute_volatilities(price_data)
+            base_weights = self.risk_parity.allocate(selected, total_allocation=0.58)
+        else:
+            # Momentum-weighted allocation (better performance)
+            total_score = sum(combined_scores.get(t, 0) for t in selected)
+            if total_score > 0:
+                base_weights = {t: combined_scores.get(t, 0) / total_score * 0.58 for t in selected}
+            else:
+                base_weights = {t: 0.58 / len(selected) for t in selected}
+        
+        # 7. Apply RL position sizing adjustments (if enabled)
+        try:
+            from config.strategy_overrides import get_overrides
+            use_rl_sizing = not get_overrides().enable_sac_sizing == False
+        except ImportError:
+            use_rl_sizing = False  # Disabled by default
+        
         final_weights = {}
         for ticker, base_weight in base_weights.items():
-            # Get momentum and volatility for state
-            trad = traditional_scores.get(ticker, {})
-            momentum = trad.get('momentum', 0)
-            volatility = self.risk_parity.volatilities.get(ticker, 0.25)
-            
-            # Get RL decision
-            decision = self.position_rl.get_position_multiplier(
-                ticker, momentum, volatility, base_weight
-            )
-            
-            final_weights[ticker] = decision.final_weight
-            
-            # Record for learning
-            state = self.position_rl._discretize_state(ticker, momentum, volatility)
-            current_price = price_data[ticker]['Close'].iloc[-1] if ticker in price_data else 0
-            self.position_rl.record_entry(ticker, state, decision.rl_multiplier, current_price)
+            if use_rl_sizing:
+                # Get momentum and volatility for state
+                trad = traditional_scores.get(ticker, {})
+                momentum = trad.get('momentum', 0)
+                volatility = self.risk_parity.volatilities.get(ticker, 0.25)
+                
+                # Get RL decision
+                decision = self.position_rl.get_position_multiplier(
+                    ticker, momentum, volatility, base_weight
+                )
+                
+                final_weights[ticker] = decision.final_weight
+                
+                # Record for learning
+                state = self.position_rl._discretize_state(ticker, momentum, volatility)
+                current_price = price_data[ticker]['Close'].iloc[-1] if ticker in price_data else 0
+                self.position_rl.record_entry(ticker, state, decision.rl_multiplier, current_price)
+            else:
+                # Skip RL sizing - use base weights directly
+                final_weights[ticker] = base_weight
         
         # Normalize weights
         total = sum(final_weights.values())

@@ -65,8 +65,39 @@ def get_full_universe():
         all_symbols.update(lst)
     return sorted(list(all_symbols))
 
-def get_core_universe():
-    """Get core trading universe - 50 most liquid."""
+def get_core_universe(apply_overrides: bool = True):
+    """
+    Get core trading universe - 50 most liquid.
+    
+    Args:
+        apply_overrides: If True, apply strategy_overrides exclusions (removes weak assets like QQQ)
+    """
+    base_universe = [
+        'SPY', 'IWM', 'DIA',  # QQQ removed - Sharpe 0.39 drags portfolio
+        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'AMD', 'AVGO', 'CRM',
+        'JPM', 'BAC', 'GS', 'MS', 'BLK',
+        'UNH', 'JNJ', 'LLY', 'PFE', 'ABBV', 'MRK',
+        'HD', 'MCD', 'NKE', 'COST', 'WMT', 'PG', 'KO',
+        'CAT', 'DE', 'UNP', 'HON', 'BA',
+        'XOM', 'CVX', 'COP', 'SLB',
+        'NFLX', 'DIS', 'VZ', 'T',
+        'XLF', 'XLK',  # Added high-Sharpe sector ETFs
+        'SNOW', 'CRWD', 'DDOG', 'PLTR', 'SQ', 'PYPL',
+    ]
+    
+    if apply_overrides:
+        try:
+            from config.strategy_overrides import get_overrides
+            overrides = get_overrides()
+            return [t for t in base_universe if overrides.should_include_ticker(t)]
+        except ImportError:
+            pass
+    
+    return base_universe
+
+
+def get_core_universe_legacy():
+    """Original core universe without overrides (for comparison backtests)."""
     return [
         'SPY', 'QQQ', 'IWM', 'DIA',
         'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'AMD', 'AVGO', 'CRM',

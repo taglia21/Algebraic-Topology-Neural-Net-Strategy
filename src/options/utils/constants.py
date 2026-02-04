@@ -50,9 +50,11 @@ SPREAD_DTE_RANGE = (30, 45)  # Credit spreads
 IRON_CONDOR_DTE_RANGE = (35, 50)  # Iron condors
 IC_DTE_RANGE = IRON_CONDOR_DTE_RANGE  # Deprecated alias
 
-# Exit thresholds
+# Exit thresholds - CRITICAL RISK PARAMETERS
 PROFIT_TARGET_PCT = 0.50  # Take profit at 50% of max gain
-STOP_LOSS_MULTIPLIER = 2.0  # Stop loss at 2x credit received
+PROFIT_TARGET_PERCENT = 50.0  # Same as above, percentage form
+STOP_LOSS_PERCENT = 25.0  # Exit if loss exceeds 25% - SAFE (was 100% - INSANE!)
+STOP_LOSS_MULTIPLIER = 2.0  # Stop loss at 2x credit received (for spreads)
 TIME_EXIT_DTE = 21  # Exit at 21 DTE regardless of P&L
 
 # ============================================================================

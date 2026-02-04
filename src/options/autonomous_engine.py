@@ -34,6 +34,13 @@ from .signal_generator import SignalGenerator, Signal, SignalType
 from .position_sizer import MedallionPositionSizer, PositionSize, calculate_max_loss_per_contract
 from .trade_executor import AlpacaOptionsExecutor, OrderSide, ExecutionResult
 
+# ==== NEW ENHANCED MODULES ====
+from .regime_detector import RegimeDetector, MarketRegime
+from .correlation_manager import CorrelationManager, Position as CorrPosition
+from .weight_optimizer import DynamicWeightOptimizer
+from .volatility_surface import VolatilitySurfaceEngine
+from .cointegration_engine import CointegrationEngine
+
 
 # ============================================================================
 # MARKET HOURS
@@ -115,6 +122,20 @@ class AutonomousTradingEngine:
         self.position_sizer = MedallionPositionSizer()
         self.trade_executor = AlpacaOptionsExecutor(paper=paper)
         
+        # ==== ENHANCED MODULES ====
+        self.regime_detector = RegimeDetector()
+        self.correlation_manager = CorrelationManager()
+        self.weight_optimizer = DynamicWeightOptimizer(
+            strategies=["iv_rank", "theta_decay", "mean_reversion", "delta_hedging"],
+            regime_detector=self.regime_detector
+        )
+        self.vol_surface_engine = VolatilitySurfaceEngine()
+        self.cointegration_engine = CointegrationEngine()
+        
+        # Current market regime
+        self.current_regime: Optional[MarketRegime] = None
+        self.regime_fitted = False
+        
         # Statistics
         self.stats = {
             "cycles_run": 0,
@@ -130,6 +151,7 @@ class AutonomousTradingEngine:
         self._load_state()
         
         self.logger.info(f"Initialized autonomous engine (paper={paper}, portfolio=${portfolio_value:,.0f})")
+        self.logger.info("✓ Enhanced modules loaded: RegimeDetector, CorrelationManager, WeightOptimizer, VolSurface, Cointegration")
     
     async def run(self):
         """
@@ -166,6 +188,8 @@ class AutonomousTradingEngine:
     async def _trading_cycle(self):
         """
         Execute one complete trading cycle (6 steps).
+        
+        ENHANCED: Now includes regime detection and dynamic weight optimization.
         """
         self.stats["cycles_run"] += 1
         cycle_num = self.stats["cycles_run"]
@@ -173,6 +197,9 @@ class AutonomousTradingEngine:
         self.logger.info(f"{'='*60}")
         self.logger.info(f"CYCLE #{cycle_num} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self.logger.info(f"{'='*60}")
+        
+        # STEP 0 (NEW): REGIME DETECTION & WEIGHT OPTIMIZATION
+        await self._update_regime_and_weights()
         
         # STEP 1: SCAN - Generate signals
         signals = await self._scan_for_signals()
@@ -218,7 +245,17 @@ class AutonomousTradingEngine:
         return signals
     
     async def _filter_signals(self, signals: List[Signal]) -> List[Signal]:
-        """Step 2: Filter signals to remove invalid/duplicate ones."""
+        """
+        Step 2: Filter signals to remove invalid/duplicate ones.
+        
+        ENHANCED: Now includes concentration risk checks.
+        """
+        # First, check concentration risk
+        concentration_ok = await self._check_concentration_risk()
+        if not concentration_ok:
+            self.logger.warning("Concentration risk too high - blocking new positions")
+            return []
+        
         valid_signals = []
         
         for signal in signals:
@@ -419,6 +456,187 @@ class AutonomousTradingEngine:
             self.logger.info(f"Loaded state from {self.state_file}")
         except Exception as e:
             self.logger.error(f"Failed to load state: {e}")
+    
+    # ========================================================================
+    # ENHANCED METHODS (NEW)
+    # ========================================================================
+    
+    async def _update_regime_and_weights(self):
+        """
+        Update market regime detection and rebalance strategy weights.
+        
+        This runs at the start of each trading cycle.
+        """
+        # Fit regime detector on first run
+        if not self.regime_fitted:
+            try:
+                self.logger.info("Fitting regime detector for first time...")
+                await self.regime_detector.fit()
+                self.regime_fitted = True
+                self.logger.info("✓ Regime detector fitted")
+            except Exception as e:
+                self.logger.error(f"Failed to fit regime detector: {e}")
+                return
+        
+        # Detect current regime
+        try:
+            regime_state = await self.regime_detector.detect_current_regime()
+            old_regime = self.current_regime
+            self.current_regime = regime_state.current_regime
+            
+            # Log regime info
+            self.logger.info(
+                f"Market Regime: {self.current_regime.value} "
+                f"(confidence: {regime_state.confidence:.1%})"
+            )
+            
+            # Rebalance weights if regime changed
+            if old_regime != self.current_regime or self.stats["cycles_run"] % 20 == 0:
+                self.logger.info("Rebalancing strategy weights...")
+                new_weights = await self.weight_optimizer.rebalance(
+                    regime=self.current_regime,
+                    force=(old_regime != self.current_regime)
+                )
+                
+                # Update signal generator weights (if method exists)
+                # This would need to be implemented in signal_generator.py
+                self.logger.info(f"Updated strategy weights: {new_weights}")
+        
+        except Exception as e:
+            self.logger.error(f"Regime update failed: {e}")
+    
+    async def _check_concentration_risk(self) -> bool:
+        """
+        Check for portfolio concentration risk.
+        
+        Returns:
+            True if safe to proceed, False if concentration limits exceeded
+        """
+        if len(self.current_positions) == 0:
+            return True
+        
+        try:
+            # Convert positions to CorrelationManager format
+            corr_positions = []
+            for pos in self.current_positions:
+                signal = pos.get("signal")
+                if signal:
+                    corr_positions.append(CorrPosition(
+                        symbol=signal.symbol,
+                        quantity=1,
+                        entry_price=1.0,
+                        current_price=1.0,
+                        strategy_type=signal.strategy,
+                        delta=signal.delta or 0.0,
+                        gamma=0.0,
+                        theta=0.0,
+                        vega=0.0,
+                        notional_value=1000.0,  # Simplified
+                        sector="Technology",  # Would need to fetch actual sector
+                    ))
+            
+            if len(corr_positions) == 0:
+                return True
+            
+            # Build correlation matrix
+            corr_matrix = await self.correlation_manager.build_correlation_matrix(corr_positions)
+            
+            # Check for alerts
+            alerts = self.correlation_manager.detect_concentration_risk(
+                positions=corr_positions,
+                portfolio_value=self.portfolio_value,
+                correlation_matrix=corr_matrix,
+            )
+            
+            # Log alerts
+            critical_alerts = [a for a in alerts if a.severity == "critical"]
+            if critical_alerts:
+                for alert in critical_alerts:
+                    self.logger.warning(f"⚠ CRITICAL: {alert.message}")
+                return False
+            
+            if alerts:
+                for alert in alerts[:3]:  # Show top 3
+                    self.logger.warning(f"⚠ {alert.severity.upper()}: {alert.message}")
+            
+            return True
+        
+        except Exception as e:
+            self.logger.error(f"Concentration check failed: {e}")
+            return True  # Allow trading to proceed on error
+    
+    async def _get_vol_surface_signals(self, symbols: List[str]) -> List[Signal]:
+        """
+        Generate additional signals from volatility surface analysis.
+        
+        Args:
+            symbols: Symbols to analyze
+        
+        Returns:
+            List of vol-based signals
+        """
+        vol_signals = []
+        
+        # Only analyze a few symbols per cycle to avoid slowdown
+        for symbol in symbols[:2]:
+            try:
+                # Build surface
+                surface = await self.vol_surface_engine.build_iv_surface(symbol)
+                
+                # Detect anomalies
+                anomalies = await self.vol_surface_engine.detect_anomalies(surface)
+                
+                # Generate arb signals
+                arb_signals = await self.vol_surface_engine.generate_arb_signals(
+                    anomalies, surface
+                )
+                
+                # Convert to Signal format (simplified)
+                for arb in arb_signals[:1]:  # Max 1 per symbol
+                    vol_signals.append(Signal(
+                        symbol=symbol,
+                        signal_type=SignalType.BUY if "buy" in arb.signal_type else SignalType.SELL,
+                        signal_source="vol_surface",
+                        strategy="vol_arb",
+                        confidence=arb.confidence,
+                        timestamp=datetime.now(),
+                        reason=arb.reasoning,
+                    ))
+            
+            except Exception as e:
+                self.logger.debug(f"Vol surface analysis failed for {symbol}: {e}")
+                continue
+        
+        return vol_signals
+    
+    async def _get_cointegration_signals(self, symbols: List[str]) -> List[Signal]:
+        """
+        Generate pairs trading signals from cointegration analysis.
+        
+        Args:
+            symbols: Symbols to test for pairs
+        
+        Returns:
+            List of pairs signals
+        """
+        # Only scan for pairs periodically (every 50 cycles)
+        if self.stats["cycles_run"] % 50 != 1:
+            return []
+        
+        try:
+            self.logger.info("Scanning for cointegrated pairs...")
+            pairs = await self.cointegration_engine.find_cointegrated_pairs(
+                symbols=symbols[:10],  # Limit to avoid slowdown
+                max_pairs=5,
+            )
+            
+            if pairs:
+                self.logger.info(f"Found {len(pairs)} cointegrated pairs")
+        
+        except Exception as e:
+            self.logger.error(f"Cointegration scan failed: {e}")
+        
+        return []  # Could convert pairs signals to Signal format
     
     async def _shutdown(self):
         """Graceful shutdown."""

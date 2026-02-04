@@ -61,6 +61,8 @@ RISK_CONFIG: Dict[str, Any] = {
     "kelly_fraction": 0.25,  # Quarter-Kelly for safety
     "max_kelly_fraction": 0.50,  # Absolute maximum Kelly
     "min_kelly_fraction": 0.01,  # Minimum position size
+    "kelly_max": 0.50,  # Alias for max_kelly_fraction
+    "kelly_min": 0.01,  # Alias for min_kelly_fraction
     
     # Execution
     "order_timeout_seconds": 60,  # Order timeout
@@ -100,13 +102,13 @@ MARKET_HOURS = {
 # VOLATILITY REGIMES
 # ============================================================================
 
-VOLATILITY_REGIMES = {
-    "extreme_low": {"iv_rank_max": 20, "position_size_multiplier": 1.5},
-    "low": {"iv_rank_max": 30, "position_size_multiplier": 1.2},
-    "normal": {"iv_rank_max": 70, "position_size_multiplier": 1.0},
-    "high": {"iv_rank_max": 80, "position_size_multiplier": 0.8},
-    "extreme_high": {"iv_rank_max": 100, "position_size_multiplier": 0.5},
-}
+VOLATILITY_REGIMES = [
+    {"name": "extreme_low", "min_iv_rank": 0, "max_iv_rank": 20, "position_size_multiplier": 1.5},
+    {"name": "low", "min_iv_rank": 20, "max_iv_rank": 30, "position_size_multiplier": 1.2},
+    {"name": "normal", "min_iv_rank": 30, "max_iv_rank": 70, "position_size_multiplier": 1.0},
+    {"name": "high", "min_iv_rank": 70, "max_iv_rank": 80, "position_size_multiplier": 0.8},
+    {"name": "extreme_high", "min_iv_rank": 80, "max_iv_rank": 100, "position_size_multiplier": 0.5},
+]
 
 
 # ============================================================================
@@ -128,9 +130,11 @@ LOGGING_CONFIG = {
 
 MONITORING_CONFIG = {
     "signal_scan_interval": 60,  # Scan for signals every 60 seconds
+    "signal_scan_interval_seconds": 60,  # Alias for compatibility
     "position_check_interval": 30,  # Check positions every 30 seconds
     "risk_check_interval": 15,  # Check risk every 15 seconds
     "heartbeat_interval": 300,  # Log heartbeat every 5 minutes
+    "regime_update_interval": 3600,  # Update regime every hour
 }
 
 

@@ -75,6 +75,46 @@ class PerformanceMetrics:
     def expectancy(self) -> float:
         """Calculate system expectancy."""
         return (self.win_rate * self.avg_win) - ((1 - self.win_rate) * self.avg_loss)
+    
+    def save(self, filepath: str):
+        """
+        Save metrics to JSON file (LOW-SEVERITY FIX).
+        
+        Args:
+            filepath: Path to save JSON file
+        """
+        import json
+        data = {
+            'total_trades': self.total_trades,
+            'winning_trades': self.winning_trades,
+            'losing_trades': self.losing_trades,
+            'total_profit': self.total_profit,
+            'total_loss': self.total_loss
+        }
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+    
+    @classmethod
+    def load(cls, filepath: str) -> 'PerformanceMetrics':
+        """
+        Load metrics from JSON file (LOW-SEVERITY FIX).
+        
+        Args:
+            filepath: Path to JSON file
+            
+        Returns:
+            PerformanceMetrics instance
+        """
+        import json
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        return cls(
+            total_trades=data['total_trades'],
+            winning_trades=data['winning_trades'],
+            losing_trades=data['losing_trades'],
+            total_profit=data['total_profit'],
+            total_loss=data['total_loss']
+        )
 
 
 @dataclass

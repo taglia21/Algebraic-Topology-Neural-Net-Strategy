@@ -15,6 +15,8 @@ Version: 1.0.0
 """
 
 import logging
+import time
+from functools import wraps
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -30,6 +32,38 @@ from src.multi_timeframe_analyzer import MultiTimeframeAnalyzer, AnalyzerConfig
 from src.sentiment_analyzer import SentimentAnalyzer, SentimentConfig
 
 logger = logging.getLogger(__name__)
+
+
+def retry_yfinance(max_retries=3, backoff=2.0):
+    """
+    CRITICAL FIX: Decorator for yfinance calls with exponential backoff retry logic.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        backoff: Backoff multiplier for exponential wait
+        
+    Returns:
+        Decorated function with retry logic
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"yfinance call failed after {max_retries} attempts: {e}")
+                        raise
+                    
+                    wait_time = backoff ** attempt
+                    logger.warning(f"yfinance call failed (attempt {attempt+1}/{max_retries}), "
+                                 f"retrying in {wait_time}s: {e}")
+                    time.sleep(wait_time)
+            
+            return None
+        return wrapper
+    return decorator
 
 
 class TradeSignal(Enum):
@@ -124,9 +158,10 @@ class EnhancedTradingEngine:
         
         logger.info("EnhancedTradingEngine initialized with all modules")
     
+    @retry_yfinance(max_retries=3)
     def _calculate_atr(self, symbol: str, period: int = 14) -> float:
         """
-        Calculate Average True Range for volatility measurement.
+        Calculate Average True Range with CRITICAL NaN and inf protection + retry logic.
         
         Args:
             symbol: Stock symbol
@@ -167,9 +202,11 @@ class EnhancedTradingEngine:
             logger.error(f"Error calculating ATR for {symbol}: {e}")
             return 0.0
     
+    @retry_yfinance(max_retries=3)
     def _get_current_price(self, symbol: str) -> Optional[float]:
         """
-        Get current market price with HIGH-SEVERITY validation.
+        Get current market price with HIGH-SEVERITY validation + retry logic.
+        MEDIUM-SEVERITY FIX: Returns None on error for explicit failure handling.
         
         Args:
             symbol: Stock symbol
@@ -183,7 +220,7 @@ class EnhancedTradingEngine:
             
             if data.empty:
                 logger.warning(f"No price data for {symbol}")
-                return None  # More explicit than 0.0
+                return None  # MEDIUM-SEVERITY FIX: Explicit None instead of 0.0
             
             price = float(data['Close'].iloc[-1])
             

@@ -18,6 +18,8 @@ Version: 1.0.0
 
 import logging
 import os
+import time
+from functools import wraps
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -33,6 +35,72 @@ try:
     VADER_AVAILABLE = True
 except ImportError:
     VADER_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+
+def retry_yfinance(max_retries=3, backoff=2.0):
+    """
+    CRITICAL FIX: Decorator for yfinance calls with exponential backoff retry logic.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        backoff: Backoff multiplier for exponential wait
+        
+    Returns:
+        Decorated function with retry logic
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"yfinance call failed after {max_retries} attempts: {e}")
+                        raise
+                    
+                    wait_time = backoff ** attempt
+                    logger.warning(f"yfinance call failed (attempt {attempt+1}/{max_retries}), "
+                                 f"retrying in {wait_time}s: {e}")
+                    time.sleep(wait_time)
+            
+            return None
+        return wrapper
+    return decorator
+
+
+def retry_yfinance(max_retries=3, backoff=2.0):
+    """
+    CRITICAL FIX: Decorator for yfinance calls with exponential backoff retry logic.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        backoff: Backoff multiplier for exponential wait
+        
+    Returns:
+        Decorated function with retry logic
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"yfinance call failed after {max_retries} attempts: {e}")
+                        raise
+                    
+                    wait_time = backoff ** attempt
+                    logger.warning(f"yfinance call failed (attempt {attempt+1}/{max_retries}), "
+                                 f"retrying in {wait_time}s: {e}")
+                    time.sleep(wait_time)
+            
+            return None
+        return wrapper
+    return decorator
     logging.warning("VADER not available. Install with: pip install vaderSentiment")
 
 logger = logging.getLogger(__name__)
@@ -240,9 +308,10 @@ class SentimentAnalyzer:
             logger.error(f"Error fetching Finnhub news for {symbol}: {e}")
             return []
     
+    @retry_yfinance(max_retries=3)
     def _fetch_yfinance_news(self, symbol: str) -> List[NewsArticle]:
         """
-        Fetch news from yfinance (fallback).
+        Fetch news from yfinance (fallback) with CRITICAL retry logic.
         
         Args:
             symbol: Stock symbol
@@ -358,7 +427,7 @@ class SentimentAnalyzer:
     
     def _calculate_time_decay_weight(self, age_hours: float) -> float:
         """
-        Calculate exponential time decay weight.
+        Calculate exponential time decay weight with MEDIUM-SEVERITY overflow protection.
         
         Uses half-life decay: weight = 0.5^(age / half_life)
         
@@ -369,8 +438,15 @@ class SentimentAnalyzer:
             Decay weight (0.0 to 1.0)
         """
         halflife = self.config.time_decay_halflife_hours
-        decay_weight = math.pow(0.5, age_hours / halflife)
-        return decay_weight
+        
+        # MEDIUM-SEVERITY FIX: Cap age to prevent underflow
+        max_age = halflife * 10  # After 10 half-lives, weight is negligible
+        capped_age = min(age_hours, max_age)
+        
+        decay_weight = math.pow(0.5, capped_age / halflife)
+        
+        # Ensure minimum weight
+        return max(decay_weight, 1e-6)  # Minimum 0.0001% weight
     
     def _analyze_articles(self, articles: List[NewsArticle]) -> Tuple[float, int, int, int]:
         """

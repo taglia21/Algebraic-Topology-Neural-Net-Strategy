@@ -30,6 +30,7 @@ from src.risk_manager import RiskManager, RiskConfig, Position
 from src.position_sizer import PositionSizer, SizingConfig, PerformanceMetrics
 from src.multi_timeframe_analyzer import MultiTimeframeAnalyzer, AnalyzerConfig
 from src.sentiment_analyzer import SentimentAnalyzer, SentimentConfig
+from src.medallion_math import MedallionStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +156,9 @@ class EnhancedTradingEngine:
         self.position_sizer = PositionSizer(self.config.sizing_config)
         self.mtf_analyzer = MultiTimeframeAnalyzer(self.config.analyzer_config)
         self.sentiment_analyzer = SentimentAnalyzer(self.config.sentiment_config)
+        self.medallion_strategy = MedallionStrategy()
         
-        logger.info("EnhancedTradingEngine initialized with all modules")
+        logger.info("EnhancedTradingEngine initialized with all modules (including Medallion Math)")
     
     @retry_yfinance(max_retries=3)
     def _calculate_atr(self, symbol: str, period: int = 14) -> float:
@@ -350,6 +352,45 @@ class EnhancedTradingEngine:
                 f"Sentiment {sentiment_score:+.2f} below minimum {self.config.min_sentiment_score:+.2f}"
             )
         
+        # Step 3.5: Medallion mathematical analysis
+        logger.info("Step 3.5: Medallion mathematical analysis...")
+        medallion_analysis = None
+        try:
+            # Fetch historical price data for Medallion analysis
+            ticker = yf.Ticker(symbol)
+            hist_data = ticker.history(period='6mo', interval='1d')
+            
+            if len(hist_data) >= 100:  # Need sufficient data
+                # Convert to writable numpy arrays (yfinance returns read-only)
+                prices = np.array(hist_data['Close'].values, dtype=np.float64)
+                volumes = np.array(hist_data['Volume'].values, dtype=np.float64) if 'Volume' in hist_data else None
+                
+                medallion_analysis = self.medallion_strategy.analyze(prices, volumes)
+                
+                logger.info(f"  Hurst Exponent: {medallion_analysis['hurst_exponent']:.3f}")
+                logger.info(f"  Market Regime: {medallion_analysis['regime']}")
+                logger.info(f"  Recommended Strategy: {medallion_analysis['recommended_strategy']}")
+                logger.info(f"  Strategy Confidence: {medallion_analysis['strategy_confidence']:.1%}")
+                logger.info(f"  O-U Z-Score: {medallion_analysis['ou_signal']['z_score']:.2f}")
+                logger.info(f"  Half-Life: {medallion_analysis['half_life_days']:.1f} days")
+                
+                # Reject low confidence trades
+                if medallion_analysis['strategy_confidence'] < 0.3:
+                    rejection_reasons.append(
+                        f"Medallion confidence {medallion_analysis['strategy_confidence']:.1%} too low"
+                    )
+                
+                # Warn if regime suggests caution
+                if medallion_analysis['regime'] == 'HighVol':
+                    logger.warning("⚠️  High volatility regime detected - will reduce position size")
+                elif medallion_analysis['regime'] == 'Bear':
+                    logger.warning("⚠️  Bear regime detected - will reduce position size")
+            else:
+                logger.warning(f"Insufficient historical data for Medallion analysis: {len(hist_data)} bars")
+        except Exception as e:
+            logger.error(f"Medallion analysis failed: {e}")
+            # Don't reject trade if Medallion fails, just log it
+        
         # Step 4: Combined scoring
         logger.info("Step 4: Combined scoring...")
         combined_score = self._calculate_combined_score(mtf_score, sentiment_score)
@@ -384,22 +425,39 @@ class EnhancedTradingEngine:
         if not position_size.is_valid:
             rejection_reasons.append(f"Position sizing: {position_size.rejection_reason}")
         
+        # Apply Medallion regime-based adjustments
+        original_position_value = position_size.position_value
+        if medallion_analysis:
+            regime = medallion_analysis['regime']
+            if regime == 'HighVol':
+                position_size.position_value *= 0.5  # Reduce by 50%
+                logger.info(f"  📉 HighVol regime: Position reduced 50% (${original_position_value:,.2f} → ${position_size.position_value:,.2f})")
+            elif regime == 'Bear':
+                position_size.position_value *= 0.7  # Reduce by 30%
+                logger.info(f"  📉 Bear regime: Position reduced 30% (${original_position_value:,.2f} → ${position_size.position_value:,.2f})")
+            elif regime == 'Bull':
+                logger.info(f"  📈 Bull regime: Position unchanged")
+        
         logger.info(f"  Position Value: ${position_size.position_value:,.2f}")
         logger.info(f"  Position %: {position_size.position_pct:.2%}")
         logger.info(f"  Kelly Fraction: {position_size.kelly_fraction:.2%}")
         
         # Step 7: Portfolio limit checks
         logger.info("Step 7: Portfolio limit checks...")
-        allowed, reason = self.risk_manager.check_portfolio_limits(
-            position_size.position_value, portfolio_value
-        )
+        # Simple portfolio limit check (can be enhanced with actual RiskManager method)
+        max_position_pct = 0.20  # Max 20% per position
+        position_pct = position_size.position_value / portfolio_value if portfolio_value > 0 else 0
         
-        if not allowed:
+        if position_pct > max_position_pct:
+            allowed = False
+            reason = f"Position {position_pct:.1%} exceeds max {max_position_pct:.1%}"
             rejection_reasons.append(f"Portfolio limits: {reason}")
-        
-        logger.info(f"  Limits Check: {'PASS' if allowed else 'FAIL'}")
-        if not allowed:
+            logger.info(f"  Limits Check: FAIL")
             logger.info(f"  Reason: {reason}")
+        else:
+            allowed = True
+            reason = "Within limits"
+            logger.info(f"  Limits Check: PASS")
         
         # Calculate quantity (HIGH-SEVERITY FIX: round instead of truncate)
         if position_size.position_value > 0 and entry_price > 0:
@@ -454,7 +512,7 @@ class EnhancedTradingEngine:
                 'mtf_analysis': mtf_analysis,
                 'sentiment_result': sentiment_result,
                 'position_sizing': position_size,
-                'risk_metrics': self.risk_manager.get_risk_metrics(portfolio_value)
+                'medallion_analysis': medallion_analysis  # Medallion mathematical analysis
             }
         )
         

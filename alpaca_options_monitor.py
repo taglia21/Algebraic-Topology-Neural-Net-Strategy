@@ -11,11 +11,21 @@ FEATURES:
 - Risk alerts and notifications
 - Position P&L tracking
 
-This runs continuously and protects your capital.
-NO MORE $8K LOSSES FROM TRADIER'S BROKEN PLATFORM.
+NEW: Autonomous Trading Mode
+- Fully autonomous trade execution
+- Multi-strategy signal generation
+- Kelly Criterion position sizing
+- Automated order placement
 
 Usage:
-    python alpaca_options_monitor.py
+    # Passive monitoring only (default)
+    python alpaca_options_monitor.py --mode monitor
+    
+    # Autonomous trading (generates and executes trades)
+    python alpaca_options_monitor.py --mode autonomous --portfolio 10000
+    
+    # Live trading (DANGEROUS - use with caution)
+    python alpaca_options_monitor.py --mode autonomous --portfolio 10000 --live
 
 Press Ctrl+C to stop.
 """
@@ -24,6 +34,8 @@ import os
 import sys
 import time
 import logging
+import asyncio
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +48,13 @@ from alpaca_options_engine import (
     PROFIT_TARGET_PERCENT,
     MONITOR_INTERVAL_SECONDS
 )
+
+# Import autonomous engine
+try:
+    from src.options.autonomous_engine import AutonomousTradingEngine
+    AUTONOMOUS_AVAILABLE = True
+except ImportError:
+    AUTONOMOUS_AVAILABLE = False
 
 # ============================================================================
 # LOGGING CONFIGURATION
@@ -180,14 +199,63 @@ class OptionsMonitor:
 
 def main():
     """Main entry point."""
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Alpaca Options Monitor")
+    parser.add_argument(
+        "--mode",
+        choices=["monitor", "autonomous"],
+        default="monitor",
+        help="Operating mode: monitor (passive) or autonomous (active trading)",
+    )
+    parser.add_argument(
+        "--portfolio",
+        type=float,
+        default=10000.0,
+        help="Portfolio value for autonomous mode (default: $10,000)",
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Use LIVE trading (default: paper trading)",
+    )
+    
+    args = parser.parse_args()
+    
     # Setup logging
     logger = setup_logging()
     
+    # Validate autonomous mode
+    if args.mode == "autonomous":
+        if not AUTONOMOUS_AVAILABLE:
+            logger.error("Autonomous engine not available - missing dependencies")
+            logger.error("Make sure src/options/autonomous_engine.py exists")
+            sys.exit(1)
+        
+        if args.live:
+            logger.warning("⚠️  LIVE TRADING MODE ENABLED ⚠️")
+            logger.warning("This will use REAL MONEY!")
+            response = input("Type 'YES' to confirm live trading: ")
+            if response != "YES":
+                logger.info("Live trading cancelled")
+                sys.exit(0)
+    
+    # Run appropriate mode
+    if args.mode == "monitor":
+        run_monitor_mode(logger, paper=not args.live)
+    else:
+        run_autonomous_mode(logger, args.portfolio, paper=not args.live)
+
+
+def run_monitor_mode(logger, paper: bool = True):
+    """Run in passive monitoring mode."""
+    logger.info("="*70)
+    logger.info("📊 PASSIVE MONITORING MODE")
+    logger.info("="*70)
     logger.info("Initializing Alpaca Options Monitor...")
     
     # Initialize engine
     try:
-        engine = AlpacaOptionsEngine(paper=True)
+        engine = AlpacaOptionsEngine(paper=paper)
     except Exception as e:
         logger.error(f"Failed to initialize Alpaca engine: {e}")
         logger.error("Make sure ALPACA_API_KEY and ALPACA_SECRET_KEY are set in .env")
@@ -218,6 +286,37 @@ def main():
     
     # Start monitoring loop
     monitor.start()
+
+
+def run_autonomous_mode(logger, portfolio_value: float, paper: bool = True):
+    """Run in autonomous trading mode."""
+    logger.info("="*70)
+    logger.info("🤖 AUTONOMOUS TRADING MODE")
+    logger.info("="*70)
+    logger.info(f"Portfolio Value: ${portfolio_value:,.0f}")
+    logger.info(f"Trading Mode: {'PAPER' if paper else 'LIVE'}")
+    logger.info("="*70)
+    
+    # Initialize autonomous engine
+    try:
+        engine = AutonomousTradingEngine(
+            portfolio_value=portfolio_value,
+            paper=paper,
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize autonomous engine: {e}")
+        sys.exit(1)
+    
+    logger.info("\n" + "="*70)
+    logger.info("✅ AUTONOMOUS ENGINE READY")
+    logger.info("="*70)
+    logger.info("Press Ctrl+C to stop trading\n")
+    
+    # Start autonomous trading loop
+    try:
+        asyncio.run(engine.run())
+    except KeyboardInterrupt:
+        logger.info("\nShutdown signal received")
 
 
 if __name__ == "__main__":

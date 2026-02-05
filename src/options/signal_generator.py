@@ -19,7 +19,7 @@ from enum import Enum
 from typing import Dict, List, Optional
 import logging
 
-from .config import get_config
+from .config import RISK_CONFIG
 from .universe import get_universe, is_strategy_allowed, STRATEGY_DEFINITIONS
 from .iv_analyzer import IVAnalyzer
 from .theta_decay_engine import ThetaDecayEngine
@@ -90,7 +90,7 @@ class IVRankStrategy:
     """
     
     def __init__(self):
-        self.config = get_config()
+        self.config = RISK_CONFIG
         self.logger = logging.getLogger(__name__)
         self.iv_analyzer = IVAnalyzer()
         
@@ -185,7 +185,7 @@ class ThetaDecayStrategy:
     """
     
     def __init__(self):
-        self.config = get_config()
+        self.config = RISK_CONFIG
         self.logger = logging.getLogger(__name__)
         self.theta_engine = ThetaDecayEngine()
         
@@ -259,7 +259,7 @@ class MeanReversionStrategy:
     """
     
     def __init__(self):
-        self.config = get_config()
+        self.config = RISK_CONFIG
         self.logger = logging.getLogger(__name__)
         
     async def generate_signals(self, symbols: List[str]) -> List[Signal]:
@@ -341,7 +341,7 @@ class DeltaHedgingStrategy:
     """
     
     def __init__(self):
-        self.config = get_config()
+        self.config = RISK_CONFIG
         self.logger = logging.getLogger(__name__)
         
     async def generate_signals(self, portfolio_delta: float) -> List[Signal]:
@@ -400,7 +400,7 @@ class SignalGenerator:
     """
     
     def __init__(self):
-        self.config = get_config()
+        self.config = RISK_CONFIG
         self.logger = logging.getLogger(__name__)
         
         # Initialize strategies

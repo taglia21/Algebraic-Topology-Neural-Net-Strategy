@@ -13,10 +13,20 @@ Key features:
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from dataclasses import dataclass
 
-from .config import get_config
+from .config import RISK_CONFIG, VOLATILITY_REGIMES
+
+
+def _get_position_sizer_config() -> Dict[str, Any]:
+    config: Dict[str, Any] = dict(RISK_CONFIG)
+    config.setdefault("volatility_regimes", VOLATILITY_REGIMES)
+    config.setdefault(
+        "max_contracts_per_symbol",
+        config.get("max_contracts_per_trade", 5),
+    )
+    return config
 
 
 @dataclass
@@ -49,7 +59,7 @@ class KellyCriterionSizer:
     """
     
     def __init__(self):
-        self.config = get_config()
+        self.config = _get_position_sizer_config()
         self.logger = logging.getLogger(__name__)
         
     def calculate_kelly_fraction(
@@ -103,7 +113,7 @@ class VolatilityAdjuster:
     """
     
     def __init__(self):
-        self.config = get_config()
+        self.config = _get_position_sizer_config()
         
     def get_volatility_multiplier(self, iv_rank: Optional[float]) -> float:
         """
@@ -144,7 +154,7 @@ class MedallionPositionSizer:
     """
     
     def __init__(self):
-        self.config = get_config()
+        self.config = _get_position_sizer_config()
         self.logger = logging.getLogger(__name__)
         self.kelly_sizer = KellyCriterionSizer()
         self.vol_adjuster = VolatilityAdjuster()

@@ -28,7 +28,7 @@ from typing import Dict, List, Optional
 import json
 import os
 
-from .config import get_config
+from .config import RISK_CONFIG, MONITORING_CONFIG
 from .universe import get_universe
 from .signal_generator import SignalGenerator, Signal, SignalType
 from .position_sizer import MedallionPositionSizer, PositionSize, calculate_max_loss_per_contract
@@ -54,7 +54,6 @@ def market_is_open() -> bool:
     Returns:
         True if open, False otherwise
     """
-    config = get_config()
     now = datetime.now().time()
     
     # Check if within trading hours (9:30 AM - 4:00 PM ET)
@@ -74,7 +73,6 @@ def safe_entry_window() -> bool:
     Returns:
         True if safe to enter, False otherwise
     """
-    config = get_config()
     now = datetime.now().time()
     
     safe_open = time(9, 45)  # 15 min after open
@@ -108,7 +106,9 @@ class AutonomousTradingEngine:
             paper: Use paper trading (default True)
             state_file: File to persist state
         """
-        self.config = get_config()
+        # get_config() in options/config.py requires a key and returns a single value.
+        # The engine expects a dict-like config, so we merge the relevant config dicts.
+        self.config = {**RISK_CONFIG, **MONITORING_CONFIG}
         self.logger = logging.getLogger(__name__)
         
         # Portfolio state

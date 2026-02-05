@@ -12,13 +12,20 @@ Executes options trades via Alpaca API with:
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 import os
+import time
 
-from .config import get_config
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide as AlpacaOrderSide, TimeInForce, OrderClass, AssetClass
+from alpaca.data.historical.option import OptionHistoricalDataClient
+from alpaca.data.requests import OptionLatestQuoteRequest
+
+from .config import RISK_CONFIG
 
 
 # ============================================================================
@@ -93,7 +100,7 @@ class AlpacaOptionsExecutor:
             api_secret: Alpaca API secret (or from env)
             paper: Use paper trading endpoint
         """
-        self.config = get_config()
+        self.config = RISK_CONFIG
         self.logger = logging.getLogger(__name__)
         
         # Get credentials
@@ -103,7 +110,19 @@ class AlpacaOptionsExecutor:
         if not self.api_key or not self.api_secret:
             raise ValueError("Alpaca API credentials not provided")
         
-        # Set endpoint
+        # Initialize Alpaca clients
+        self.paper = paper
+        self.trading_client = TradingClient(
+            api_key=self.api_key,
+            secret_key=self.api_secret,
+            paper=paper
+        )
+        self.data_client = OptionHistoricalDataClient(
+            api_key=self.api_key,
+            secret_key=self.api_secret
+        )
+        
+        # Set endpoint for logging
         if paper:
             self.base_url = "https://paper-api.alpaca.markets"
         else:
@@ -407,40 +426,242 @@ class AlpacaOptionsExecutor:
             legs=legs,
         )
     
-    async def _submit_order_to_alpaca(self, order_data: Dict) -> ExecutionResult:
+    async def _get_option_quote(self, symbol: str) -> Optional[Dict]:
         """
-        Submit order to Alpaca API.
-        
-        This is a mock implementation. In production, this would:
-        1. Make HTTP POST to /v2/orders
-        2. Poll order status until filled
-        3. Return actual execution details
+        Get latest option quote with bid/ask.
         
         Args:
-            order_data: Order payload
+            symbol: Option symbol in OCC format
             
         Returns:
-            ExecutionResult
+            Dict with bid_price, ask_price, bid_size, ask_size or None
         """
-        # TODO: Replace with actual Alpaca API call
-        # For now, simulate successful execution
+        try:
+            request = OptionLatestQuoteRequest(symbol_or_symbols=symbol)
+            quotes = self.data_client.get_option_latest_quote(request)
+            
+            if symbol in quotes:
+                quote = quotes[symbol]
+                return {
+                    "bid_price": float(quote.bid_price) if quote.bid_price else 0.0,
+                    "ask_price": float(quote.ask_price) if quote.ask_price else 0.0,
+                    "bid_size": int(quote.bid_size) if quote.bid_size else 0,
+                    "ask_size": int(quote.ask_size) if quote.ask_size else 0,
+                }
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to get quote for {symbol}: {e}")
+            return None
+    
+    async def _validate_pre_trade_checks(self, symbol: str, quantity: int, side: str) -> Tuple[bool, str, Optional[float]]:
+        """
+        Perform pre-trade validation checks.
         
-        import random
+        Checks:
+        1. Bid-ask spread < 15% of mid price
+        2. Minimum quote size >= 10 contracts
+        3. Sufficient buying power
         
-        await asyncio.sleep(0.5)  # Simulate network delay
+        Args:
+            symbol: Option symbol
+            quantity: Number of contracts
+            side: 'buy' or 'sell'
+            
+        Returns:
+            (passed, error_message, suggested_limit_price)
+        """
+        # Get quote
+        quote = await self._get_option_quote(symbol)
+        if not quote:
+            return False, "No quote available", None
         
-        # Simulate 95% success rate
-        if random.random() < 0.95:
-            return ExecutionResult(
-                success=True,
-                order_id=f"ORDER_{datetime.now().timestamp()}",
-                status=OrderStatus.FILLED,
-                filled_quantity=order_data.get("qty", 1),
-                average_fill_price=order_data.get("limit_price", 1.0),
-                timestamp=datetime.now(),
-                error_message="",
-            )
+        bid = quote["bid_price"]
+        ask = quote["ask_price"]
+        bid_size = quote["bid_size"]
+        ask_size = quote["ask_size"]
+        
+        # Check for valid quotes
+        if bid <= 0 or ask <= 0:
+            return False, "Invalid bid/ask prices", None
+        
+        # Calculate mid and spread
+        mid = (bid + ask) / 2
+        spread = ask - bid
+        spread_pct = (spread / mid) * 100 if mid > 0 else 100
+        
+        # Check 1: Spread < 15%
+        if spread_pct > 15:
+            return False, f"Bid-ask spread too wide: {spread_pct:.1f}%", None
+        
+        # Check 2: Minimum liquidity
+        min_size = bid_size if side == "sell" else ask_size
+        if min_size < 10:
+            return False, f"Insufficient liquidity: {min_size} contracts", None
+        
+        # Check 3: Buying power (for buys)
+        if side == "buy":
+            try:
+                account = self.trading_client.get_account()
+                buying_power = float(account.buying_power)
+                estimated_cost = ask * quantity * 100  # 100 shares per contract
+                
+                if buying_power < estimated_cost:
+                    return False, f"Insufficient buying power: ${buying_power:.2f} < ${estimated_cost:.2f}", None
+            except Exception as e:
+                self.logger.warning(f"Could not check buying power: {e}")
+        
+        # Calculate suggested limit price (mid + 0.5% slippage buffer)
+        if side == "buy":
+            suggested_price = mid * 1.005  # Slightly above mid
         else:
+            suggested_price = mid * 0.995  # Slightly below mid
+        
+        return True, "", suggested_price
+    
+    async def _poll_order_status(self, order_id: str, timeout: float = 30.0) -> Tuple[str, int, float]:
+        """
+        Poll order status until filled or timeout.
+        
+        Args:
+            order_id: Alpaca order ID
+            timeout: Max seconds to wait
+            
+        Returns:
+            (status, filled_qty, avg_fill_price)
+        """
+        start_time = time.time()
+        poll_interval = 0.5  # Start with 500ms
+        
+        while time.time() - start_time < timeout:
+            try:
+                order = self.trading_client.get_order_by_id(order_id)
+                
+                status = order.status.value
+                filled_qty = int(order.filled_qty) if order.filled_qty else 0
+                avg_price = float(order.filled_avg_price) if order.filled_avg_price else 0.0
+                
+                # Terminal states
+                if status in ["filled", "cancelled", "rejected", "expired"]:
+                    return status, filled_qty, avg_price
+                
+                # Still pending
+                await asyncio.sleep(poll_interval)
+                poll_interval = min(poll_interval * 1.5, 2.0)  # Exponential backoff, max 2s
+                
+            except Exception as e:
+                self.logger.error(f"Error polling order {order_id}: {e}")
+                await asyncio.sleep(1.0)
+        
+        # Timeout
+        return "timeout", 0, 0.0
+    
+    async def _submit_order_to_alpaca(self, order_data: Dict) -> ExecutionResult:
+        """
+        Submit order to Alpaca API with real execution.
+        
+        Process:
+        1. Get option quote for bid/ask
+        2. Validate pre-trade checks
+        3. Calculate limit price at mid + 0.5% slippage buffer
+        4. Submit LimitOrderRequest
+        5. Poll order status until filled or timeout (30s)
+        6. Return actual fill price and quantity
+        
+        Args:
+            order_data: Order payload with symbol, qty, side, type, limit_price, etc.
+            
+        Returns:
+            ExecutionResult with actual execution details
+        """
+        symbol = order_data["symbol"]
+        quantity = order_data["qty"]
+        side = order_data["side"]
+        order_type = order_data.get("type", "limit")
+        limit_price = order_data.get("limit_price")
+        
+        try:
+            # Pre-trade validation
+            passed, error_msg, suggested_price = await self._validate_pre_trade_checks(
+                symbol, quantity, side
+            )
+            
+            if not passed:
+                self.logger.error(f"Pre-trade check failed: {error_msg}")
+                return ExecutionResult(
+                    success=False,
+                    order_id=None,
+                    status=OrderStatus.REJECTED,
+                    filled_quantity=0,
+                    average_fill_price=0.0,
+                    timestamp=datetime.now(),
+                    error_message=f"Pre-trade validation failed: {error_msg}",
+                )
+            
+            # Use suggested price if no limit specified
+            if not limit_price:
+                limit_price = suggested_price
+            
+            # Map order side
+            alpaca_side = AlpacaOrderSide.BUY if side == "buy" else AlpacaOrderSide.SELL
+            
+            # Build order request
+            if order_type == "market":
+                order_request = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=quantity,
+                    side=alpaca_side,
+                    time_in_force=TimeInForce.DAY,
+                )
+            else:
+                # Limit order
+                order_request = LimitOrderRequest(
+                    symbol=symbol,
+                    qty=quantity,
+                    side=alpaca_side,
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=limit_price,
+                )
+            
+            # Submit order
+            self.logger.info(f"Submitting REAL order: {side.upper()} {quantity} {symbol} @ ${limit_price:.2f}")
+            order = self.trading_client.submit_order(order_request)
+            order_id = order.id
+            
+            self.logger.info(f"Order submitted: {order_id}")
+            
+            # Poll for fill
+            status, filled_qty, avg_price = await self._poll_order_status(order_id, timeout=30.0)
+            
+            # Map status
+            if status == "filled":
+                order_status = OrderStatus.FILLED
+                success = True
+                error_msg = ""
+            elif status in ["partially_filled", "partial_fill"]:
+                order_status = OrderStatus.PARTIAL
+                success = True
+                error_msg = f"Partially filled: {filled_qty}/{quantity}"
+            elif status == "timeout":
+                order_status = OrderStatus.PENDING
+                success = False
+                error_msg = "Order timeout - check dashboard"
+            else:
+                order_status = OrderStatus.REJECTED
+                success = False
+                error_msg = f"Order {status}"
+            
+            return ExecutionResult(
+                success=success,
+                order_id=order_id,
+                status=order_status,
+                filled_quantity=filled_qty,
+                average_fill_price=avg_price,
+                timestamp=datetime.now(),
+                error_message=error_msg,
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Order submission failed: {e}")
             return ExecutionResult(
                 success=False,
                 order_id=None,
@@ -448,5 +669,5 @@ class AlpacaOptionsExecutor:
                 filled_quantity=0,
                 average_fill_price=0.0,
                 timestamp=datetime.now(),
-                error_message="Simulated rejection",
+                error_message=str(e),
             )

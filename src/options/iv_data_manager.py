@@ -81,7 +81,7 @@ class IVDataManager:
         if api_key and api_secret:
             self.data_client = OptionHistoricalDataClient(
                 api_key=api_key,
-                api_secret=api_secret
+                secret_key=api_secret
             )
         else:
             self.data_client = None

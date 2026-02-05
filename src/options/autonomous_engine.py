@@ -441,7 +441,16 @@ class AutonomousTradingEngine:
     
     def _has_position(self, symbol: str) -> bool:
         """Check if we have a position in symbol."""
-        return any(pos["signal"].symbol == symbol for pos in self.current_positions)
+        for pos in self.current_positions:
+            if pos == symbol:
+                return True
+            if isinstance(pos, dict):
+                if pos.get("symbol") == symbol:
+                    return True
+                signal = pos.get("signal")
+                if getattr(signal, "symbol", None) == symbol:
+                    return True
+        return False
     
     def _log_cycle_summary(self):
         """Log summary of current cycle."""

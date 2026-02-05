@@ -28,6 +28,7 @@ from datetime import datetime, time
 from typing import Dict, List, Optional
 import json
 import os
+from zoneinfo import ZoneInfo
 
 from .config import RISK_CONFIG, MONITORING_CONFIG
 from .universe import get_universe
@@ -55,14 +56,15 @@ def market_is_open() -> bool:
     Returns:
         True if open, False otherwise
     """
-    now = datetime.now().time()
+    now_et_dt = datetime.now(ZoneInfo("America/New_York"))
+    now = now_et_dt.time()
     
     # Check if within trading hours (9:30 AM - 4:00 PM ET)
     market_open = time(9, 30)
     market_close = time(16, 0)
     
     # TODO: Also check for holidays and weekends
-    is_weekday = datetime.now().weekday() < 5  # Monday=0, Friday=4
+    is_weekday = now_et_dt.weekday() < 5  # Monday=0, Friday=4
     
     return is_weekday and market_open <= now <= market_close
 
@@ -74,7 +76,7 @@ def safe_entry_window() -> bool:
     Returns:
         True if safe to enter, False otherwise
     """
-    now = datetime.now().time()
+    now = datetime.now(ZoneInfo("America/New_York")).time()
     
     safe_open = time(9, 45)  # 15 min after open
     safe_close = time(15, 45)  # 15 min before close

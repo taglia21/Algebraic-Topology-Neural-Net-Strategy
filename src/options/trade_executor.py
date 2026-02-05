@@ -105,7 +105,7 @@ class AlpacaOptionsExecutor:
         
         # Get credentials
         self.api_key = api_key or os.getenv("ALPACA_API_KEY")
-        self.api_secret = api_secret or os.getenv("ALPACA_API_SECRET")
+        self.api_secret = api_secret or os.getenv("ALPACA_SECRET_KEY")
         
         if not self.api_key or not self.api_secret:
             raise ValueError("Alpaca API credentials not provided")

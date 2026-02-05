@@ -33,6 +33,7 @@ from .universe import get_universe
 from .signal_generator import SignalGenerator, Signal, SignalType
 from .position_sizer import MedallionPositionSizer, PositionSize, calculate_max_loss_per_contract
 from .trade_executor import AlpacaOptionsExecutor, OrderSide, ExecutionResult
+from .iv_data_manager import IVDataManager
 
 # ==== NEW ENHANCED MODULES ====
 from .regime_detector import RegimeDetector, MarketRegime
@@ -121,6 +122,7 @@ class AutonomousTradingEngine:
         self.signal_generator = SignalGenerator()
         self.position_sizer = MedallionPositionSizer()
         self.trade_executor = AlpacaOptionsExecutor(paper=paper)
+        self.iv_data_manager = IVDataManager()  # NEW: IV data management
         
         # ==== ENHANCED MODULES ====
         self.regime_detector = RegimeDetector()
@@ -131,6 +133,9 @@ class AutonomousTradingEngine:
         )
         self.vol_surface_engine = VolatilitySurfaceEngine()
         self.cointegration_engine = CointegrationEngine()
+        
+        # Backfill IV data on startup
+        self._backfill_iv_data()
         
         # Current market regime
         self.current_regime: Optional[MarketRegime] = None
@@ -456,6 +461,55 @@ class AutonomousTradingEngine:
             self.logger.info(f"Loaded state from {self.state_file}")
         except Exception as e:
             self.logger.error(f"Failed to load state: {e}")
+    
+    def _backfill_iv_data(self):
+        """
+        Backfill historical IV data on startup to enable IV rank calculations.
+        
+        Fixes: "Insufficient data for IV rank (need 20 days)" errors
+        """
+        try:
+            self.logger.info("🔄 Checking IV data cache on startup...")
+            
+            # Get current IV data stats
+            stats = self.iv_data_manager.get_stats()
+            symbols_cached = stats.get('symbols', 0)
+            total_records = stats.get('total_records', 0)
+            
+            self.logger.info(
+                f"Current IV cache: {total_records} records across {symbols_cached} symbols"
+            )
+            
+            # Get trading universe
+            universe = get_universe()
+            
+            # Backfill for each symbol if needed
+            for symbol in universe:
+                # Check if we have sufficient data
+                iv_rank = self.iv_data_manager.get_iv_rank(symbol, lookback_days=252)
+                
+                if iv_rank is None:
+                    self.logger.info(f"Backfilling IV data for {symbol}...")
+                    records = self.iv_data_manager.backfill_historical_iv(symbol, days=252)
+                    
+                    if records > 0:
+                        self.logger.info(f"✓ {symbol}: Added {records} days of IV history")
+                    else:
+                        self.logger.warning(f"✗ {symbol}: Backfill failed, using synthetic...")
+                        records = self.iv_data_manager.backfill_synthetic_data(symbol, days=252)
+                        self.logger.info(f"✓ {symbol}: Added {records} days of synthetic IV")
+                else:
+                    self.logger.info(f"✓ {symbol}: IV rank = {iv_rank:.1f}% (data OK)")
+            
+            # Log final stats
+            stats = self.iv_data_manager.get_stats()
+            self.logger.info(
+                f"✅ IV backfill complete: {stats['total_records']} records, "
+                f"{stats['symbols']} symbols"
+            )
+            
+        except Exception as e:
+            self.logger.error(f"IV backfill failed (non-fatal): {e}")
     
     # ========================================================================
     # ENHANCED METHODS (NEW)

@@ -565,17 +565,29 @@ class CorrelationManager:
             start_date = end_date - timedelta(days=self.lookback_days + 10)
             
             for symbol in symbols:
-                if symbol not in self._price_cache:
-                    ticker = yf.Ticker(symbol)
+                # Extract symbol string if it's an object
+                symbol_str = str(symbol).upper() if not isinstance(symbol, str) else symbol.upper()
+                
+                # Skip if already cached
+                if symbol_str in self._price_cache:
+                    continue
+                
+                try:
+                    ticker = yf.Ticker(symbol_str)
                     data = ticker.history(start=start_date, end=end_date)
                     if len(data) > 0:
-                        self._price_cache[symbol] = data['Close']
+                        self._price_cache[symbol_str] = data['Close']
+                        self.logger.debug(f"Cached prices for {symbol_str}")
+                except Exception as sym_error:
+                    self.logger.warning(f"Could not fetch {symbol_str}: {sym_error}")
+                    continue
             
             self._last_cache_update = datetime.now()
             self.logger.debug(f"Updated price cache for {len(symbols)} symbols")
         
         except Exception as e:
-            self.logger.error(f"Failed to update price cache: {e}")
+            # Non-fatal: price cache is optional
+            self.logger.warning(f"Price cache update failed (non-fatal): {e}")
     
     def _get_severity(self, value: float, threshold: float) -> AlertSeverity:
         """

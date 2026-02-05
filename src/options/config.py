@@ -24,7 +24,7 @@ RISK_CONFIG: Dict[str, Any] = {
     # Position-level risk limits
     "max_risk_per_trade_pct": 0.02,  # 2% max risk per trade
     "max_contracts_per_trade": 5,  # Maximum contracts per order
-    "max_positions": 10,  # Maximum concurrent positions
+    "max_positions": 15,  # Maximum concurrent positions
     
     # Time-based parameters
     "min_dte": 7,  # Minimum days to expiration

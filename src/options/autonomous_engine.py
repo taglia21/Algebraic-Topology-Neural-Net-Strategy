@@ -596,21 +596,46 @@ class AutonomousTradingEngine:
             # Convert positions to CorrelationManager format
             corr_positions = []
             for pos in self.current_positions:
-                signal = pos.get("signal")
-                if signal:
-                    corr_positions.append(CorrPosition(
-                        symbol=signal.symbol,
-                        quantity=1,
-                        entry_price=1.0,
-                        current_price=1.0,
-                        strategy_type=signal.strategy,
-                        delta=signal.delta or 0.0,
-                        gamma=0.0,
-                        theta=0.0,
-                        vega=0.0,
-                        notional_value=1000.0,  # Simplified
-                        sector="Technology",  # Would need to fetch actual sector
-                    ))
+                signal_obj = None
+                if isinstance(pos, dict):
+                    signal_obj = pos.get("signal")
+                elif isinstance(pos, str):
+                    signal_obj = pos
+
+                if not signal_obj:
+                    continue
+
+                symbol = None
+                strategy_type = "unknown"
+                delta = 0.0
+
+                if isinstance(signal_obj, Signal):
+                    symbol = signal_obj.symbol
+                    strategy_type = signal_obj.strategy
+                    delta = signal_obj.delta or 0.0
+                elif isinstance(signal_obj, dict):
+                    symbol = signal_obj.get("symbol")
+                    strategy_type = signal_obj.get("strategy", strategy_type)
+                    delta = float(signal_obj.get("delta", 0.0) or 0.0)
+                elif isinstance(signal_obj, str):
+                    symbol = signal_obj
+
+                if not symbol:
+                    continue
+
+                corr_positions.append(CorrPosition(
+                    symbol=str(symbol),
+                    quantity=1,
+                    entry_price=1.0,
+                    current_price=1.0,
+                    strategy_type=str(strategy_type),
+                    delta=delta,
+                    gamma=0.0,
+                    theta=0.0,
+                    vega=0.0,
+                    notional_value=1000.0,  # Simplified
+                    sector="Unknown",
+                ))
             
             if len(corr_positions) == 0:
                 return True

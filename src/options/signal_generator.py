@@ -23,6 +23,8 @@ from .config import RISK_CONFIG
 from .universe import get_universe, is_strategy_allowed, STRATEGY_DEFINITIONS
 from .iv_analyzer import IVAnalyzer
 from .theta_decay_engine import ThetaDecayEngine
+from .iv_data_manager import IVDataManager
+from .theta_decay_engine import IVRegime, TrendDirection
 
 
 # ============================================================================
@@ -93,6 +95,7 @@ class IVRankStrategy:
         self.config = RISK_CONFIG
         self.logger = logging.getLogger(__name__)
         self.iv_analyzer = IVAnalyzer()
+        self.iv_data_manager = IVDataManager()
         
     async def generate_signals(self, symbols: List[str]) -> List[Signal]:
         """
@@ -119,13 +122,13 @@ class IVRankStrategy:
     
     async def _analyze_symbol(self, symbol: str) -> Optional[Signal]:
         """Analyze single symbol for IV Rank signal."""
-        # Get IV metrics
-        iv_data = await self.iv_analyzer.get_iv_rank(symbol)
-        if not iv_data:
+        # Prefer the IV cache (IVDataManager) for a stable, production-safe IV rank.
+        # If unavailable, default to neutral (50) and simply avoid IV-rank signals.
+        iv_rank = self.iv_data_manager.get_iv_rank(symbol)
+        if iv_rank is None:
             return None
-        
-        iv_rank = iv_data.get("iv_rank", 0)
-        current_price = iv_data.get("current_price", 0)
+
+        current_price = None
         
         # HIGH IV: SELL premium
         if iv_rank >= self.config["iv_rank_sell_threshold"]:
@@ -188,6 +191,7 @@ class ThetaDecayStrategy:
         self.config = RISK_CONFIG
         self.logger = logging.getLogger(__name__)
         self.theta_engine = ThetaDecayEngine()
+        self.iv_data_manager = IVDataManager()
         
     async def generate_signals(self, symbols: List[str]) -> List[Signal]:
         """Generate theta decay signals."""
@@ -206,19 +210,37 @@ class ThetaDecayStrategy:
     
     async def _analyze_symbol(self, symbol: str) -> Optional[Signal]:
         """Analyze symbol for theta decay opportunity."""
-        # Get theta metrics for optimal DTE range
-        theta_data = await self.theta_engine.get_optimal_dte(
-            symbol,
-            min_dte=self.config["optimal_dte_min"],
-            max_dte=self.config["optimal_dte_max"],
+        iv_rank = self.iv_data_manager.get_iv_rank(symbol)
+        if iv_rank is None:
+            iv_rank = 50.0
+
+        if iv_rank > 90:
+            regime = IVRegime.EXTREME
+        elif iv_rank > 70:
+            regime = IVRegime.HIGH
+        elif iv_rank < 30:
+            regime = IVRegime.LOW
+        else:
+            regime = IVRegime.NORMAL
+
+        rec = self.theta_engine.calculate_optimal_dte(
+            iv_rank=iv_rank,
+            trend=TrendDirection.NEUTRAL,
+            volatility_regime=regime,
+            strategy_type="spreads",
         )
-        
-        if not theta_data:
-            return None
-        
-        dte = theta_data.get("optimal_dte", 35)
-        theta_per_day = theta_data.get("theta_per_day", 0)
-        pop = theta_data.get("probability_of_profit", 0)
+
+        # Pick an entry DTE within our configured bounds.
+        dte = int((rec.entry_dte_min + rec.entry_dte_max) / 2)
+        dte = max(self.config["optimal_dte_min"], min(dte, self.config["optimal_dte_max"]))
+
+        # Heuristic probability-of-profit so downstream sizing can function.
+        # This is intentionally conservative and purely rule-based.
+        pop = 0.55
+        if iv_rank > 70:
+            pop = 0.60
+        if iv_rank < 30:
+            pop = 0.48
         
         # Only signal if PoP meets minimum
         if pop < self.config["min_probability_of_profit"]:
@@ -239,7 +261,7 @@ class ThetaDecayStrategy:
             timestamp=datetime.now(),
             dte=dte,
             probability_of_profit=pop,
-            current_price=theta_data.get("current_price"),
+            current_price=None,
             reason=f"Optimal theta decay at {dte} DTE (PoP: {pop:.1%})",
         )
 

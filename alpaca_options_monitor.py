@@ -42,7 +42,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from alpaca_options_engine import (
+from src.alpaca_options_engine import (
     AlpacaOptionsEngine,
     STOP_LOSS_PERCENT,
     PROFIT_TARGET_PERCENT,

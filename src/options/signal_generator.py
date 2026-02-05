@@ -21,8 +21,8 @@ import logging
 
 from .config import get_config
 from .universe import get_universe, is_strategy_allowed, STRATEGY_DEFINITIONS
-from .utils.iv_analyzer import IVAnalyzer
-from .utils.theta_decay_engine import ThetaDecayEngine
+from .iv_analyzer import IVAnalyzer
+from .theta_decay_engine import ThetaDecayEngine
 
 
 # ============================================================================

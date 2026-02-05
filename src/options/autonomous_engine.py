@@ -22,6 +22,7 @@ Features:
 """
 
 import asyncio
+import argparse
 import logging
 from datetime import datetime, time
 from typing import Dict, List, Optional
@@ -117,6 +118,7 @@ class AutonomousTradingEngine:
         self.portfolio_delta = 0.0
         self.paper = paper
         self.state_file = state_file
+        self._stop_event = asyncio.Event()
         
         # Initialize components
         self.signal_generator = SignalGenerator()
@@ -157,38 +159,57 @@ class AutonomousTradingEngine:
         
         self.logger.info(f"Initialized autonomous engine (paper={paper}, portfolio=${portfolio_value:,.0f})")
         self.logger.info("✓ Enhanced modules loaded: RegimeDetector, CorrelationManager, WeightOptimizer, VolSurface, Cointegration")
+
+    def request_shutdown(self) -> None:
+        """Request graceful shutdown of the engine."""
+        self._stop_event.set()
+
+    async def _sleep_or_stop(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            return
+
+    async def run_forever(self) -> None:
+        """Run continuously until a shutdown is requested."""
+        self.logger.info("🚀 AUTONOMOUS TRADING ENGINE STARTED")
+
+        try:
+            while not self._stop_event.is_set():
+                # Check if market is open
+                if not market_is_open():
+                    self.logger.info("Market closed, waiting...")
+                    await self._sleep_or_stop(60)
+                    continue
+
+                # Run trading cycle
+                await self._trading_cycle()
+
+                # Save state
+                self._save_state()
+
+                # Sleep between cycles
+                cycle_sleep = self.config["signal_scan_interval_seconds"]
+                self.logger.info(f"Cycle complete, sleeping {cycle_sleep}s")
+                await self._sleep_or_stop(cycle_sleep)
+
+        except asyncio.CancelledError:
+            self.logger.info("Shutdown task cancelled")
+            raise
+        except KeyboardInterrupt:
+            self.logger.info("Shutdown signal received")
+        except Exception as e:
+            self.logger.error(f"Fatal error in main loop: {e}", exc_info=True)
+        finally:
+            await self._shutdown()
     
     async def run(self):
         """
         Main trading loop - runs continuously during market hours.
         """
-        self.logger.info("🚀 AUTONOMOUS TRADING ENGINE STARTED")
-        
-        try:
-            while True:
-                # Check if market is open
-                if not market_is_open():
-                    self.logger.info("Market closed, waiting...")
-                    await asyncio.sleep(60)
-                    continue
-                
-                # Run trading cycle
-                await self._trading_cycle()
-                
-                # Save state
-                self._save_state()
-                
-                # Sleep between cycles
-                cycle_sleep = self.config["signal_scan_interval_seconds"]
-                self.logger.info(f"Cycle complete, sleeping {cycle_sleep}s")
-                await asyncio.sleep(cycle_sleep)
-        
-        except KeyboardInterrupt:
-            self.logger.info("Shutdown signal received")
-            await self._shutdown()
-        except Exception as e:
-            self.logger.error(f"Fatal error in main loop: {e}", exc_info=True)
-            await self._shutdown()
+        await self.run_forever()
     
     async def _trading_cycle(self):
         """
@@ -707,3 +728,47 @@ class AutonomousTradingEngine:
             self.logger.info(f"{key}: {value}")
         
         self.logger.info("Shutdown complete")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Autonomous options trading engine")
+    parser.add_argument(
+        "--portfolio-value",
+        type=float,
+        default=100000,
+        help="Starting portfolio value in dollars (default: 100000)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    async def _runner() -> None:
+        engine = AutonomousTradingEngine(portfolio_value=args.portfolio_value)
+
+        loop = asyncio.get_running_loop()
+        try:
+            import signal
+
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, engine.request_shutdown)
+                except NotImplementedError:
+                    signal.signal(sig, lambda *_: engine.request_shutdown())
+        except Exception:
+            # If signal wiring fails for any reason, the engine can still be stopped with Ctrl+C.
+            pass
+
+        await engine.run_forever()
+
+    try:
+        asyncio.run(_runner())
+    except ValueError as e:
+        logging.getLogger(__name__).error(str(e))
+        raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()

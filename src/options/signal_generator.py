@@ -14,7 +14,7 @@ using configured weights.
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Dict, List, Optional
 import logging
@@ -72,6 +72,10 @@ class Signal:
     probability_of_profit: Optional[float] = None
     expected_premium: Optional[float] = None
     max_loss: Optional[float] = None
+    
+    # Resolved contract fields (populated by OptionContractResolver after signal generation)
+    occ_symbol: Optional[str] = None
+    expiration_date: Optional[date] = None
     
     # Metadata
     reason: str = ""

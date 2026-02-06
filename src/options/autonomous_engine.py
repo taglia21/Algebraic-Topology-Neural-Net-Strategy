@@ -36,6 +36,7 @@ from .signal_generator import SignalGenerator, Signal, SignalType
 from .position_sizer import MedallionPositionSizer, PositionSize, calculate_max_loss_per_contract
 from .trade_executor import AlpacaOptionsExecutor, OrderSide, ExecutionResult
 from .iv_data_manager import IVDataManager
+from .contract_resolver import OptionContractResolver, ResolvedContract, ResolvedSpread, ResolvedIronCondor
 
 # ==== NEW ENHANCED MODULES ====
 from .regime_detector import RegimeDetector, MarketRegime
@@ -127,6 +128,12 @@ class AutonomousTradingEngine:
         self.position_sizer = MedallionPositionSizer()
         self.trade_executor = AlpacaOptionsExecutor(paper=paper)
         self.iv_data_manager = IVDataManager()  # NEW: IV data management
+        
+        # Contract resolver — bridges signals to real OCC symbols with live pricing
+        self.contract_resolver = OptionContractResolver(
+            trading_client=self.trade_executor.trading_client,
+            data_client=self.trade_executor.data_client,
+        )
         
         # ==== ENHANCED MODULES ====
         self.regime_detector = RegimeDetector()
@@ -347,62 +354,169 @@ class AutonomousTradingEngine:
         return sized_signals
     
     async def _execute_trades(self, sized_signals: List[tuple]) -> List[ExecutionResult]:
-        """Step 4: Execute trades via Alpaca API."""
-        executions = []
-        
+        """Step 4: Resolve signals to real contracts and execute via Alpaca API.
+
+        For each (signal, position_size) pair:
+        1. Resolve the abstract signal to real OCC contract(s) with live pricing.
+        2. Use the resolved mid-price as the limit price (not hardcoded).
+        3. Pass the real OCC symbol to trade_executor (not "{symbol}_CALL_100").
+        4. If resolution fails, log a warning and skip (never crash).
+        """
+        executions: List[ExecutionResult] = []
+
         for signal, position_size in sized_signals:
             try:
-                # Submit order based on strategy type
-                if signal.strategy in ["credit_spread", "put_spread"]:
-                    # Submit spread order
-                    result = await self.trade_executor.submit_spread_order(
-                        long_symbol=f"{signal.symbol}_PUT_{signal.strike_put}",
-                        short_symbol=f"{signal.symbol}_PUT_{signal.strike_put + 5}",
-                        quantity=position_size.contracts,
-                        net_credit=0.30,  # $30 credit
-                    )
-                elif signal.strategy == "iron_condor":
-                    # Submit iron condor
-                    result = await self.trade_executor.submit_iron_condor(
-                        underlying=signal.symbol,
-                        put_buy_strike=signal.strike_put,
-                        put_sell_strike=signal.strike_put + 5,
-                        call_sell_strike=signal.strike_call - 5,
-                        call_buy_strike=signal.strike_call,
-                        quantity=position_size.contracts,
-                        net_credit=0.50,  # $50 credit
-                    )
-                else:
-                    # Default: Single leg
-                    result = await self.trade_executor.submit_single_leg_order(
-                        option_symbol=f"{signal.symbol}_CALL_100",
-                        side=OrderSide.BUY if signal.signal_type == SignalType.BUY else OrderSide.SELL,
-                        quantity=position_size.contracts,
-                        limit_price=1.0,
-                    )
-                
-                if result.success:
-                    self.stats["trades_executed"] += 1
-                    self.logger.info(f"✓ Trade executed: {signal.symbol} - Order {result.order_id}")
-                    
-                    # Track position
-                    self.current_positions.append({
-                        "signal": signal,
-                        "position_size": position_size,
-                        "execution": result,
-                        "entry_time": datetime.now().isoformat(),
-                    })
-                else:
-                    self.stats["trades_failed"] += 1
-                    self.logger.error(f"✗ Trade failed: {signal.symbol} - {result.error_message}")
-                
-                executions.append(result)
-            
+                result = await self._resolve_and_execute(signal, position_size)
+                if result is not None:
+                    executions.append(result)
             except Exception as e:
-                self.logger.error(f"Execution error for {signal.symbol}: {e}", exc_info=True)
+                self.logger.error(
+                    f"Execution error for {signal.symbol} ({signal.strategy}): {e}",
+                    exc_info=True,
+                )
                 self.stats["trades_failed"] += 1
-        
+
         return executions
+
+    async def _resolve_and_execute(
+        self, signal: Signal, position_size
+    ) -> Optional[ExecutionResult]:
+        """Resolve a single signal to real contracts, then execute.
+
+        Returns:
+            ExecutionResult on success/failure, or None if resolution fails.
+        """
+        target_dte = signal.dte or 30
+
+        # ---------------------------------------------------------------- #
+        # CREDIT SPREAD / PUT SPREAD
+        # ---------------------------------------------------------------- #
+        if signal.strategy in ("credit_spread", "put_spread", "call_spread"):
+            resolved = await self.contract_resolver.resolve_spread(
+                symbol=signal.symbol,
+                spread_type=signal.strategy,
+                target_dte=target_dte,
+            )
+            if resolved is None:
+                self.logger.warning(
+                    f"Contract resolution failed for {signal.symbol} "
+                    f"{signal.strategy} ~{target_dte}DTE — skipping trade"
+                )
+                return None
+
+            # Populate signal with resolved data
+            signal.occ_symbol = resolved.short_leg.occ_symbol
+            signal.expiration_date = resolved.short_leg.expiration
+
+            self.logger.info(
+                f"Executing spread {signal.symbol}: "
+                f"short={resolved.short_leg.occ_symbol} (${resolved.short_leg.mid_price:.2f}) "
+                f"long={resolved.long_leg.occ_symbol} (${resolved.long_leg.mid_price:.2f}) "
+                f"net_credit=${resolved.net_credit:.2f}"
+            )
+
+            result = await self.trade_executor.submit_spread_order(
+                long_symbol=resolved.long_leg.occ_symbol,
+                short_symbol=resolved.short_leg.occ_symbol,
+                quantity=position_size.contracts,
+                net_credit=resolved.net_credit if resolved.net_credit > 0 else None,
+                net_debit=abs(resolved.net_credit) if resolved.net_credit <= 0 else None,
+            )
+
+        # ---------------------------------------------------------------- #
+        # IRON CONDOR
+        # ---------------------------------------------------------------- #
+        elif signal.strategy == "iron_condor":
+            resolved = await self.contract_resolver.resolve_iron_condor(
+                symbol=signal.symbol,
+                target_dte=target_dte,
+            )
+            if resolved is None:
+                self.logger.warning(
+                    f"Contract resolution failed for {signal.symbol} "
+                    f"iron_condor ~{target_dte}DTE — skipping trade"
+                )
+                return None
+
+            signal.occ_symbol = resolved.put_spread.short_leg.occ_symbol
+            signal.expiration_date = resolved.put_spread.short_leg.expiration
+
+            self.logger.info(
+                f"Executing iron condor {signal.symbol}: "
+                f"put_spread=[{resolved.put_spread.short_leg.occ_symbol}/"
+                f"{resolved.put_spread.long_leg.occ_symbol}] "
+                f"call_spread=[{resolved.call_spread.short_leg.occ_symbol}/"
+                f"{resolved.call_spread.long_leg.occ_symbol}] "
+                f"total_credit=${resolved.total_credit:.2f}"
+            )
+
+            result = await self.trade_executor.submit_iron_condor(
+                underlying=signal.symbol,
+                put_buy_strike=resolved.put_spread.long_leg.strike,
+                put_sell_strike=resolved.put_spread.short_leg.strike,
+                call_sell_strike=resolved.call_spread.short_leg.strike,
+                call_buy_strike=resolved.call_spread.long_leg.strike,
+                quantity=position_size.contracts,
+                net_credit=resolved.total_credit,
+            )
+
+        # ---------------------------------------------------------------- #
+        # SINGLE LEG (default: calls/puts, straddles, etc.)
+        # ---------------------------------------------------------------- #
+        else:
+            option_type = "call" if signal.signal_type == SignalType.BUY else "put"
+            resolved = await self.contract_resolver.resolve_single_leg(
+                symbol=signal.symbol,
+                option_type=option_type,
+                target_dte=target_dte,
+            )
+            if resolved is None:
+                self.logger.warning(
+                    f"Contract resolution failed for {signal.symbol} "
+                    f"{option_type} ~{target_dte}DTE — skipping trade"
+                )
+                return None
+
+            signal.occ_symbol = resolved.occ_symbol
+            signal.expiration_date = resolved.expiration
+
+            self.logger.info(
+                f"Executing single leg {signal.symbol}: {resolved.occ_symbol} "
+                f"strike={resolved.strike} exp={resolved.expiration} "
+                f"bid={resolved.bid:.2f} ask={resolved.ask:.2f} "
+                f"limit={resolved.mid_price:.2f}"
+            )
+
+            result = await self.trade_executor.submit_single_leg_order(
+                option_symbol=resolved.occ_symbol,
+                side=OrderSide.BUY if signal.signal_type == SignalType.BUY else OrderSide.SELL,
+                quantity=position_size.contracts,
+                limit_price=resolved.mid_price,
+            )
+
+        # ---------------------------------------------------------------- #
+        # POST-EXECUTION BOOKKEEPING
+        # ---------------------------------------------------------------- #
+        if result.success:
+            self.stats["trades_executed"] += 1
+            self.logger.info(
+                f"✓ Trade executed: {signal.symbol} ({signal.strategy}) "
+                f"— Order {result.order_id}"
+            )
+            self.current_positions.append({
+                "signal": signal,
+                "position_size": position_size,
+                "execution": result,
+                "entry_time": datetime.now().isoformat(),
+            })
+        else:
+            self.stats["trades_failed"] += 1
+            self.logger.error(
+                f"✗ Trade failed: {signal.symbol} ({signal.strategy}) "
+                f"— {result.error_message}"
+            )
+
+        return result
     
     async def _manage_positions(self):
         """Step 5: Monitor positions and trigger stops/targets."""

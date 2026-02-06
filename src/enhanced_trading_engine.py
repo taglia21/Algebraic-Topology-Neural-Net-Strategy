@@ -32,6 +32,51 @@ from src.multi_timeframe_analyzer import MultiTimeframeAnalyzer, AnalyzerConfig
 from src.sentiment_analyzer import SentimentAnalyzer, SentimentConfig
 from src.medallion_math import MedallionStrategy
 
+# ==== PHASE 4 & 6: WIRED ORPHANED MODULES ====
+try:
+    from src.signal_aggregator import SignalAggregator
+    AGGREGATOR_AVAILABLE = True
+except ImportError:
+    SignalAggregator = None
+    AGGREGATOR_AVAILABLE = False
+
+try:
+    from src.quant_models.capm import CAPMModel
+    CAPM_AVAILABLE = True
+except ImportError:
+    CAPMModel = None
+    CAPM_AVAILABLE = False
+
+try:
+    from src.quant_models.garch import GARCHModel
+    GARCH_AVAILABLE = True
+except ImportError:
+    GARCHModel = None
+    GARCH_AVAILABLE = False
+
+try:
+    from src.ml.stacked_ensemble import StackedEnsemble
+    from src.ml.transformer_predictor import TransformerPredictor
+    ML_AVAILABLE = True
+except ImportError:
+    StackedEnsemble = None
+    TransformerPredictor = None
+    ML_AVAILABLE = False
+
+try:
+    from src.ml.continuous_learner import ContinuousLearner
+    CONTINUOUS_LEARNER_AVAILABLE = True
+except ImportError:
+    ContinuousLearner = None
+    CONTINUOUS_LEARNER_AVAILABLE = False
+
+try:
+    from src.optimization.bayesian_tuner import BayesianTuner
+    BAYESIAN_AVAILABLE = True
+except ImportError:
+    BayesianTuner = None
+    BAYESIAN_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -157,8 +202,67 @@ class EnhancedTradingEngine:
         self.mtf_analyzer = MultiTimeframeAnalyzer(self.config.analyzer_config)
         self.sentiment_analyzer = SentimentAnalyzer(self.config.sentiment_config)
         self.medallion_strategy = MedallionStrategy()
+
+        # ==== PHASE 4 & 6: Wired advanced modules ====
+        self.signal_aggregator = None
+        if AGGREGATOR_AVAILABLE:
+            try:
+                self.signal_aggregator = SignalAggregator(min_confidence=0.5)
+                self.signal_aggregator.initialize()
+                logger.info("✓ SignalAggregator wired into equity engine")
+            except Exception as e:
+                logger.warning(f"SignalAggregator init failed: {e}")
+
+        self.capm_model = None
+        if CAPM_AVAILABLE:
+            try:
+                self.capm_model = CAPMModel()
+                logger.info("✓ CAPM wired into equity engine")
+            except Exception as e:
+                logger.warning(f"CAPM init failed: {e}")
+
+        self.garch_model = None
+        if GARCH_AVAILABLE:
+            try:
+                self.garch_model = GARCHModel()
+                logger.info("✓ GARCH wired into equity engine")
+            except Exception as e:
+                logger.warning(f"GARCH init failed: {e}")
+
+        self.ml_ensemble = None
+        self.ml_transformer = None
+        if ML_AVAILABLE:
+            try:
+                self.ml_ensemble = StackedEnsemble()
+                logger.info("✓ ML StackedEnsemble wired into equity engine")
+            except Exception as e:
+                logger.warning(f"StackedEnsemble init failed: {e}")
+            try:
+                self.ml_transformer = TransformerPredictor()
+                logger.info("✓ ML TransformerPredictor wired into equity engine")
+            except Exception as e:
+                logger.warning(f"TransformerPredictor init failed: {e}")
+
+        self.continuous_learner = None
+        if CONTINUOUS_LEARNER_AVAILABLE:
+            try:
+                self.continuous_learner = ContinuousLearner()
+                logger.info("✓ ContinuousLearner wired into equity engine")
+            except Exception as e:
+                logger.warning(f"ContinuousLearner init failed: {e}")
+
+        self.bayesian_tuner = None
+        if BAYESIAN_AVAILABLE:
+            try:
+                self.bayesian_tuner = BayesianTuner()
+                logger.info("✓ BayesianTuner wired into equity engine")
+            except Exception as e:
+                logger.warning(f"BayesianTuner init failed: {e}")
         
         logger.info("EnhancedTradingEngine initialized with all modules (including Medallion Math)")
+        logger.info(f"Phase4 modules: Aggregator={self.signal_aggregator is not None}, "
+                   f"CAPM={self.capm_model is not None}, GARCH={self.garch_model is not None}, "
+                   f"ML={self.ml_ensemble is not None}")
     
     @retry_yfinance(max_retries=3)
     def _calculate_atr(self, symbol: str, period: int = 14) -> float:
@@ -391,9 +495,49 @@ class EnhancedTradingEngine:
             logger.error(f"Medallion analysis failed: {e}")
             # Don't reject trade if Medallion fails, just log it
         
-        # Step 4: Combined scoring
-        logger.info("Step 4: Combined scoring...")
+        # Step 4: Combined scoring (ENHANCED with SignalAggregator, CAPM, GARCH)
+        logger.info("Step 4: Combined scoring (enhanced)...")
+
+        # 4a: CAPM expected return screening
+        capm_expected_return = None
+        if self.capm_model is not None:
+            try:
+                capm_result = self.capm_model.analyze(symbol)
+                capm_expected_return = capm_result.expected_return
+                logger.info(f"  CAPM: β={capm_result.beta:.3f}, α={capm_result.alpha:.4f}, "
+                           f"E[r]={capm_result.expected_return:.2%}")
+                if capm_result.expected_return < 0.02:
+                    rejection_reasons.append(
+                        f"CAPM expected return {capm_result.expected_return:.2%} too low"
+                    )
+            except Exception as e:
+                logger.debug(f"CAPM analysis failed for {symbol}: {e}")
+
+        # 4b: GARCH vol for position sizing
+        garch_vol = None
+        if self.garch_model is not None:
+            try:
+                garch_result = self.garch_model.fit_and_forecast(symbol, horizon=5)
+                garch_vol = garch_result.current_vol
+                logger.info(f"  GARCH: current_vol={garch_vol:.1%}, VaR95={garch_result.var_95:.2%}")
+            except Exception as e:
+                logger.debug(f"GARCH failed for {symbol}: {e}")
+
+        # 4c: SignalAggregator ensemble signal
+        aggregated_signal = None
+        aggregator_boost = 0.0
+        if self.signal_aggregator is not None:
+            try:
+                aggregated_signal = self.signal_aggregator.aggregate(symbol, min_confidence=0.4)
+                logger.info(f"  Aggregator: signal={aggregated_signal.signal:.3f} ({aggregated_signal.direction}), "
+                           f"confidence={aggregated_signal.confidence:.3f}, regime={aggregated_signal.regime.value}")
+                # Boost or dampen combined score based on aggregator
+                aggregator_boost = aggregated_signal.signal * 0.15  # ±15% adjustment
+            except Exception as e:
+                logger.debug(f"SignalAggregator failed for {symbol}: {e}")
+
         combined_score = self._calculate_combined_score(mtf_score, sentiment_score)
+        combined_score = max(0.0, min(1.0, combined_score + aggregator_boost))
         confidence = (combined_score + sentiment_result.confidence) / 2
         
         logger.info(f"  Combined Score: {combined_score:.2f}")
@@ -437,6 +581,18 @@ class EnhancedTradingEngine:
                 logger.info(f"  📉 Bear regime: Position reduced 30% (${original_position_value:,.2f} → ${position_size.position_value:,.2f})")
             elif regime == 'Bull':
                 logger.info(f"  📈 Bull regime: Position unchanged")
+
+        # GARCH vol-based position adjustment (Phase 6)
+        if garch_vol is not None and garch_vol > 0:
+            if garch_vol > 0.35:
+                position_size.position_value *= 0.4
+                logger.info(f"  GARCH extreme vol ({garch_vol:.1%}): Position reduced 60%")
+            elif garch_vol > 0.25:
+                position_size.position_value *= 0.7
+                logger.info(f"  GARCH high vol ({garch_vol:.1%}): Position reduced 30%")
+            elif garch_vol < 0.10:
+                position_size.position_value *= 1.2
+                logger.info(f"  GARCH low vol ({garch_vol:.1%}): Position increased 20%")
         
         logger.info(f"  Position Value: ${position_size.position_value:,.2f}")
         logger.info(f"  Position %: {position_size.position_pct:.2%}")
@@ -512,7 +668,10 @@ class EnhancedTradingEngine:
                 'mtf_analysis': mtf_analysis,
                 'sentiment_result': sentiment_result,
                 'position_sizing': position_size,
-                'medallion_analysis': medallion_analysis  # Medallion mathematical analysis
+                'medallion_analysis': medallion_analysis,
+                'capm_expected_return': capm_expected_return,
+                'garch_vol': garch_vol,
+                'aggregated_signal': aggregated_signal,
             }
         )
         
@@ -577,6 +736,14 @@ class EnhancedTradingEngine:
         decisions.sort(key=lambda d: d.combined_score, reverse=True)
         
         return decisions
+
+    def analyze(self, symbol: str, portfolio_value: float = 100000) -> Optional[TradeDecision]:
+        """Alias for analyze_opportunity, used by run_v28_production.py."""
+        try:
+            return self.analyze_opportunity(symbol, portfolio_value)
+        except Exception as e:
+            logger.error(f"Analysis error for {symbol}: {e}")
+            return None
 
 
 # Example usage

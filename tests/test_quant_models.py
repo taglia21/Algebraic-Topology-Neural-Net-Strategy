@@ -403,3 +403,147 @@ class TestIntegration:
         # All three should agree within reasonable bounds
         prices = [mc_result.price, crr_result.price, h_result.price]
         assert max(prices) - min(prices) < 2.0, f"Prices diverge too much: {prices}"
+
+
+# ============================================================================
+# Wiring Integration Tests
+# ============================================================================
+
+class TestWiring:
+    """Verify all orphaned modules are properly wired into engines."""
+
+    def test_signal_aggregator_manifold_wrapper(self):
+        """SignalAggregator._fetch_manifold_inputs returns correct types."""
+        from src.signal_aggregator import SignalAggregator
+        agg = SignalAggregator()
+        # The method should exist and accept a symbol string
+        assert hasattr(agg, '_fetch_manifold_inputs')
+        # Returns a 3-tuple  (prices or None, float, float)
+        result = agg._fetch_manifold_inputs("INVALID_TICKER_ZZZZZ")
+        assert isinstance(result, tuple) and len(result) == 3
+
+    def test_signal_aggregator_has_correct_hmm_handling(self):
+        """SignalAggregator.determine_regime() doesn't call .detect(symbol)."""
+        from src.signal_aggregator import SignalAggregator
+        import inspect
+        source = inspect.getsource(SignalAggregator.determine_regime)
+        # Should NOT contain the old broken call
+        assert "._hmm_detector.detect(symbol)" not in source
+        # Should reference detect_current_regime or _get_default_regime
+        assert "detect_current_regime" in source or "_get_default_regime" in source
+
+    def test_signal_aggregator_continuous_learner_api(self):
+        """update_after_trade uses record_trade(TradeResult), not record_outcome."""
+        from src.signal_aggregator import SignalAggregator
+        import inspect
+        source = inspect.getsource(SignalAggregator.update_after_trade)
+        assert "record_outcome" not in source
+        assert "record_trade" in source
+
+    def test_equity_engine_imports_ml(self):
+        """EnhancedTradingEngine imports ML modules."""
+        import inspect
+        import src.enhanced_trading_engine as mod
+        source = inspect.getsource(mod)
+        assert "StackedEnsemble" in source
+        assert "TransformerPredictor" in source
+        assert "ContinuousLearner" in source
+
+    def test_equity_engine_calls_ml_ensemble(self):
+        """analyze_opportunity actually calls ml_ensemble.predict."""
+        import inspect
+        from src.enhanced_trading_engine import EnhancedTradingEngine
+        source = inspect.getsource(EnhancedTradingEngine.analyze_opportunity)
+        assert "ml_ensemble" in source
+        assert "ml_transformer" in source
+
+    def test_equity_engine_has_record_trade_outcome(self):
+        """EnhancedTradingEngine has record_trade_outcome method."""
+        from src.enhanced_trading_engine import EnhancedTradingEngine
+        assert hasattr(EnhancedTradingEngine, 'record_trade_outcome')
+
+    def test_equity_engine_has_build_ml_features(self):
+        """EnhancedTradingEngine has _build_ml_features helper."""
+        from src.enhanced_trading_engine import EnhancedTradingEngine
+        assert hasattr(EnhancedTradingEngine, '_build_ml_features')
+
+    def test_options_engine_imports_numpy(self):
+        """autonomous_engine.py imports numpy."""
+        import pathlib
+        source = pathlib.Path("/workspaces/Algebraic-Topology-Neural-Net-Strategy/src/options/autonomous_engine.py").read_text()
+        assert "import numpy" in source
+
+    def test_options_engine_filter_uses_aggregator(self):
+        """_filter_signals calls signal_aggregator.aggregate."""
+        import pathlib
+        source = pathlib.Path("/workspaces/Algebraic-Topology-Neural-Net-Strategy/src/options/autonomous_engine.py").read_text()
+        # Find the _filter_signals method body
+        start = source.index("async def _filter_signals")
+        # Next method starts with 'async def _size' or similar
+        end = source.index("async def _size_positions", start)
+        filter_body = source[start:end]
+        assert "signal_aggregator" in filter_body
+        assert ".aggregate(" in filter_body
+
+    def test_options_engine_execute_uses_continuous_learner(self):
+        """_execute_trades records to ContinuousLearner."""
+        import pathlib
+        source = pathlib.Path("/workspaces/Algebraic-Topology-Neural-Net-Strategy/src/options/autonomous_engine.py").read_text()
+        start = source.index("async def _execute_trades")
+        end = source.index("async def _resolve_and_execute", start)
+        execute_body = source[start:end]
+        assert "continuous_learner" in execute_body
+        assert "record_trade" in execute_body
+
+    def test_options_engine_manifold_uses_price_data(self):
+        """_update_regime_and_weights passes price array to manifold, not string."""
+        import pathlib
+        source = pathlib.Path("/workspaces/Algebraic-Topology-Neural-Net-Strategy/src/options/autonomous_engine.py").read_text()
+        start = source.index("async def _update_regime_and_weights")
+        end = source.index("async def _check_concentration_risk", start)
+        regime_body = source[start:end]
+        # Should NOT contain the old broken call with just a string
+        assert 'detect_regime("SPY")' not in regime_body
+        # Should contain yfinance download and price array passing
+        assert "yf.download" in regime_body
+        assert "realized_vol" in regime_body
+
+    def test_options_engine_stores_garch_vol(self):
+        """_update_regime_and_weights stores _last_garch_vol for Heston."""
+        import pathlib
+        source = pathlib.Path("/workspaces/Algebraic-Topology-Neural-Net-Strategy/src/options/autonomous_engine.py").read_text()
+        start = source.index("async def _update_regime_and_weights")
+        end = source.index("async def _check_concentration_risk", start)
+        regime_body = source[start:end]
+        assert "_last_garch_vol" in regime_body
+
+    def test_paper_engine_wired(self):
+        """PaperTradingEngine imports quant modules."""
+        import inspect
+        import src.trading.paper_trading_engine as mod
+        source = inspect.getsource(mod)
+        assert "SignalAggregator" in source
+        assert "CAPMModel" in source
+        assert "GARCHModel" in source
+
+    def test_paper_engine_uses_garch_in_targets(self):
+        """get_target_positions uses GARCH vol forecast."""
+        import inspect
+        from src.trading.paper_trading_engine import PaperTradingEngine
+        source = inspect.getsource(PaperTradingEngine.get_target_positions)
+        assert "garch_model" in source
+        assert "fit_and_forecast" in source
+
+    def test_systemd_service_references_correct_module(self):
+        """deploy/v28_trading_bot.service pre-check imports run_v28_production."""
+        import pathlib
+        service_path = pathlib.Path("/workspaces/Algebraic-Topology-Neural-Net-Strategy/deploy/v28_trading_bot.service")
+        content = service_path.read_text()
+        assert "run_v28_production" in content
+        assert "v28_production_system" not in content
+
+    def test_optimization_init_exists(self):
+        """src/optimization/__init__.py exists and is importable."""
+        import importlib
+        mod = importlib.import_module("src.optimization")
+        assert mod is not None

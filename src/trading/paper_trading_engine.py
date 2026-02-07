@@ -30,6 +30,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from src.trading.alpaca_client import AlpacaClient, OrderSide, Position, Account
 
+# ==== WIRED QUANT MODULES ====
+try:
+    from src.signal_aggregator import SignalAggregator
+    _AGGREGATOR_AVAILABLE = True
+except ImportError:
+    _AGGREGATOR_AVAILABLE = False
+
+try:
+    from src.quant_models.capm import CAPMModel
+    _CAPM_AVAILABLE = True
+except ImportError:
+    _CAPM_AVAILABLE = False
+
+try:
+    from src.quant_models.garch import GARCHModel
+    _GARCH_AVAILABLE = True
+except ImportError:
+    _GARCH_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -367,7 +386,33 @@ class PaperTradingEngine:
         self.trade_history: List[TradeRecord] = []
         self.daily_log: List[Dict] = []
         self.starting_capital = float(os.getenv("STARTING_CAPITAL", 100000))
-        
+
+        # ==== WIRED QUANT MODULES ====
+        self.signal_aggregator = None
+        if _AGGREGATOR_AVAILABLE:
+            try:
+                self.signal_aggregator = SignalAggregator(min_confidence=0.5)
+                self.signal_aggregator.initialize()
+                logger.info("SignalAggregator wired into paper trading engine")
+            except Exception as e:
+                logger.warning(f"SignalAggregator init failed: {e}")
+
+        self.capm_model = None
+        if _CAPM_AVAILABLE:
+            try:
+                self.capm_model = CAPMModel()
+                logger.info("CAPM wired into paper trading engine")
+            except Exception as e:
+                logger.warning(f"CAPM init failed: {e}")
+
+        self.garch_model = None
+        if _GARCH_AVAILABLE:
+            try:
+                self.garch_model = GARCHModel()
+                logger.info("GARCH wired into paper trading engine")
+            except Exception as e:
+                logger.warning(f"GARCH init failed: {e}")
+
         # Logging setup
         self._setup_logging()
         
@@ -433,6 +478,9 @@ class PaperTradingEngine:
         """
         Get target position sizes in dollars.
         
+        ENHANCED: Uses GARCH vol forecast for dynamic sizing and
+        SignalAggregator for regime cross-validation.
+        
         Returns:
             Dict of {symbol: target_value}
         """
@@ -440,9 +488,41 @@ class PaperTradingEngine:
         account = self.client.get_account()
         portfolio_value = account.portfolio_value
         
-        # Get regime signal
+        # Get regime signal (SMA-based)
         spy_prices = self.get_spy_prices()
         regime_signal = self.regime_detector.detect_regime(spy_prices)
+        
+        # GARCH vol overlay — adjust volatility estimate used by PortfolioConstructor
+        if self.garch_model is not None:
+            try:
+                garch_forecast = self.garch_model.fit_and_forecast("SPY", horizon=5)
+                garch_vol = garch_forecast.current_vol
+                logger.info(f"GARCH Vol: {garch_vol:.1%} (vs SMA-based: {regime_signal.volatility_20d:.1%})")
+                # Use GARCH vol if available — it's more accurate
+                regime_signal.volatility_20d = garch_vol
+            except Exception as e:
+                logger.debug(f"GARCH forecast failed: {e}")
+
+        # SignalAggregator cross-validation — can override regime if models disagree
+        if self.signal_aggregator is not None:
+            try:
+                agg = self.signal_aggregator.aggregate("SPY", min_confidence=0.3)
+                logger.info(
+                    f"Aggregator: signal={agg.signal:.3f} ({agg.direction}), "
+                    f"confidence={agg.confidence:.3f}, regime={agg.regime.value}"
+                )
+                # If aggregator strongly disagrees with SMA regime, dampen confidence
+                if (regime_signal.regime == MarketRegime.BULL and agg.signal < -0.4):
+                    logger.warning("Aggregator bearish but SMA says BULL — dampening confidence")
+                    regime_signal.confidence *= 0.6
+                elif (regime_signal.regime == MarketRegime.BEAR and agg.signal > 0.4):
+                    logger.warning("Aggregator bullish but SMA says BEAR — dampening confidence")
+                    regime_signal.confidence *= 0.6
+                elif abs(agg.signal) > 0.5:
+                    # Strong agreement — boost confidence
+                    regime_signal.confidence = min(regime_signal.confidence * 1.2, 0.99)
+            except Exception as e:
+                logger.debug(f"SignalAggregator failed: {e}")
         
         # Check circuit breakers
         cb_triggered, cb_reason, scale = self.circuit_breaker.update(account.equity)

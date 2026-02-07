@@ -536,6 +536,37 @@ class EnhancedTradingEngine:
             except Exception as e:
                 logger.debug(f"SignalAggregator failed for {symbol}: {e}")
 
+        # 4d: ML StackedEnsemble confidence gating
+        ml_ensemble_signal = None
+        if self.ml_ensemble is not None:
+            try:
+                features = self._build_ml_features(symbol)
+                if features is not None:
+                    prediction = self.ml_ensemble.predict(features)
+                    if hasattr(prediction, '__len__') and len(prediction) > 0:
+                        pred_val = float(prediction[-1]) if hasattr(prediction, '__getitem__') else float(prediction)
+                    else:
+                        pred_val = float(prediction)
+                    ml_ensemble_signal = float(np.clip(pred_val, -1, 1))
+                    logger.info(f"  ML Ensemble: prediction={ml_ensemble_signal:.3f}")
+                    # Use ML signal to adjust score
+                    aggregator_boost += ml_ensemble_signal * 0.10  # ±10% additional
+            except Exception as e:
+                logger.debug(f"ML Ensemble failed for {symbol}: {e}")
+
+        # 4e: Transformer prediction
+        ml_transformer_signal = None
+        if self.ml_transformer is not None:
+            try:
+                prediction = self.ml_transformer.predict(symbol)
+                if prediction is not None:
+                    direction_prob = getattr(prediction, "direction_prob", 0.5)
+                    ml_transformer_signal = float((direction_prob - 0.5) * 2)
+                    logger.info(f"  Transformer: direction_prob={direction_prob:.3f}, signal={ml_transformer_signal:.3f}")
+                    aggregator_boost += ml_transformer_signal * 0.08  # ±8%
+            except Exception as e:
+                logger.debug(f"Transformer failed for {symbol}: {e}")
+
         combined_score = self._calculate_combined_score(mtf_score, sentiment_score)
         combined_score = max(0.0, min(1.0, combined_score + aggregator_boost))
         confidence = (combined_score + sentiment_result.confidence) / 2
@@ -744,6 +775,94 @@ class EnhancedTradingEngine:
         except Exception as e:
             logger.error(f"Analysis error for {symbol}: {e}")
             return None
+
+    def record_trade_outcome(self, symbol: str, decision: TradeDecision, pnl: float):
+        """
+        Post-trade feedback to ContinuousLearner and SignalAggregator.
+        Called after a trade is closed with the realized P&L.
+        """
+        # Update ContinuousLearner directly
+        if self.continuous_learner is not None:
+            try:
+                from src.ml.continuous_learner import TradeResult
+                result = TradeResult(
+                    timestamp=datetime.now(),
+                    ticker=symbol,
+                    signal_direction="long" if decision.signal in (TradeSignal.BUY, TradeSignal.STRONG_BUY) else "short",
+                    signal_confidence=decision.confidence,
+                    predicted_return=decision.combined_score * 0.02,
+                    actual_return=pnl / max(decision.recommended_position_value, 1),
+                    is_hit=pnl > 0,
+                    features={
+                        "mtf_score": decision.mtf_score,
+                        "sentiment": decision.sentiment_score,
+                        "combined": decision.combined_score,
+                    },
+                    regime=decision.metadata.get("aggregated_signal", {}).regime.value
+                           if decision.metadata.get("aggregated_signal") else "unknown",
+                )
+                learner_result = self.continuous_learner.record_trade(result)
+                if learner_result.get("needs_recalibration"):
+                    logger.warning(f"ContinuousLearner: recalibration triggered after {symbol} trade")
+            except Exception as e:
+                logger.debug(f"ContinuousLearner trade recording failed: {e}")
+
+        # Update SignalAggregator
+        agg_signal = decision.metadata.get("aggregated_signal")
+        if self.signal_aggregator is not None and agg_signal is not None:
+            try:
+                self.signal_aggregator.update_after_trade(symbol, agg_signal, pnl)
+            except Exception as e:
+                logger.debug(f"SignalAggregator trade update failed: {e}")
+
+    def _build_ml_features(self, symbol: str) -> Optional[np.ndarray]:
+        """Build feature vector for ML models from recent price data."""
+        try:
+            data = yf.download(symbol, period="6mo", interval="1d", progress=False)
+            if data.empty or len(data) < 60:
+                return None
+
+            close = data["Close"].values.flatten()
+            volume = data["Volume"].values.flatten()
+
+            ret_1d = np.diff(np.log(close))
+            ret_5d = close[-1] / close[-5] - 1 if len(close) >= 5 else 0
+            ret_20d = close[-1] / close[-20] - 1 if len(close) >= 20 else 0
+            vol_20d = np.std(ret_1d[-20:]) * np.sqrt(252) if len(ret_1d) >= 20 else 0
+            sma_ratio = close[-1] / np.mean(close[-20:]) if len(close) >= 20 else 1
+            rsi = self._compute_rsi(close, 14)
+            vol_ratio = np.mean(volume[-5:]) / np.mean(volume[-20:]) if len(volume) >= 20 else 1
+
+            features = np.array([[
+                ret_1d[-1] if len(ret_1d) > 0 else 0,
+                ret_5d,
+                ret_20d,
+                vol_20d,
+                sma_ratio,
+                rsi,
+                vol_ratio,
+                close[-1] / np.mean(close[-50:]) if len(close) >= 50 else 1,
+                np.mean(ret_1d[-5:]) if len(ret_1d) >= 5 else 0,
+                np.std(ret_1d[-5:]) * np.sqrt(252) if len(ret_1d) >= 5 else 0,
+            ]])
+            return features
+        except Exception:
+            return None
+
+    @staticmethod
+    def _compute_rsi(close: np.ndarray, period: int = 14) -> float:
+        """Compute RSI."""
+        if len(close) < period + 1:
+            return 50.0
+        deltas = np.diff(close[-(period + 1):])
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+        avg_gain = np.mean(gains)
+        avg_loss = np.mean(losses)
+        if avg_loss < 1e-10:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return float(100.0 - 100.0 / (1.0 + rs))
 
 
 # Example usage

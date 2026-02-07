@@ -106,21 +106,12 @@ class EquityEngine:
     def __init__(self, mode: str):
         self.mode = mode
         self.engine = None
-        self.signal_aggregator = None
         self.logger = logging.getLogger("equity_engine")
 
     async def initialize(self):
         from src.enhanced_trading_engine import EnhancedTradingEngine, EngineConfig
         self.engine = EnhancedTradingEngine(EngineConfig())
-
-        # Wire the signal aggregator for richer signal generation
-        try:
-            from src.signal_aggregator import SignalAggregator
-            self.signal_aggregator = SignalAggregator()
-            self.logger.info("SignalAggregator attached to equity engine")
-        except Exception as exc:
-            self.logger.warning(f"SignalAggregator unavailable: {exc}")
-
+        # SignalAggregator, CAPM, GARCH, ML are all wired inside EnhancedTradingEngine.__init__
         self.logger.info(f"Equity engine initialized (mode={self.mode})")
 
     async def run_cycle(self, symbols: list[str]):

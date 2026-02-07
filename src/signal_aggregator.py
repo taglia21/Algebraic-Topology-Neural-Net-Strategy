@@ -256,29 +256,40 @@ class SignalAggregator:
 
         regimes = []
 
-        # Manifold detector
+        # Manifold detector — requires price array + vol floats, NOT a symbol string
         if self._manifold_detector is not None:
             try:
-                result = self._manifold_detector.detect_regime(symbol)
-                regime_name = getattr(result, "regime", getattr(result, "name", str(result)))
-                regime_str = str(regime_name).upper()
-                if "CRISIS" in regime_str or "SPIRAL" in regime_str:
-                    regimes.append(AggregatedRegime.CRISIS)
-                elif "VOLATILE" in regime_str or "TRANSITION" in regime_str:
-                    regimes.append(AggregatedRegime.HIGH_VOLATILITY)
-                elif "TREND" in regime_str or "GEODESIC" in regime_str:
-                    regimes.append(AggregatedRegime.STRONG_TREND)
-                elif "REVERSION" in regime_str or "CONSOLIDATION" in regime_str:
-                    regimes.append(AggregatedRegime.MEAN_REVERSION)
-                else:
-                    regimes.append(AggregatedRegime.MILD_TREND)
+                prices, realized_vol, implied_vol = self._fetch_manifold_inputs(symbol)
+                if prices is not None:
+                    result = self._manifold_detector.detect_regime(prices, realized_vol, implied_vol)
+                    regime_name = getattr(result, "regime", getattr(result, "name", str(result)))
+                    regime_str = str(regime_name).upper()
+                    if "CRISIS" in regime_str or "SPIRAL" in regime_str:
+                        regimes.append(AggregatedRegime.CRISIS)
+                    elif "VOLATILE" in regime_str or "TRANSITION" in regime_str:
+                        regimes.append(AggregatedRegime.HIGH_VOLATILITY)
+                    elif "TREND" in regime_str or "GEODESIC" in regime_str:
+                        regimes.append(AggregatedRegime.STRONG_TREND)
+                    elif "REVERSION" in regime_str or "CONSOLIDATION" in regime_str:
+                        regimes.append(AggregatedRegime.MEAN_REVERSION)
+                    else:
+                        regimes.append(AggregatedRegime.MILD_TREND)
             except Exception as e:
                 logger.debug(f"Manifold regime detection failed: {e}")
 
-        # HMM detector
+        # HMM detector — async method detect_current_regime() with no arguments
         if self._hmm_detector is not None:
             try:
-                regime_state = self._hmm_detector.detect(symbol)
+                import asyncio
+                # RegimeDetector.detect_current_regime() is async
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Already in async context — need a sync wrapper
+                    regime_state = self._hmm_detector._get_default_regime()
+                else:
+                    regime_state = loop.run_until_complete(
+                        self._hmm_detector.detect_current_regime()
+                    )
                 regime_name = str(getattr(regime_state, "current_regime", regime_state)).upper()
                 if "BEAR_HIGH" in regime_name:
                     regimes.append(AggregatedRegime.CRISIS)
@@ -345,30 +356,51 @@ class SignalAggregator:
             except Exception as e:
                 logger.debug(f"GARCH signal failed for {symbol}: {e}")
 
-        # Manifold regime signal
+        # Manifold regime signal — use proper API with price data
         if self._manifold_detector is not None:
             try:
-                result = self._manifold_detector.detect_regime(symbol)
-                # Extract signal from manifold result
-                sig = getattr(result, "signal", 0.0)
-                conf = getattr(result, "confidence", 0.5)
-                if hasattr(result, "curvature"):
-                    # Negative curvature → unstable → sell signal
-                    curv = getattr(result, "curvature", 0)
-                    sig = float(np.clip(-curv * 5, -1, 1))
-                signals.append(ModelSignal(
-                    model_name="manifold_regime",
-                    signal=float(sig),
-                    confidence=float(conf),
-                    metadata={"regime": str(getattr(result, "regime", "unknown"))},
-                ))
+                prices, realized_vol, implied_vol = self._fetch_manifold_inputs(symbol)
+                if prices is not None:
+                    result = self._manifold_detector.detect_regime(prices, realized_vol, implied_vol)
+                    # Extract signal from manifold state
+                    conf = getattr(result, "confidence", 0.5)
+                    curv = getattr(result, "curvature", 0.0)
+                    pos_scalar = getattr(result, "position_scalar", 0.5)
+                    recommendation = getattr(result, "recommendation", "")
+                    # Map recommendation + curvature to signal
+                    if recommendation == "momentum":
+                        sig = pos_scalar  # bullish
+                    elif recommendation in ("risk_off", "hedge"):
+                        sig = -pos_scalar  # bearish
+                    elif recommendation == "mean_reversion":
+                        sig = float(np.clip(-curv * 3, -1, 1))
+                    else:
+                        sig = float(np.clip(-curv * 5, -1, 1))
+                    signals.append(ModelSignal(
+                        model_name="manifold_regime",
+                        signal=float(np.clip(sig, -1, 1)),
+                        confidence=float(conf),
+                        metadata={
+                            "regime": str(getattr(result, "regime", "unknown")),
+                            "curvature": curv,
+                            "position_scalar": pos_scalar,
+                            "path_behavior": getattr(result, "path_behavior", "unknown"),
+                        },
+                    ))
             except Exception as e:
                 logger.debug(f"Manifold signal failed for {symbol}: {e}")
 
-        # HMM regime signal
+        # HMM regime signal — async detect_current_regime(), no arguments
         if self._hmm_detector is not None:
             try:
-                regime_state = self._hmm_detector.detect(symbol)
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    regime_state = self._hmm_detector._get_default_regime()
+                else:
+                    regime_state = loop.run_until_complete(
+                        self._hmm_detector.detect_current_regime()
+                    )
                 regime = getattr(regime_state, "current_regime", None)
                 confidence = getattr(regime_state, "confidence", 0.5)
                 regime_str = str(regime).upper()
@@ -599,21 +631,56 @@ class SignalAggregator:
         except Exception:
             return None
 
+    def _fetch_manifold_inputs(self, symbol: str):
+        """
+        Fetch price data + vol estimates for ManifoldRegimeDetector.
+        Returns (prices_array, realized_vol, implied_vol) or (None, 0, 0) on failure.
+        """
+        try:
+            import yfinance as yf
+            data = yf.download(symbol, period="1y", interval="1d", progress=False)
+            if data.empty or len(data) < 30:
+                return None, 0.0, 0.0
+            close = data["Close"].values.flatten()
+            # Realized vol from 20d returns
+            log_returns = np.diff(np.log(close[-21:]))
+            realized_vol = float(np.std(log_returns) * np.sqrt(252))
+            # Implied vol proxy: use VIX if symbol is SPY, else 1.2x realized
+            implied_vol = realized_vol * 1.2  # conservative proxy
+            if symbol in ("SPY", "QQQ", "IWM"):
+                try:
+                    vix = yf.download("^VIX", period="5d", interval="1d", progress=False)
+                    if not vix.empty:
+                        implied_vol = float(vix["Close"].values.flatten()[-1]) / 100.0
+                except Exception:
+                    pass
+            return close, realized_vol, implied_vol
+        except Exception as e:
+            logger.debug(f"Failed to fetch manifold inputs for {symbol}: {e}")
+            return None, 0.0, 0.0
+
     def update_after_trade(self, symbol: str, signal: AggregatedSignal, outcome: float):
         """
         Update model weights after a trade outcome.
-        Delegates to ContinuousLearner if available.
+        Delegates to ContinuousLearner.record_trade(TradeResult) if available.
         """
         if self._continuous_learner is not None:
             try:
-                self._continuous_learner.record_outcome(
-                    signal_info={
-                        "symbol": symbol,
-                        "signal": signal.signal,
-                        "models": [s.model_name for s in signal.model_signals],
-                        "regime": signal.regime.value,
-                    },
-                    outcome=outcome,
+                from src.ml.continuous_learner import TradeResult
+                from datetime import datetime
+                trade_result = TradeResult(
+                    timestamp=datetime.now(),
+                    ticker=symbol,
+                    signal_direction="long" if signal.signal > 0 else "short",
+                    signal_confidence=signal.confidence,
+                    predicted_return=signal.signal * 0.02,  # scaled estimate
+                    actual_return=outcome,
+                    is_hit=(signal.signal > 0) == (outcome > 0),
+                    features={s.model_name: s.signal for s in signal.model_signals},
+                    regime=signal.regime.value,
                 )
+                result = self._continuous_learner.record_trade(trade_result)
+                if result.get("needs_recalibration"):
+                    logger.warning("ContinuousLearner: recalibration triggered")
             except Exception as e:
                 logger.debug(f"ContinuousLearner update failed: {e}")

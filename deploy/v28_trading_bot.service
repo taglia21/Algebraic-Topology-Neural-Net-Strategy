@@ -32,7 +32,7 @@ RestartSec=30
 RestartPreventExitStatus=0
 
 # Pre-start health check
-ExecStartPre=/opt/trading-bot/.venv/bin/python -c "import v28_production_system; print('V28 modules loaded')"
+ExecStartPre=/opt/trading-bot/.venv/bin/python -c "import run_v28_production; print('V28 modules loaded')"
 
 # Security hardening
 NoNewPrivileges=true

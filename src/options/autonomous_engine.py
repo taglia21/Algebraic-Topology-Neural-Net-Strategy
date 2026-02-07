@@ -30,6 +30,8 @@ import json
 import os
 from zoneinfo import ZoneInfo
 
+import numpy as np
+
 from .config import RISK_CONFIG, MONITORING_CONFIG
 from .universe import get_universe
 from .signal_generator import SignalGenerator, Signal, SignalType
@@ -408,7 +410,8 @@ class AutonomousTradingEngine:
         """
         Step 2: Filter signals to remove invalid/duplicate ones.
         
-        ENHANCED: Now includes concentration risk checks.
+        ENHANCED: Now includes concentration risk checks and SignalAggregator
+        confidence boosting for each signal's underlying.
         """
         # First, check concentration risk
         concentration_ok = await self._check_concentration_risk()
@@ -425,8 +428,59 @@ class AutonomousTradingEngine:
             
             # Skip low confidence - LOWERED for paper trading to get trades flowing
             min_confidence = 0.15 if self.paper else 0.30
+
+            # PHASE 5: Boost confidence using SignalAggregator on the underlying
+            if self.signal_aggregator is not None:
+                try:
+                    agg = self.signal_aggregator.aggregate(signal.symbol, min_confidence=0.3)
+                    # Align: if aggregator agrees with signal direction, boost confidence
+                    if signal.signal_type == SignalType.BUY and agg.signal > 0.2:
+                        signal.confidence = min(signal.confidence * 1.25, 0.99)
+                        self.logger.debug(f"Boosted {signal.symbol} confidence via aggregator (bullish agreement)")
+                    elif signal.signal_type == SignalType.SELL and agg.signal < -0.2:
+                        signal.confidence = min(signal.confidence * 1.25, 0.99)
+                        self.logger.debug(f"Boosted {signal.symbol} confidence via aggregator (bearish agreement)")
+                    elif abs(agg.signal) > 0.3 and (
+                        (signal.signal_type == SignalType.BUY and agg.signal < -0.3)
+                        or (signal.signal_type == SignalType.SELL and agg.signal > 0.3)
+                    ):
+                        # Aggregator strongly disagrees — dampen confidence
+                        signal.confidence *= 0.7
+                        self.logger.debug(f"Dampened {signal.symbol} confidence via aggregator (disagreement)")
+                except Exception as e:
+                    self.logger.debug(f"Aggregator boost failed for {signal.symbol}: {e}")
+
+            # PHASE 5: Heston/MC pricing comparison — if model price deviates
+            # from market mid-price significantly, boost/reject signal
+            if self.heston_model is not None and signal.expected_premium:
+                try:
+                    from src.quant_models.heston_model import HestonParams
+                    # Use stored GARCH vol as v0
+                    v0 = getattr(self, '_last_garch_vol', 0.04)
+                    params = HestonParams(v0=v0, kappa=2.0, theta=v0, xi=0.3, rho=-0.7)
+                    current_price = signal.current_price or 100
+                    strike = signal.strike_put or signal.strike_call or current_price
+                    T = (signal.dte or 30) / 365.0
+                    heston_result = self.heston_model.price_call(
+                        current_price, strike, T, params
+                    )
+                    model_price = heston_result.price
+                    market_price = signal.expected_premium
+                    if market_price > 0 and model_price > 0:
+                        price_ratio = model_price / market_price
+                        if price_ratio > 1.15:  # Model says option is underpriced
+                            signal.confidence = min(signal.confidence * 1.15, 0.99)
+                            self.logger.info(f"Heston: {signal.symbol} underpriced by {(price_ratio-1)*100:.0f}%")
+                        elif price_ratio < 0.85:  # Model says option is overpriced
+                            signal.confidence *= 0.85
+                            self.logger.info(f"Heston: {signal.symbol} overpriced by {(1-price_ratio)*100:.0f}%")
+                except Exception as e:
+                    self.logger.debug(f"Heston pricing comparison failed: {e}")
+            
             if signal.confidence < min_confidence:
                 self.logger.debug(f"Skipping low confidence signal: {signal.symbol} ({signal.confidence:.1%})")
+                # PHASE 5: Log every signal, even rejected ones
+                await self._log_signal_with_reasoning(signal, execution_result=None)
                 continue
             
             # Skip if already have position in this symbol
@@ -487,6 +541,8 @@ class AutonomousTradingEngine:
         2. Use the resolved mid-price as the limit price (not hardcoded).
         3. Pass the real OCC symbol to trade_executor (not "{symbol}_CALL_100").
         4. If resolution fails, log a warning and skip (never crash).
+        
+        ENHANCED: Post-trade feedback to ContinuousLearner + Discord notifications.
         """
         executions: List[ExecutionResult] = []
 
@@ -495,6 +551,34 @@ class AutonomousTradingEngine:
                 result = await self._resolve_and_execute(signal, position_size)
                 if result is not None:
                     executions.append(result)
+                    # PHASE 5: Log signal with execution result + Discord
+                    await self._log_signal_with_reasoning(signal, execution_result=result)
+                    await self._send_discord_notification(
+                        f"🔔 Trade Executed: {signal.symbol} {signal.strategy} "
+                        f"conf={signal.confidence:.0%} status={result.status}"
+                    )
+                    # PHASE 4: ContinuousLearner post-trade recording
+                    if self.continuous_learner is not None:
+                        try:
+                            from src.ml.continuous_learner import TradeResult
+                            trade_result = TradeResult(
+                                timestamp=datetime.now(),
+                                ticker=signal.symbol,
+                                signal_direction="long" if signal.signal_type == SignalType.BUY else "short",
+                                signal_confidence=signal.confidence,
+                                predicted_return=signal.probability_of_profit * 0.02,
+                                actual_return=0.0,  # Will be updated on position close
+                                is_hit=True,  # Placeholder, updated on close
+                                features={
+                                    "iv_rank": signal.iv_rank or 0.0,
+                                    "confidence": signal.confidence,
+                                    "strategy": signal.strategy,
+                                },
+                                regime=self.current_regime.value if self.current_regime else "unknown",
+                            )
+                            self.continuous_learner.record_trade(trade_result)
+                        except Exception as e:
+                            self.logger.debug(f"ContinuousLearner recording failed: {e}")
             except Exception as e:
                 self.logger.error(
                     f"Execution error for {signal.symbol} ({signal.strategy}): {e}",
@@ -816,15 +900,33 @@ class AutonomousTradingEngine:
                 f"(confidence: {regime_state.confidence:.1%})"
             )
 
-            # ManifoldRegimeDetector cross-validation
+            # ManifoldRegimeDetector cross-validation — requires price data + vol
             if self.manifold_detector is not None:
                 try:
-                    manifold_result = self.manifold_detector.detect_regime("SPY")
-                    manifold_regime = getattr(manifold_result, 'regime', 'unknown')
-                    manifold_conf = getattr(manifold_result, 'confidence', 0.0)
-                    self.logger.info(
-                        f"Manifold Regime: {manifold_regime} (confidence: {manifold_conf:.1%})"
-                    )
+                    import yfinance as yf
+                    spy_data = yf.download("SPY", period="1y", interval="1d", progress=False)
+                    if not spy_data.empty and len(spy_data) > 30:
+                        prices = spy_data["Close"].values.flatten()
+                        log_rets = np.diff(np.log(prices[-21:]))
+                        realized_vol = float(np.std(log_rets) * np.sqrt(252))
+                        # Implied vol from VIX
+                        implied_vol = realized_vol * 1.2
+                        try:
+                            vix_data = yf.download("^VIX", period="5d", interval="1d", progress=False)
+                            if not vix_data.empty:
+                                implied_vol = float(vix_data["Close"].values.flatten()[-1]) / 100.0
+                        except Exception:
+                            pass
+                        manifold_result = self.manifold_detector.detect_regime(
+                            prices, realized_vol, implied_vol
+                        )
+                        manifold_regime = getattr(manifold_result, 'regime', 'unknown')
+                        manifold_conf = getattr(manifold_result, 'confidence', 0.0)
+                        self.logger.info(
+                            f"Manifold Regime: {manifold_regime} (confidence: {manifold_conf:.1%})"
+                        )
+                        # Store for use in signal scoring
+                        self._last_manifold_state = manifold_result
                 except Exception as e:
                     self.logger.debug(f"Manifold regime detection failed: {e}")
 
@@ -832,6 +934,7 @@ class AutonomousTradingEngine:
             if self.garch_model is not None:
                 try:
                     garch_forecast = self.garch_model.fit_and_forecast("SPY", horizon=5)
+                    self._last_garch_vol = garch_forecast.current_vol ** 2  # variance for Heston v0
                     self.logger.info(
                         f"GARCH Vol: current={garch_forecast.current_vol:.1%}, "
                         f"5d_forecast={garch_forecast.forecast_vols[-1]:.1%}, "

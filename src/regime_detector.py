@@ -1,520 +1,473 @@
-"""Market Regime Detection for adaptive trading strategies.
+"""
+Rule-Based Market Regime Detector
+===================================
 
-Detects market regimes (BULL, BEAR, SIDEWAYS) and volatility states
-(HIGH_VOL, LOW_VOL, NORMAL) to enable regime-aware trading decisions.
+Simple, robust regime detection for options strategy selection.
 
-Uses technical indicators:
-- Moving averages (50-day, 200-day)
-- ATR for volatility
-- RSI for momentum
+Detects 4 regimes:
+- TRENDING_BULL: Market in uptrend, favor bullish credit spreads
+- TRENDING_BEAR: Market in downtrend, favor bearish credit spreads  
+- MEAN_REVERTING: Range-bound, favor iron condors and premium selling
+- HIGH_VOLATILITY: Elevated vol, sell premium aggressively when IV rank high
 
-V2.0: Added TradingCondition classification for Iteration 2 optimization
-- FAVORABLE: Trade normally
-- NEUTRAL: Require stronger signals
-- UNFAVORABLE: Skip trades or reduce position size
+Uses straightforward technical indicators (no ML required for initial version):
+- Price vs 20/50/200 SMA for trend detection
+- ADX for trend strength
+- RSI for overbought/oversold
+- MACD for momentum confirmation
+- Bollinger Band width for squeeze/expansion detection
+
+This is a REPLACEMENT for the broken signal pipeline. The HMM-based
+RegimeDetector in src/options/regime_detector.py is preserved but this
+module handles regime classification for strategy selection independently.
+
+Author: System Overhaul - Feb 2026
 """
 
-import numpy as np
-import pandas as pd
-from typing import Dict, Tuple, List, Optional
-from dataclasses import dataclass
-from enum import Enum
 import logging
+import numpy as np
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, List, Optional, Tuple
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
+
+
+# ============================================================================
+# DATA MODELS
+# ============================================================================
 
 class Regime(Enum):
-    """Market regime classifications."""
-    BULL = "bull"
-    BEAR = "bear"
-    SIDEWAYS = "sideways"
+    """Market regime classification for strategy selection."""
+    TRENDING_BULL = "trending_bull"
+    TRENDING_BEAR = "trending_bear"
+    MEAN_REVERTING = "mean_reverting"
+    HIGH_VOLATILITY = "high_volatility"
+    UNKNOWN = "unknown"
 
 
-class VolatilityState(Enum):
-    """Volatility state classifications."""
-    HIGH = "high_vol"
-    LOW = "low_vol"
-    NORMAL = "normal_vol"
+@dataclass
+class TechnicalSignals:
+    """Technical indicator readings for a symbol."""
+    symbol: str
 
+    # Price & trend
+    current_price: float
+    sma_20: float
+    sma_50: float
+    sma_200: float
+    price_vs_sma20_pct: float    # % above/below 20 SMA
+    price_vs_sma50_pct: float    # % above/below 50 SMA
 
-class TradingCondition(Enum):
-    """Trading condition based on regime + volatility combination.
-    
-    FAVORABLE: Low volatility trending market - trade normally
-    NEUTRAL: Mixed conditions - require stronger signals
-    UNFAVORABLE: High volatility or choppy - reduce/skip trades
-    """
-    FAVORABLE = "favorable"
-    NEUTRAL = "neutral"
-    UNFAVORABLE = "unfavorable"
+    # Momentum
+    rsi_14: float                # RSI 14-period
+    macd_signal: float           # MACD - Signal (positive = bullish)
+    macd_histogram: float        # MACD histogram
+
+    # Volatility
+    bb_width: float              # Bollinger Band width (% of price)
+    bb_position: float           # Price position within bands (0-1)
+    atr_pct: float               # ATR as % of price (14-period)
+
+    # Trend strength
+    adx: float                   # ADX (0-100, >25 = trending)
+    trend_direction: int         # +1 bull, -1 bear, 0 neutral
+
+    # Volume
+    volume_ratio: float          # Current volume vs 20-day average
+
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
 class RegimeResult:
-    """Result of regime detection."""
+    """Regime detection result with confidence and supporting evidence."""
     regime: Regime
-    volatility: VolatilityState
-    trading_condition: TradingCondition  # V2.0: Added trading condition
-    confidence: float
-    ma_50: float
-    ma_200: float
-    atr_14: float
-    rsi_14: float
-    details: Dict
-    
-    # V2.0: Trading adjustment factors
-    position_size_multiplier: float = 1.0  # Multiply position size by this
-    signal_threshold_adjustment: float = 0.0  # Add to buy threshold, subtract from sell
+    confidence: float            # 0-1
+    evidence: Dict[str, str]     # Key evidence points
+    technicals: Optional[TechnicalSignals]
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
-class MarketRegimeDetector:
+# ============================================================================
+# TECHNICAL INDICATOR CALCULATIONS
+# ============================================================================
+
+def _sma(prices: np.ndarray, window: int) -> float:
+    """Simple moving average of last `window` prices."""
+    if len(prices) < window:
+        return float(np.mean(prices))
+    return float(np.mean(prices[-window:]))
+
+
+def _ema(prices: np.ndarray, window: int) -> np.ndarray:
+    """Exponential moving average."""
+    alpha = 2.0 / (window + 1)
+    ema = np.zeros_like(prices, dtype=float)
+    ema[0] = prices[0]
+    for i in range(1, len(prices)):
+        ema[i] = alpha * prices[i] + (1 - alpha) * ema[i - 1]
+    return ema
+
+
+def _rsi(prices: np.ndarray, period: int = 14) -> float:
+    """Relative Strength Index."""
+    if len(prices) < period + 1:
+        return 50.0
+
+    deltas = np.diff(prices[-(period + 1):])
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+
+    avg_gain = np.mean(gains) if len(gains) > 0 else 0
+    avg_loss = np.mean(losses) if len(losses) > 0 else 0.001
+
+    rs = avg_gain / avg_loss
+    rsi_val = 100 - (100 / (1 + rs))
+    return float(rsi_val)
+
+
+def _macd(prices: np.ndarray) -> Tuple[float, float, float]:
+    """MACD, Signal, Histogram."""
+    if len(prices) < 35:
+        return 0.0, 0.0, 0.0
+
+    ema_12 = _ema(prices, 12)
+    ema_26 = _ema(prices, 26)
+    macd_line = ema_12 - ema_26
+
+    signal_line = _ema(macd_line[-9:], 9) if len(macd_line) >= 9 else macd_line
+    histogram = macd_line[-1] - signal_line[-1]
+
+    return float(macd_line[-1]), float(signal_line[-1]), float(histogram)
+
+
+def _bollinger_bands(
+    prices: np.ndarray, window: int = 20, num_std: float = 2.0
+) -> Tuple[float, float, float, float, float]:
     """
-    Market regime detection using technical indicators.
-    
-    Regime Rules:
-    - BULL: price > MA50 > MA200 AND RSI > 45
-    - BEAR: price < MA50 < MA200 AND RSI < 55
-    - SIDEWAYS: all other cases
-    
-    Volatility Rules:
-    - HIGH_VOL: ATR > ATR_rolling_50 * 1.3
-    - LOW_VOL: ATR < ATR_rolling_50 * 0.7
-    - NORMAL: otherwise
+    Bollinger Bands.
+
+    Returns: (upper, middle, lower, width_pct, position)
     """
-    
-    def __init__(
-        self,
-        ma_short_period: int = 50,
-        ma_long_period: int = 200,
-        atr_period: int = 14,
-        rsi_period: int = 14,
-        atr_lookback: int = 50,
-        high_vol_threshold: float = 1.3,
-        low_vol_threshold: float = 0.7
-    ):
-        """
-        Initialize MarketRegimeDetector.
-        
-        Args:
-            ma_short_period: Short moving average period (default 50)
-            ma_long_period: Long moving average period (default 200)
-            atr_period: ATR calculation period (default 14)
-            rsi_period: RSI calculation period (default 14)
-            atr_lookback: ATR rolling average lookback (default 50)
-            high_vol_threshold: Multiplier for high volatility detection
-            low_vol_threshold: Multiplier for low volatility detection
-        """
-        self.ma_short_period = ma_short_period
-        self.ma_long_period = ma_long_period
-        self.atr_period = atr_period
-        self.rsi_period = rsi_period
-        self.atr_lookback = atr_lookback
-        self.high_vol_threshold = high_vol_threshold
-        self.low_vol_threshold = low_vol_threshold
-        
-        logger.info(f"MarketRegimeDetector initialized: MA({ma_short_period}/{ma_long_period}), "
-                   f"ATR({atr_period}), RSI({rsi_period})")
-    
-    def _calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate Relative Strength Index."""
-        delta = prices.diff()
-        
-        gains = delta.where(delta > 0, 0)
-        losses = -delta.where(delta < 0, 0)
-        
-        avg_gain = gains.rolling(window=period).mean()
-        avg_loss = losses.rolling(window=period).mean()
-        
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi = 100 - (100 / (1 + rs))
-        
-        return rsi
-    
-    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
-        """Calculate Average True Range."""
-        high = df['high'] if 'high' in df.columns else df['High']
-        low = df['low'] if 'low' in df.columns else df['Low']
-        close = df['close'] if 'close' in df.columns else df['Close']
-        
-        prev_close = close.shift(1)
-        
-        tr1 = high - low
-        tr2 = abs(high - prev_close)
-        tr3 = abs(low - prev_close)
-        
-        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = true_range.rolling(window=period).mean()
-        
-        return atr
-    
-    def detect_regime(
-        self,
-        price_series: pd.Series,
-        volume_series: pd.Series = None,
-        df: pd.DataFrame = None
-    ) -> RegimeResult:
-        """
-        Detect current market regime.
-        
-        Args:
-            price_series: Close price series
-            volume_series: Volume series (optional, for future enhancements)
-            df: Full OHLCV DataFrame (for ATR calculation)
-            
-        Returns:
-            RegimeResult with regime, volatility, and confidence
-        """
-        # Ensure we have enough data
-        min_required = max(self.ma_long_period, self.atr_lookback + self.atr_period)
-        
-        if len(price_series) < min_required:
-            return RegimeResult(
-                regime=Regime.SIDEWAYS,
-                volatility=VolatilityState.NORMAL,
-                trading_condition=TradingCondition.NEUTRAL,
-                confidence=0.0,
-                ma_50=0, ma_200=0, atr_14=0, rsi_14=50,
-                details={'error': 'Insufficient data'},
-                position_size_multiplier=0.5,
-                signal_threshold_adjustment=0.02
-            )
-        
-        # Calculate indicators
-        close = price_series
-        current_price = close.iloc[-1]
-        
-        ma_50 = close.rolling(window=self.ma_short_period).mean().iloc[-1]
-        ma_200 = close.rolling(window=self.ma_long_period).mean().iloc[-1]
-        rsi_14 = self._calculate_rsi(close, self.rsi_period).iloc[-1]
-        
-        # Calculate ATR if DataFrame provided
-        if df is not None and len(df) >= self.atr_period:
-            atr_series = self._calculate_atr(df, self.atr_period)
-            atr_14 = atr_series.iloc[-1]
-            atr_rolling_avg = atr_series.rolling(window=self.atr_lookback).mean().iloc[-1]
+    if len(prices) < window:
+        mid = float(np.mean(prices))
+        return mid * 1.02, mid, mid * 0.98, 0.04, 0.5
+
+    window_prices = prices[-window:]
+    mid = float(np.mean(window_prices))
+    std = float(np.std(window_prices))
+
+    upper = mid + num_std * std
+    lower = mid - num_std * std
+    current = float(prices[-1])
+
+    width_pct = (upper - lower) / mid if mid > 0 else 0
+    position = (current - lower) / (upper - lower) if (upper - lower) > 0 else 0.5
+
+    return upper, mid, lower, width_pct, position
+
+
+def _adx(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14) -> float:
+    """Average Directional Index."""
+    if len(closes) < period + 1:
+        return 20.0  # Default: weak trend
+
+    n = len(closes)
+    tr_list = []
+    plus_dm_list = []
+    minus_dm_list = []
+
+    for i in range(1, n):
+        high = highs[i]
+        low = lows[i]
+        prev_close = closes[i - 1]
+        prev_high = highs[i - 1]
+        prev_low = lows[i - 1]
+
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        tr_list.append(tr)
+
+        plus_dm = max(high - prev_high, 0) if (high - prev_high) > (prev_low - low) else 0
+        minus_dm = max(prev_low - low, 0) if (prev_low - low) > (high - prev_high) else 0
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+
+    if len(tr_list) < period:
+        return 20.0
+
+    # Smoothed averages using Wilder's method
+    atr = np.mean(tr_list[:period])
+    plus_di_smooth = np.mean(plus_dm_list[:period])
+    minus_di_smooth = np.mean(minus_dm_list[:period])
+
+    dx_list = []
+    for i in range(period, len(tr_list)):
+        atr = atr - (atr / period) + tr_list[i]
+        plus_di_smooth = plus_di_smooth - (plus_di_smooth / period) + plus_dm_list[i]
+        minus_di_smooth = minus_di_smooth - (minus_di_smooth / period) + minus_dm_list[i]
+
+        if atr > 0:
+            plus_di = 100 * plus_di_smooth / atr
+            minus_di = 100 * minus_di_smooth / atr
         else:
-            # Fallback: estimate ATR from price volatility
-            returns = close.pct_change().dropna()
-            atr_14 = returns.std() * current_price
-            atr_rolling_avg = atr_14
-        
-        # Detect regime
-        regime, regime_confidence = self._classify_regime(
-            current_price, ma_50, ma_200, rsi_14
+            plus_di = minus_di = 0
+
+        di_sum = plus_di + minus_di
+        dx = 100 * abs(plus_di - minus_di) / di_sum if di_sum > 0 else 0
+        dx_list.append(dx)
+
+    if not dx_list:
+        return 20.0
+
+    adx_val = float(np.mean(dx_list[-period:]))
+    return min(adx_val, 100.0)
+
+
+def _atr_pct(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14) -> float:
+    """ATR as percentage of current price."""
+    if len(closes) < period + 1:
+        return 0.02
+
+    tr_values = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
         )
-        
-        # Detect volatility state
-        volatility, vol_confidence = self._classify_volatility(
-            atr_14, atr_rolling_avg
-        )
-        
-        # V2.0: Classify trading condition and get adjustment factors
-        trading_condition, size_mult, threshold_adj = self._classify_trading_condition(
-            regime, volatility, regime_confidence, vol_confidence
-        )
-        
-        # Overall confidence
-        confidence = (regime_confidence + vol_confidence) / 2
-        
-        return RegimeResult(
-            regime=regime,
-            volatility=volatility,
-            trading_condition=trading_condition,
-            confidence=round(confidence, 4),
-            ma_50=round(ma_50, 4),
-            ma_200=round(ma_200, 4),
-            atr_14=round(atr_14, 4),
-            rsi_14=round(rsi_14, 4),
-            details={
-                'price': round(current_price, 4),
-                'price_vs_ma50': round((current_price / ma_50 - 1) * 100, 2) if ma_50 > 0 else 0,
-                'price_vs_ma200': round((current_price / ma_200 - 1) * 100, 2) if ma_200 > 0 else 0,
-                'ma50_vs_ma200': round((ma_50 / ma_200 - 1) * 100, 2) if ma_200 > 0 else 0,
-                'atr_ratio': round(atr_14 / atr_rolling_avg, 4) if atr_rolling_avg > 0 else 1.0
-            },
-            position_size_multiplier=size_mult,
-            signal_threshold_adjustment=threshold_adj
-        )
-    
-    def _classify_regime(
-        self,
-        price: float,
-        ma_50: float,
-        ma_200: float,
-        rsi: float
-    ) -> Tuple[Regime, float]:
-        """Classify market regime with confidence."""
-        
-        # BULL: price > MA50 > MA200 AND RSI > 45
-        if price > ma_50 > ma_200 and rsi > 45:
-            # Confidence based on how strongly conditions are met
-            price_strength = (price / ma_50 - 1) * 100  # % above MA50
-            ma_strength = (ma_50 / ma_200 - 1) * 100    # MA50 % above MA200
-            rsi_strength = (rsi - 45) / 55              # Normalized RSI above 45
-            
-            confidence = min(1.0, (price_strength / 10 + ma_strength / 10 + rsi_strength) / 3)
-            return Regime.BULL, max(0.5, confidence)
-        
-        # BEAR: price < MA50 < MA200 AND RSI < 55
-        if price < ma_50 < ma_200 and rsi < 55:
-            price_weakness = (1 - price / ma_50) * 100
-            ma_weakness = (1 - ma_50 / ma_200) * 100
-            rsi_weakness = (55 - rsi) / 55
-            
-            confidence = min(1.0, (price_weakness / 10 + ma_weakness / 10 + rsi_weakness) / 3)
-            return Regime.BEAR, max(0.5, confidence)
-        
-        # SIDEWAYS: all other cases
-        return Regime.SIDEWAYS, 0.5
-    
-    def _classify_trading_condition(
-        self,
-        regime: Regime,
-        volatility: VolatilityState,
-        regime_confidence: float,
-        vol_confidence: float
-    ) -> Tuple[TradingCondition, float, float]:
+        tr_values.append(tr)
+
+    atr = float(np.mean(tr_values[-period:]))
+    current_price = float(closes[-1])
+    return atr / current_price if current_price > 0 else 0.02
+
+
+# ============================================================================
+# REGIME DETECTOR
+# ============================================================================
+
+class RuleBasedRegimeDetector:
+    """
+    Rule-based market regime detector.
+
+    Classification logic:
+    1. ATR% > 2.5% OR (ADX > 35 AND ATR% > 1.5%) -> HIGH_VOLATILITY
+    2. ADX > 25 AND clear trend -> TRENDING (bull or bear)
+    3. ADX < 20 AND BB_width < 0.08 -> MEAN_REVERTING
+    4. Default -> MEAN_REVERTING
+    """
+
+    def __init__(self):
+        """Initialize regime detector."""
+        self.logger = logging.getLogger(__name__)
+        self._last_regime: Optional[RegimeResult] = None
+        self._cache: Dict[str, Tuple[RegimeResult, datetime]] = {}
+        self._cache_ttl = timedelta(minutes=10)
+
+    def detect_regime(self, symbol: str = "SPY") -> RegimeResult:
         """
-        Classify trading condition based on regime and volatility combination.
-        
-        V2.0: Implements regime-aware trading rules.
-        
+        Detect current market regime for a symbol.
+
+        Args:
+            symbol: Underlying to analyze (default SPY for broad market)
+
         Returns:
-            - TradingCondition: FAVORABLE, NEUTRAL, or UNFAVORABLE
-            - position_size_multiplier: 0.0 to 1.5
-            - signal_threshold_adjustment: -0.02 to +0.03
-        
-        Trading Rules:
-        - FAVORABLE: Bull + Low Vol, or clear trending with normal vol
-          → Trade normally: size_mult=1.0, threshold_adj=0.0
-        
-        - NEUTRAL: Sideways + Normal Vol, or mixed conditions
-          → Require stronger signals: size_mult=0.75, threshold_adj=+0.01
-        
-        - UNFAVORABLE: High Vol (any regime), or Bear + trending down strongly
-          → Skip or reduce: size_mult=0.5 or 0.0, threshold_adj=+0.02
+            RegimeResult with regime, confidence, and evidence
         """
-        
-        # High volatility is always unfavorable regardless of regime
-        if volatility == VolatilityState.HIGH:
-            # High vol during bear is worst - skip trades
-            if regime == Regime.BEAR:
-                return TradingCondition.UNFAVORABLE, 0.0, 0.03
-            # High vol during sideways - very cautious
-            elif regime == Regime.SIDEWAYS:
-                return TradingCondition.UNFAVORABLE, 0.25, 0.03
-            # High vol during bull - still trade but cautiously
+        # Check cache
+        if symbol in self._cache:
+            cached, ts = self._cache[symbol]
+            if datetime.now() - ts < self._cache_ttl:
+                return cached
+
+        # Compute technicals
+        technicals = self._compute_technicals(symbol)
+        if technicals is None:
+            result = RegimeResult(
+                regime=Regime.UNKNOWN,
+                confidence=0.0,
+                evidence={"error": "Failed to compute technicals"},
+                technicals=None,
+            )
+            return result
+
+        # Classify regime
+        result = self._classify_regime(technicals)
+        self._cache[symbol] = (result, datetime.now())
+        self._last_regime = result
+
+        self.logger.info(
+            f"Regime [{symbol}]: {result.regime.value} "
+            f"(confidence: {result.confidence:.0%}) "
+            f"ADX={technicals.adx:.1f} RSI={technicals.rsi_14:.1f} "
+            f"ATR%={technicals.atr_pct:.2%}"
+        )
+
+        return result
+
+    def get_technicals(self, symbol: str) -> Optional[TechnicalSignals]:
+        """Get technical signals for a symbol (useful for signal generation)."""
+        return self._compute_technicals(symbol)
+
+    # ================================================================== #
+    # PRIVATE
+    # ================================================================== #
+
+    def _compute_technicals(self, symbol: str) -> Optional[TechnicalSignals]:
+        """Compute all technical indicators from price data."""
+        if yf is None:
+            self.logger.error("yfinance not available")
+            return None
+
+        try:
+            data = yf.download(symbol, period="1y", interval="1d", progress=False)
+            if data.empty or len(data) < 50:
+                self.logger.warning(f"Insufficient data for {symbol}")
+                return None
+
+            closes = data["Close"].values.flatten().astype(float)
+            highs = data["High"].values.flatten().astype(float)
+            lows = data["Low"].values.flatten().astype(float)
+            volumes = data["Volume"].values.flatten().astype(float)
+
+            current_price = float(closes[-1])
+
+            # SMAs
+            sma20 = _sma(closes, 20)
+            sma50 = _sma(closes, 50)
+            sma200 = _sma(closes, 200)
+
+            # Momentum
+            rsi14 = _rsi(closes, 14)
+            macd_val, macd_sig, macd_hist = _macd(closes)
+
+            # Bollinger Bands
+            bb_upper, bb_mid, bb_lower, bb_width, bb_pos = _bollinger_bands(closes, 20)
+
+            # Trend strength
+            adx_val = _adx(highs, lows, closes, 14)
+            atr_pct_val = _atr_pct(highs, lows, closes, 14)
+
+            # Trend direction
+            if current_price > sma50 and sma20 > sma50:
+                trend_dir = 1  # bull
+            elif current_price < sma50 and sma20 < sma50:
+                trend_dir = -1  # bear
             else:
-                return TradingCondition.NEUTRAL, 0.5, 0.02
-        
-        # Low volatility is generally favorable
-        if volatility == VolatilityState.LOW:
-            if regime == Regime.BULL:
-                # Best condition: trending up with low volatility
-                return TradingCondition.FAVORABLE, 1.25, -0.01
-            elif regime == Regime.SIDEWAYS:
-                # Low vol sideways - okay for mean reversion
-                return TradingCondition.FAVORABLE, 1.0, 0.0
-            else:  # BEAR with low vol
-                # Still bearish but controlled - neutral
-                return TradingCondition.NEUTRAL, 0.75, 0.01
-        
-        # Normal volatility - depends on regime
-        if volatility == VolatilityState.NORMAL:
-            if regime == Regime.BULL:
-                # Good condition: clear uptrend
-                return TradingCondition.FAVORABLE, 1.0, 0.0
-            elif regime == Regime.BEAR:
-                # Bearish but not extreme - reduce exposure
-                return TradingCondition.NEUTRAL, 0.5, 0.02
-            else:  # SIDEWAYS
-                # Choppy market - be selective
-                return TradingCondition.NEUTRAL, 0.75, 0.01
-        
-        # Default fallback
-        return TradingCondition.NEUTRAL, 0.75, 0.01
-    
-    def _classify_volatility(
-        self,
-        atr: float,
-        atr_avg: float
-    ) -> Tuple[VolatilityState, float]:
-        """Classify volatility state with confidence."""
-        
-        if atr_avg <= 0:
-            return VolatilityState.NORMAL, 0.5
-        
-        ratio = atr / atr_avg
-        
-        if ratio > self.high_vol_threshold:
-            confidence = min(1.0, (ratio - self.high_vol_threshold) / 0.5 + 0.5)
-            return VolatilityState.HIGH, confidence
-        
-        if ratio < self.low_vol_threshold:
-            confidence = min(1.0, (self.low_vol_threshold - ratio) / 0.3 + 0.5)
-            return VolatilityState.LOW, confidence
-        
-        return VolatilityState.NORMAL, 0.5
-    
-    def add_regime_column(
-        self,
-        df: pd.DataFrame,
-        price_col: str = 'close'
-    ) -> pd.DataFrame:
-        """
-        Add regime column to DataFrame.
-        
-        Args:
-            df: OHLCV DataFrame
-            price_col: Column name for close price
-            
-        Returns:
-            DataFrame with 'regime' and 'volatility' columns added
-        """
-        df = df.copy()
-        
-        # Standardize column names
-        close_col = price_col if price_col in df.columns else price_col.capitalize()
-        if close_col not in df.columns:
-            close_col = 'Close' if 'Close' in df.columns else 'close'
-        
-        close = df[close_col]
-        
-        # Calculate indicators for full series
-        df['ma_50'] = close.rolling(window=self.ma_short_period).mean()
-        df['ma_200'] = close.rolling(window=self.ma_long_period).mean()
-        df['rsi_14'] = self._calculate_rsi(close, self.rsi_period)
-        df['atr_14'] = self._calculate_atr(df, self.atr_period)
-        df['atr_avg_50'] = df['atr_14'].rolling(window=self.atr_lookback).mean()
-        
-        # Classify each row
-        regimes = []
-        volatilities = []
-        confidences = []
-        
-        for i in range(len(df)):
-            if i < self.ma_long_period or pd.isna(df['ma_200'].iloc[i]):
-                regimes.append(Regime.SIDEWAYS.value)
-                volatilities.append(VolatilityState.NORMAL.value)
-                confidences.append(0.0)
-                continue
-            
-            price = close.iloc[i]
-            ma_50 = df['ma_50'].iloc[i]
-            ma_200 = df['ma_200'].iloc[i]
-            rsi = df['rsi_14'].iloc[i]
-            atr = df['atr_14'].iloc[i]
-            atr_avg = df['atr_avg_50'].iloc[i] if not pd.isna(df['atr_avg_50'].iloc[i]) else atr
-            
-            regime, regime_conf = self._classify_regime(price, ma_50, ma_200, rsi)
-            vol, vol_conf = self._classify_volatility(atr, atr_avg)
-            
-            regimes.append(regime.value)
-            volatilities.append(vol.value)
-            confidences.append((regime_conf + vol_conf) / 2)
-        
-        df['regime'] = regimes
-        df['volatility_state'] = volatilities
-        df['regime_confidence'] = confidences
-        
-        return df
-    
-    def get_regime_summary(self, df: pd.DataFrame) -> Dict:
-        """
-        Get summary of regimes in a DataFrame.
-        
-        Args:
-            df: DataFrame with 'regime' column
-            
-        Returns:
-            Summary statistics
-        """
-        if 'regime' not in df.columns:
-            df = self.add_regime_column(df)
-        
-        regime_counts = df['regime'].value_counts()
-        total = len(df)
-        
-        summary = {
-            'total_bars': total,
-            'regime_distribution': {}
-        }
-        
-        for regime in [Regime.BULL, Regime.BEAR, Regime.SIDEWAYS]:
-            count = regime_counts.get(regime.value, 0)
-            summary['regime_distribution'][regime.value] = {
-                'count': int(count),
-                'percentage': round(count / total * 100, 2) if total > 0 else 0
-            }
-        
-        # Volatility distribution
-        if 'volatility_state' in df.columns:
-            vol_counts = df['volatility_state'].value_counts()
-            summary['volatility_distribution'] = {}
-            
-            for vol in [VolatilityState.HIGH, VolatilityState.LOW, VolatilityState.NORMAL]:
-                count = vol_counts.get(vol.value, 0)
-                summary['volatility_distribution'][vol.value] = {
-                    'count': int(count),
-                    'percentage': round(count / total * 100, 2) if total > 0 else 0
-                }
-        
-        return summary
+                trend_dir = 0  # neutral
 
+            # Volume ratio
+            avg_vol = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else float(np.mean(volumes))
+            current_vol = float(volumes[-1])
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
 
-def test_regime_detector():
-    """Test MarketRegimeDetector functionality."""
-    print("\n" + "=" * 60)
-    print("Testing MarketRegimeDetector")
-    print("=" * 60)
-    
-    # Create synthetic data
-    np.random.seed(42)
-    n_days = 300
-    
-    # Generate trending price data
-    trend = np.linspace(100, 150, n_days) + np.random.randn(n_days) * 2
-    
-    dates = pd.date_range('2023-01-01', periods=n_days, freq='D')
-    df = pd.DataFrame({
-        'open': trend + np.random.randn(n_days) * 0.5,
-        'high': trend + np.abs(np.random.randn(n_days)) * 2,
-        'low': trend - np.abs(np.random.randn(n_days)) * 2,
-        'close': trend,
-        'volume': np.random.randint(1000000, 5000000, n_days)
-    }, index=dates)
-    
-    detector = MarketRegimeDetector()
-    
-    # Test single detection
-    print("\nTest 1: Single regime detection")
-    result = detector.detect_regime(df['close'], df=df)
-    print(f"  Regime: {result.regime.value}")
-    print(f"  Volatility: {result.volatility.value}")
-    print(f"  Confidence: {result.confidence}")
-    print(f"  MA50: {result.ma_50:.2f}, MA200: {result.ma_200:.2f}")
-    print(f"  RSI: {result.rsi_14:.2f}")
-    
-    # Test add_regime_column
-    print("\nTest 2: Add regime column")
-    df_with_regime = detector.add_regime_column(df)
-    print(f"  Columns added: regime, volatility_state, regime_confidence")
-    print(f"  Sample regimes: {df_with_regime['regime'].tail().tolist()}")
-    
-    # Test summary
-    print("\nTest 3: Regime summary")
-    summary = detector.get_regime_summary(df_with_regime)
-    print(f"  Regime distribution:")
-    for regime, data in summary['regime_distribution'].items():
-        print(f"    {regime}: {data['count']} bars ({data['percentage']}%)")
-    
-    print("\n" + "=" * 60)
-    print("All MarketRegimeDetector tests passed!")
-    print("=" * 60)
-    return True
+            return TechnicalSignals(
+                symbol=symbol,
+                current_price=current_price,
+                sma_20=sma20,
+                sma_50=sma50,
+                sma_200=sma200,
+                price_vs_sma20_pct=(current_price / sma20 - 1) * 100 if sma20 > 0 else 0,
+                price_vs_sma50_pct=(current_price / sma50 - 1) * 100 if sma50 > 0 else 0,
+                rsi_14=rsi14,
+                macd_signal=macd_val - macd_sig,
+                macd_histogram=macd_hist,
+                bb_width=bb_width,
+                bb_position=bb_pos,
+                atr_pct=atr_pct_val,
+                adx=adx_val,
+                trend_direction=trend_dir,
+                volume_ratio=vol_ratio,
+            )
+        except Exception as e:
+            self.logger.error(f"Technical computation failed for {symbol}: {e}")
+            return None
 
+    def _classify_regime(self, t: TechnicalSignals) -> RegimeResult:
+        """
+        Classify market regime from technicals.
 
-if __name__ == "__main__":
-    test_regime_detector()
+        Decision tree:
+        1. ATR% > 2.5% OR (ADX > 35 AND ATR% > 1.5%) -> HIGH_VOLATILITY
+        2. ADX > 25 AND trend_direction != 0 -> TRENDING (bull/bear)
+        3. ADX < 20 AND BB_width < 0.08 -> MEAN_REVERTING
+        4. Default -> MEAN_REVERTING
+        """
+        evidence: Dict[str, str] = {}
+        scores: Dict[Regime, float] = {r: 0.0 for r in Regime if r != Regime.UNKNOWN}
+
+        # ---- HIGH VOLATILITY signals ----
+        if t.atr_pct > 0.025:
+            scores[Regime.HIGH_VOLATILITY] += 0.4
+            evidence["high_atr"] = f"ATR% {t.atr_pct:.2%} > 2.5%"
+        if t.adx > 35 and t.atr_pct > 0.015:
+            scores[Regime.HIGH_VOLATILITY] += 0.2
+            evidence["strong_move"] = f"ADX {t.adx:.0f} with elevated ATR"
+        if t.bb_width > 0.12:
+            scores[Regime.HIGH_VOLATILITY] += 0.15
+            evidence["wide_bb"] = f"BB width {t.bb_width:.2%}"
+
+        # ---- TRENDING signals ----
+        if t.adx > 25:
+            if t.trend_direction == 1:
+                scores[Regime.TRENDING_BULL] += 0.35
+                evidence["adx_bull"] = f"ADX {t.adx:.0f} with bullish trend"
+            elif t.trend_direction == -1:
+                scores[Regime.TRENDING_BEAR] += 0.35
+                evidence["adx_bear"] = f"ADX {t.adx:.0f} with bearish trend"
+
+        # Price above/below key SMAs
+        if t.price_vs_sma50_pct > 3:
+            scores[Regime.TRENDING_BULL] += 0.15
+            evidence["above_sma50"] = f"Price {t.price_vs_sma50_pct:+.1f}% above SMA50"
+        elif t.price_vs_sma50_pct < -3:
+            scores[Regime.TRENDING_BEAR] += 0.15
+            evidence["below_sma50"] = f"Price {t.price_vs_sma50_pct:+.1f}% below SMA50"
+
+        # MACD confirmation
+        if t.macd_histogram > 0 and t.macd_signal > 0:
+            scores[Regime.TRENDING_BULL] += 0.1
+        elif t.macd_histogram < 0 and t.macd_signal < 0:
+            scores[Regime.TRENDING_BEAR] += 0.1
+
+        # RSI extremes suggest regime
+        if t.rsi_14 > 65:
+            scores[Regime.TRENDING_BULL] += 0.05
+        elif t.rsi_14 < 35:
+            scores[Regime.TRENDING_BEAR] += 0.05
+
+        # ---- MEAN REVERTING signals ----
+        if t.adx < 20:
+            scores[Regime.MEAN_REVERTING] += 0.3
+            evidence["low_adx"] = f"ADX {t.adx:.0f} < 20 (no trend)"
+        if t.bb_width < 0.08:
+            scores[Regime.MEAN_REVERTING] += 0.15
+            evidence["tight_bb"] = f"BB width {t.bb_width:.2%} (range-bound)"
+        if 40 <= t.rsi_14 <= 60:
+            scores[Regime.MEAN_REVERTING] += 0.1
+            evidence["neutral_rsi"] = f"RSI {t.rsi_14:.0f} (neutral)"
+
+        # Default baseline for mean-reverting (it's the safest assumption)
+        scores[Regime.MEAN_REVERTING] += 0.05
+
+        # ---- Pick winner ----
+        best_regime = max(scores, key=scores.get)  # type: ignore[arg-type]
+        best_score = scores[best_regime]
+
+        # Normalize confidence to 0-1
+        total = sum(scores.values())
+        confidence = best_score / total if total > 0 else 0.5
+
+        return RegimeResult(
+            regime=best_regime,
+            confidence=round(confidence, 2),
+            evidence=evidence,
+            technicals=t,
+        )

@@ -729,23 +729,109 @@ class AutonomousTradingEngine:
         return result
     
     async def _manage_positions(self):
-        """Step 5: Monitor positions and trigger stops/targets."""
+        """
+        Step 5: Monitor positions using REAL Alpaca P&L data.
+        
+        Checks each position for:
+        1. Stop-loss trigger (unrealized loss > max_loss_pct)
+        2. Take-profit trigger (unrealized gain > target_profit_pct)
+        3. DTE management (close positions approaching expiration)
+        """
+        if not self.current_positions:
+            return
+        
         positions_to_close = []
+        target_profit = RISK_CONFIG.get("target_profit_pct", 0.50)
+        stop_loss = RISK_CONFIG.get("stop_loss_pct", 0.25)
+        dte_threshold = 21
+        
+        # Get real positions from Alpaca
+        try:
+            alpaca_positions = self.trade_executor.trading_client.get_all_positions()
+            alpaca_map = {}
+            for ap in alpaca_positions:
+                alpaca_map[ap.symbol] = {
+                    "unrealized_pl": float(ap.unrealized_pl) if ap.unrealized_pl else 0.0,
+                    "unrealized_plpc": float(ap.unrealized_plpc) if ap.unrealized_plpc else 0.0,
+                    "market_value": float(ap.market_value) if ap.market_value else 0.0,
+                    "cost_basis": float(ap.cost_basis) if ap.cost_basis else 0.0,
+                }
+        except Exception as e:
+            self.logger.warning(f"Failed to get Alpaca positions: {e}")
+            alpaca_map = {}
         
         for position in self.current_positions:
-            # Check if stop-loss or take-profit triggered
-            # (This would query current market prices)
-            
-            # Mock: Close 5% of positions randomly
-            import random
-            if random.random() < 0.05:
-                positions_to_close.append(position)
+            try:
+                symbol = None
+                if isinstance(position, dict):
+                    signal = position.get("signal")
+                    symbol = getattr(signal, "symbol", None) or position.get("symbol")
+                    execution = position.get("execution")
+                    entry_credit = position.get("entry_credit", 0)
+                    max_loss = position.get("max_loss", 0)
+                elif hasattr(position, "symbol"):
+                    symbol = position.symbol
+                    entry_credit = getattr(position, "entry_credit", 0)
+                    max_loss = getattr(position, "max_loss", 0)
+                
+                if not symbol:
+                    continue
+                
+                # Check against Alpaca data
+                unrealized_pnl = 0.0
+                unrealized_pnl_pct = 0.0
+                
+                # Look for matching option positions
+                for occ_sym, data in alpaca_map.items():
+                    if symbol.upper() in occ_sym.upper():
+                        unrealized_pnl += data["unrealized_pl"]
+                
+                # Calculate P&L percentage
+                if max_loss > 0:
+                    unrealized_pnl_pct = unrealized_pnl / max_loss
+                elif entry_credit > 0:
+                    unrealized_pnl_pct = unrealized_pnl / (entry_credit * 100)
+                
+                close_reason = None
+                
+                # Stop-loss check: loss exceeds threshold
+                if unrealized_pnl < 0 and abs(unrealized_pnl_pct) > stop_loss:
+                    close_reason = "STOP_LOSS"
+                    self.logger.warning(
+                        f"STOP LOSS triggered for {symbol}: "
+                        f"P&L: ${unrealized_pnl:+,.2f} ({unrealized_pnl_pct:+.1%})"
+                    )
+                
+                # Take-profit check: profit exceeds target
+                elif unrealized_pnl > 0 and unrealized_pnl_pct > target_profit:
+                    close_reason = "TAKE_PROFIT"
+                    self.logger.info(
+                        f"PROFIT TARGET hit for {symbol}: "
+                        f"P&L: ${unrealized_pnl:+,.2f} ({unrealized_pnl_pct:+.1%})"
+                    )
+                
+                if close_reason:
+                    positions_to_close.append((position, close_reason, unrealized_pnl))
+                else:
+                    self.logger.info(
+                        f"  Position {symbol}: P&L ${unrealized_pnl:+,.2f} ({unrealized_pnl_pct:+.1%})"
+                    )
+            except Exception as e:
+                self.logger.warning(f"Error checking position: {e}")
         
-        # Close positions
-        for position in positions_to_close:
-            self.logger.info(f"Closing position: {position['signal'].symbol}")
+        # Close triggered positions
+        for position, reason, pnl in positions_to_close:
+            symbol = None
+            if isinstance(position, dict):
+                signal = position.get("signal")
+                symbol = getattr(signal, "symbol", None) or position.get("symbol")
+            elif hasattr(position, "symbol"):
+                symbol = position.symbol
+            
+            self.logger.info(f"Closing position: {symbol} ({reason}) P&L=${pnl:+,.2f}")
             self.current_positions.remove(position)
             self.stats["positions_closed"] += 1
+            self.stats["total_pnl"] += pnl
     
     async def _check_risk_limits(self) -> bool:
         """Step 6: Verify portfolio risk within limits."""

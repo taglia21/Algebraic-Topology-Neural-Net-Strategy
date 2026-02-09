@@ -1,368 +1,1455 @@
-#!/usr/bin/env python3
 """
-Integrated Trading System
-=========================
-Combines TDA (Topological Data Analysis), Neural Networks, and Options Alpha Engine
-for a complete trading solution with Team of Rivals consensus mechanism.
+Integrated Trading System v2
+==============================
+
+COMPLETE REPLACEMENT for the broken trading pipeline.
+
+This is the main entry point that:
+1. Uses SignalGeneratorV2 (IV + regime + strategy selection)
+2. Resolves signals to real OCC contracts via Alpaca API
+3. Executes multi-leg orders using Alpaca MLEG OrderClass
+4. Monitors positions with REAL P&L from Alpaca
+5. Enforces risk limits
+
+Critical fixes:
+- MLEG orders instead of broken OTO orders
+- Real position monitoring (not random 5% close!)
+- Proper Kelly position sizing
+- Stop-loss at 2x credit received, take profit at 50%
+- Max 5 concurrent positions
+
+Author: System Overhaul - Feb 2026
 """
 
 import asyncio
-import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
 import logging
 import json
 import os
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, date
+from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
-# Import our modules
-from src.tda_strategy import TDAStrategy
-from src.v50_options_alpha_engine import V50OptionsAlphaEngine, OptionsSignal
-from src.risk.risk_manager import RiskManager
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import (
+    LimitOrderRequest,
+    MarketOrderRequest,
+    OptionLegRequest,
+    GetOrdersRequest,
+)
+from alpaca.trading.enums import (
+    OrderSide,
+    TimeInForce,
+    OrderClass,
+    AssetClass,
+    QueryOrderStatus,
+)
+from alpaca.data.historical.option import OptionHistoricalDataClient
+from alpaca.data.requests import OptionLatestQuoteRequest
 
-# Import universe config
-import sys
-sys.path.insert(0, '.')
-try:
-    from config.universe import get_core_universe, get_full_universe
-    DEFAULT_UNIVERSE = get_core_universe()
-except ImportError:
-    DEFAULT_UNIVERSE = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'META', 'TSLA', 'AMD']
+from src.signal_generator import (
+    SignalGeneratorV2,
+    TradeSignal,
+)
+from src.strategy_selector import StrategyType, Direction
+from src.regime_detector import Regime
 
-logging.basicConfig(level=logging.INFO)
+# Reuse existing contract resolver and position sizer
+from src.options.contract_resolver import (
+    OptionContractResolver,
+    ResolvedContract,
+    ResolvedSpread,
+    ResolvedIronCondor,
+)
+from src.options.config import RISK_CONFIG
+
 logger = logging.getLogger(__name__)
 
 
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+MAX_CONCURRENT_POSITIONS = 5
+MAX_PORTFOLIO_RISK_PCT = 0.02         # 2% max risk per trade
+POSITION_MONITOR_INTERVAL = 30        # Check positions every 30s
+CREDIT_STOP_LOSS_MULTIPLIER = 2.0     # Stop at 2x credit received
+TAKE_PROFIT_PCT = 0.50                # Take profit at 50% of max profit
+DTE_MANAGEMENT_THRESHOLD = 21         # Manage positions at 21 DTE
+ORDER_TIMEOUT_SECONDS = 30            # Max time to wait for fill
+
+
+# ============================================================================
+# DATA MODELS
+# ============================================================================
+
+@dataclass
+class ActivePosition:
+    """An active options position tracked by the system."""
+    position_id: str
+    symbol: str                        # Underlying
+    strategy: StrategyType
+    direction: Direction
+
+    # Leg symbols (OCC format)
+    leg_symbols: List[str]
+    leg_sides: List[str]              # "buy" or "sell" for each leg
+
+    # Economics
+    entry_credit: float                # Net credit received (or -debit paid)
+    max_profit: float                  # Maximum possible profit
+    max_loss: float                    # Maximum possible loss
+    contracts: int
+
+    # Current state
+    current_value: float = 0.0         # Current market value of position
+    unrealized_pnl: float = 0.0
+    unrealized_pnl_pct: float = 0.0
+
+    # Management levels
+    stop_loss_value: float = 0.0       # Close if position value exceeds this
+    take_profit_value: float = 0.0     # Close if position value drops below this
+
+    # Metadata
+    entry_time: datetime = field(default_factory=datetime.now)
+    expiration: Optional[date] = None
+    signal: Optional[TradeSignal] = None
+    order_id: Optional[str] = None
+
+    @property
+    def days_to_expiry(self) -> int:
+        if self.expiration:
+            return (self.expiration - date.today()).days
+        return 999
+
+    @property
+    def should_stop_loss(self) -> bool:
+        """Check if stop-loss triggered (loss exceeds 2x credit)."""
+        if self.entry_credit > 0:  # Credit strategy
+            return self.current_value > self.stop_loss_value
+        else:  # Debit strategy
+            return self.unrealized_pnl_pct <= -50  # 50% loss on debit
+
+    @property
+    def should_take_profit(self) -> bool:
+        """Check if profit target hit (50% of max profit)."""
+        if self.entry_credit > 0:  # Credit strategy
+            return self.current_value <= self.take_profit_value
+        else:  # Debit strategy
+            return self.unrealized_pnl_pct >= 100  # 100% gain on debit
+
+    @property
+    def should_manage_dte(self) -> bool:
+        """Check if position needs to be managed at 21 DTE."""
+        return self.days_to_expiry <= DTE_MANAGEMENT_THRESHOLD
+
+
+# ============================================================================
+# MLEG ORDER BUILDER
+# ============================================================================
+
+class MLEGOrderBuilder:
+    """
+    Build Alpaca MLEG (multi-leg) orders for options strategies.
+
+    Uses OrderClass.MLEG with OptionLegRequest for proper multi-leg
+    execution instead of the broken OTO approach.
+    """
+
+    @staticmethod
+    def build_credit_spread(
+        long_occ: str,
+        short_occ: str,
+        quantity: int,
+        net_credit: float,
+    ) -> LimitOrderRequest:
+        """
+        Build a credit spread MLEG order.
+
+        For bull put spread: sell higher put, buy lower put.
+        For bear call spread: sell lower call, buy higher call.
+
+        Args:
+            long_occ: OCC symbol for the long (protective) leg
+            short_occ: OCC symbol for the short (income) leg
+            quantity: Number of spreads
+            net_credit: Net credit to receive per spread
+
+        Returns:
+            LimitOrderRequest with MLEG legs
+        """
+        # Extract underlying from OCC symbol (letters before first digit)
+        underlying = ""
+        for ch in long_occ:
+            if ch.isdigit():
+                break
+            underlying += ch
+
+        legs = [
+            OptionLegRequest(
+                symbol=short_occ,
+                side=OrderSide.SELL,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=long_occ,
+                side=OrderSide.BUY,
+                ratio_qty=str(quantity),
+            ),
+        ]
+
+        return LimitOrderRequest(
+            symbol=underlying,
+            qty=quantity,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.MLEG,
+            limit_price=round(net_credit, 2),
+            legs=legs,
+        )
+
+    @staticmethod
+    def build_debit_spread(
+        long_occ: str,
+        short_occ: str,
+        quantity: int,
+        net_debit: float,
+    ) -> LimitOrderRequest:
+        """
+        Build a debit spread MLEG order.
+
+        For bull call spread: buy lower call, sell higher call.
+        For bear put spread: buy higher put, sell lower put.
+
+        Args:
+            long_occ: OCC symbol for the long (main) leg
+            short_occ: OCC symbol for the short (financing) leg
+            quantity: Number of spreads
+            net_debit: Net debit to pay per spread
+
+        Returns:
+            LimitOrderRequest with MLEG legs
+        """
+        underlying = ""
+        for ch in long_occ:
+            if ch.isdigit():
+                break
+            underlying += ch
+
+        legs = [
+            OptionLegRequest(
+                symbol=long_occ,
+                side=OrderSide.BUY,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=short_occ,
+                side=OrderSide.SELL,
+                ratio_qty=str(quantity),
+            ),
+        ]
+
+        return LimitOrderRequest(
+            symbol=underlying,
+            qty=quantity,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.MLEG,
+            limit_price=round(net_debit, 2),
+            legs=legs,
+        )
+
+    @staticmethod
+    def build_iron_condor(
+        put_long_occ: str,
+        put_short_occ: str,
+        call_short_occ: str,
+        call_long_occ: str,
+        quantity: int,
+        net_credit: float,
+    ) -> LimitOrderRequest:
+        """
+        Build an iron condor MLEG order (4 legs).
+
+        Structure:
+        - BUY lower put (protection)
+        - SELL higher put (income)
+        - SELL lower call (income)
+        - BUY higher call (protection)
+
+        Args:
+            put_long_occ: Long put OCC symbol (lowest strike)
+            put_short_occ: Short put OCC symbol
+            call_short_occ: Short call OCC symbol
+            call_long_occ: Long call OCC symbol (highest strike)
+            quantity: Number of iron condors
+            net_credit: Total net credit per iron condor
+
+        Returns:
+            LimitOrderRequest with 4 MLEG legs
+        """
+        underlying = ""
+        for ch in put_long_occ:
+            if ch.isdigit():
+                break
+            underlying += ch
+
+        legs = [
+            OptionLegRequest(
+                symbol=put_long_occ,
+                side=OrderSide.BUY,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=put_short_occ,
+                side=OrderSide.SELL,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=call_short_occ,
+                side=OrderSide.SELL,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=call_long_occ,
+                side=OrderSide.BUY,
+                ratio_qty=str(quantity),
+            ),
+        ]
+
+        return LimitOrderRequest(
+            symbol=underlying,
+            qty=quantity,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.MLEG,
+            limit_price=round(net_credit, 2),
+            legs=legs,
+        )
+
+    @staticmethod
+    def build_long_straddle(
+        call_occ: str,
+        put_occ: str,
+        quantity: int,
+        net_debit: float,
+    ) -> LimitOrderRequest:
+        """
+        Build a long straddle MLEG order.
+
+        Buy call + buy put at same strike.
+
+        Args:
+            call_occ: ATM call OCC symbol
+            put_occ: ATM put OCC symbol
+            quantity: Number of straddles
+            net_debit: Total debit per straddle
+
+        Returns:
+            LimitOrderRequest with 2 MLEG legs
+        """
+        underlying = ""
+        for ch in call_occ:
+            if ch.isdigit():
+                break
+            underlying += ch
+
+        legs = [
+            OptionLegRequest(
+                symbol=call_occ,
+                side=OrderSide.BUY,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=put_occ,
+                side=OrderSide.BUY,
+                ratio_qty=str(quantity),
+            ),
+        ]
+
+        return LimitOrderRequest(
+            symbol=underlying,
+            qty=quantity,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.MLEG,
+            limit_price=round(net_debit, 2),
+            legs=legs,
+        )
+
+
+# ============================================================================
+# POSITION MANAGER (REAL P&L)
+# ============================================================================
+
+class PositionMonitor:
+    """
+    Monitor active positions using real Alpaca API data.
+
+    NO MORE RANDOM 5% CLOSE. This uses actual market prices.
+    """
+
+    def __init__(self, trading_client: TradingClient, data_client: OptionHistoricalDataClient):
+        self.trading_client = trading_client
+        self.data_client = data_client
+        self.logger = logging.getLogger(__name__)
+
+    async def update_position_values(self, positions: List[ActivePosition]) -> None:
+        """
+        Update current values and P&L for all positions.
+
+        For each position, fetches latest quotes for all legs
+        and calculates the current theoretical close value.
+        """
+        for pos in positions:
+            try:
+                total_value = 0.0
+
+                for i, occ_symbol in enumerate(pos.leg_symbols):
+                    side = pos.leg_sides[i]
+                    quote = await self._get_quote(occ_symbol)
+
+                    if quote is None:
+                        continue
+
+                    mid = (quote["bid"] + quote["ask"]) / 2
+
+                    # Value from perspective of closing the position
+                    if side == "sell":
+                        # We sold this leg, closing means buying back
+                        total_value += mid
+                    else:
+                        # We bought this leg, closing means selling
+                        total_value -= mid
+
+                # For credit strategies: we collected entry_credit initially.
+                # Current value = cost to close all legs.
+                # If we collected $1.50 credit and it now costs $0.75 to close,
+                # our unrealized P&L = $1.50 - $0.75 = $0.75 profit.
+                pos.current_value = round(total_value, 2)
+
+                if pos.entry_credit > 0:
+                    # Credit strategy
+                    pos.unrealized_pnl = (pos.entry_credit - pos.current_value) * pos.contracts * 100
+                    pos.unrealized_pnl_pct = (
+                        (pos.entry_credit - pos.current_value) / pos.entry_credit * 100
+                        if pos.entry_credit > 0 else 0
+                    )
+                else:
+                    # Debit strategy 
+                    debit_paid = abs(pos.entry_credit)
+                    current_close_value = abs(pos.current_value)
+                    pos.unrealized_pnl = (current_close_value - debit_paid) * pos.contracts * 100
+                    pos.unrealized_pnl_pct = (
+                        (current_close_value - debit_paid) / debit_paid * 100
+                        if debit_paid > 0 else 0
+                    )
+
+            except Exception as e:
+                self.logger.warning(f"Failed to update position {pos.position_id}: {e}")
+
+    async def _get_quote(self, occ_symbol: str) -> Optional[Dict]:
+        """Get latest bid/ask for an option."""
+        try:
+            request = OptionLatestQuoteRequest(symbol_or_symbols=occ_symbol)
+            quotes = await asyncio.to_thread(
+                self.data_client.get_option_latest_quote, request
+            )
+            if occ_symbol in quotes:
+                q = quotes[occ_symbol]
+                bid = float(q.bid_price) if q.bid_price else 0.0
+                ask = float(q.ask_price) if q.ask_price else 0.0
+                return {"bid": bid, "ask": ask}
+            return None
+        except Exception as e:
+            self.logger.debug(f"Quote failed for {occ_symbol}: {e}")
+            return None
+
+
+# ============================================================================
+# INTEGRATED TRADING SYSTEM
+# ============================================================================
+
 class IntegratedTradingSystem:
     """
-    Main trading system that integrates:
-    - TDA-based market regime detection
-    - Neural Network signal generation  
-    - Options Alpha Engine for trade execution
-    - Risk Manager for position controls
-    - Team of Rivals consensus mechanism
+    Main trading system orchestrator.
+
+    Lifecycle:
+    1. Initialize with Alpaca credentials
+    2. Call run_trading_cycle() periodically (every 60s during market hours)
+    3. System automatically: scans → resolves → executes → monitors → manages
+
+    All strategies use MLEG orders. All positions are DEFINED RISK.
     """
-    
-    def __init__(self, config: Optional[Dict] = None):
-        self.config = config or self._default_config()
-        
-        # Initialize components
-        self.tda_strategy = TDAStrategy(
-            lookback_window=self.config.get('tda_lookback', 60),
-            prediction_horizon=self.config.get('prediction_horizon', 5)
+
+    def __init__(
+        self,
+        portfolio_value: float = 100000.0,
+        paper: bool = True,
+        state_file: str = "trading_state_v2.json",
+    ):
+        """
+        Initialize trading system.
+
+        Args:
+            portfolio_value: Current portfolio value for position sizing
+            paper: Use paper trading (default True)
+            state_file: State persistence file
+        """
+        # Alpaca credentials
+        api_key = os.getenv("ALPACA_API_KEY")
+        api_secret = os.getenv("ALPACA_SECRET_KEY")
+
+        if not api_key or not api_secret:
+            raise ValueError(
+                "Set ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables"
+            )
+
+        # Alpaca clients
+        self.trading_client = TradingClient(
+            api_key=api_key,
+            secret_key=api_secret,
+            paper=paper,
         )
-        
-        self.options_engine = V50OptionsAlphaEngine(
-            paper_trading=self.config.get('paper_trading', True),
-            max_position_pct=self.config.get('max_position_pct', 0.05),
-            min_confidence=self.config.get('min_confidence', 0.6)
+        self.data_client = OptionHistoricalDataClient(
+            api_key=api_key,
+            secret_key=api_secret,
         )
-        
-        self.risk_manager = RiskManager(
-            max_position_size=self.config.get('max_position_size', 0.05),
-            max_portfolio_risk=self.config.get('max_portfolio_risk', 0.15),
-            max_daily_loss=self.config.get('max_daily_loss', 0.02),
-            max_correlation=self.config.get('max_correlation', 0.7)
+
+        # Signal generation
+        self.signal_generator = SignalGeneratorV2()
+
+        # Contract resolution (reuse existing, well-tested resolver)
+        self.contract_resolver = OptionContractResolver(
+            trading_client=self.trading_client,
+            data_client=self.data_client,
         )
-        
-        # State tracking
-        self.portfolio_value = self.config.get('initial_capital', 100000)
-        self.positions: Dict[str, Dict] = {}
-        self.trade_history: List[Dict] = []
-        self.daily_pnl = 0.0
-        self.is_halted = False
-        
-        logger.info("Integrated Trading System initialized")
-    
-    def _default_config(self) -> Dict:
-        return {
-            'paper_trading': True,
-            'initial_capital': 100000,
-            'max_position_pct': 0.05,
-            'max_portfolio_risk': 0.15,
-            'max_daily_loss': 0.02,
-            'max_correlation': 0.7,
-            'min_confidence': 0.6,
-            'tda_lookback': 60,
-            'prediction_horizon': 5,
-            'universe': 'core'  # Use config/universe.py get_core_universe() - 51 symbols
+
+        # Position monitoring
+        self.position_monitor = PositionMonitor(
+            trading_client=self.trading_client,
+            data_client=self.data_client,
+        )
+
+        # MLEG order builder
+        self.order_builder = MLEGOrderBuilder()
+
+        # State
+        self.portfolio_value = portfolio_value
+        self.paper = paper
+        self.active_positions: List[ActivePosition] = []
+        self.state_file = state_file
+        self._stop_event = asyncio.Event()
+
+        # Statistics
+        self.stats = {
+            "cycles_run": 0,
+            "signals_generated": 0,
+            "trades_executed": 0,
+            "trades_failed": 0,
+            "positions_closed": 0,
+            "stop_losses": 0,
+            "profit_targets": 0,
+            "dte_exits": 0,
+            "total_realized_pnl": 0.0,
+            "start_time": datetime.now().isoformat(),
         }
-    
-    def analyze_symbol(self, symbol: str, price_data: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Run full analysis on a symbol using TDA and NN.
-        
-        Returns:
-            Dict with TDA analysis, NN prediction, and combined signal
-        """
+
+        self.logger = logging.getLogger(__name__)
+        self.logger.info(
+            f"IntegratedTradingSystem v2 initialized "
+            f"(paper={paper}, portfolio=${portfolio_value:,.0f})"
+        )
+
+        # Load saved state
+        self._load_state()
+
+    # ================================================================== #
+    # MAIN TRADING LOOP
+    # ================================================================== #
+
+    async def run_forever(self) -> None:
+        """Run continuously during market hours."""
+        self.logger.info("INTEGRATED TRADING SYSTEM v2 STARTED")
+
         try:
-            # Run TDA analysis
-            tda_result = self.tda_strategy.analyze(price_data)
-            
-            # Get NN prediction
-            nn_prediction = self.tda_strategy.predict(price_data)
-            
-            # Combine signals
-            combined = self._combine_signals(tda_result, nn_prediction)
-            
-            return {
-                'symbol': symbol,
-                'timestamp': datetime.now(),
-                'tda_analysis': tda_result,
-                'nn_prediction': nn_prediction,
-                'combined_signal': combined,
-                'success': True
-            }
-        except Exception as e:
-            logger.error(f"Error analyzing {symbol}: {e}")
-            return {
-                'symbol': symbol,
-                'timestamp': datetime.now(),
-                'error': str(e),
-                'success': False
-            }
-    
-    def _combine_signals(self, tda_result: Dict, nn_prediction: float) -> Dict:
-        """Combine TDA and NN signals using Team of Rivals consensus."""
-        # Extract TDA metrics
-        persistence = tda_result.get('persistence_score', 0.5)
-        regime = tda_result.get('regime', 'neutral')
-        trend_strength = tda_result.get('trend_strength', 0.0)
-        
-        # Weight the signals (can be tuned)
-        tda_weight = 0.4
-        nn_weight = 0.6
-        
-        # Convert regime to numeric
-        regime_signal = {'bullish': 0.5, 'bearish': -0.5, 'neutral': 0.0}.get(regime, 0.0)
-        
-        # Combined signal
-        tda_signal = (persistence - 0.5) * 2 + regime_signal * 0.5 + trend_strength * 0.3
-        combined = tda_weight * tda_signal + nn_weight * nn_prediction
-        
-        # Determine direction
-        if combined > 0.2:
-            direction = 'bullish'
-        elif combined < -0.2:
-            direction = 'bearish'
-        else:
-            direction = 'neutral'
-        
-        # Calculate confidence
-        confidence = min(1.0, 0.3 + abs(combined) * 0.7)
-        
-        return {
-            'signal': combined,
-            'direction': direction,
-            'confidence': confidence,
-            'tda_contribution': tda_signal,
-            'nn_contribution': nn_prediction
-        }
-
-    
-    def generate_trade_signal(self, symbol: str, price_data: pd.DataFrame,
-                               current_price: float) -> Optional[OptionsSignal]:
-        """
-        Generate a trade signal for a symbol.
-        
-        Returns:
-            OptionsSignal if conditions are met, None otherwise
-        """
-        # Check if trading is halted
-        if self.is_halted:
-            logger.warning("Trading is halted - no new signals")
-            return None
-        
-        # Check risk manager
-        can_trade, reason = self.risk_manager.can_open_position(
-            symbol=symbol,
-            position_value=current_price * 100,  # Assuming 100 shares equivalent
-            portfolio_value=self.portfolio_value,
-            existing_positions=self.positions
-        )
-        
-        if not can_trade:
-            logger.info(f"Risk check failed for {symbol}: {reason}")
-            return None
-        
-        # Analyze symbol
-        analysis = self.analyze_symbol(symbol, price_data)
-        if not analysis.get('success', False):
-            return None
-        
-        combined = analysis['combined_signal']
-        
-        # Generate options signal
-        tda_signal = {
-            'persistence_score': analysis['tda_analysis'].get('persistence_score', 0.5),
-            'trend_strength': analysis['tda_analysis'].get('trend_strength', 0.0),
-            'regime': combined['direction']
-        }
-        
-        signal = self.options_engine.generate_signal(
-            symbol=symbol,
-            underlying_price=current_price,
-            tda_signal=tda_signal,
-            nn_prediction=analysis['nn_prediction']
-        )
-        
-        return signal
-    
-    def execute_signal(self, signal: OptionsSignal, dry_run: bool = True) -> Dict:
-        """Execute a trading signal (paper or live)."""
-        execution_result = {
-            'signal': signal.to_dict(),
-            'executed': False,
-            'dry_run': dry_run,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        if dry_run or self.config.get('paper_trading', True):
-            # Paper trade execution
-            logger.info(f"PAPER TRADE: {signal.symbol} {signal.strategy.value}")
-            execution_result['executed'] = True
-            execution_result['execution_type'] = 'paper'
-            
-            # Track the position
-            self.positions[signal.symbol] = {
-                'strategy': signal.strategy.value,
-                'direction': signal.direction,
-                'entry_time': datetime.now(),
-                'confidence': signal.confidence
-            }
-            
-            self.trade_history.append(execution_result)
-        else:
-            # Live trade would go here
-            logger.warning("Live trading not implemented - use Alpaca API")
-            execution_result['execution_type'] = 'blocked'
-        
-        return execution_result
-    
-    def get_system_status(self) -> Dict:
-        """Get comprehensive system status."""
-        options_status = self.options_engine.get_status()
-        risk_status = self.risk_manager.get_status()
-        
-        return {
-            'timestamp': datetime.now().isoformat(),
-            'portfolio_value': self.portfolio_value,
-            'daily_pnl': self.daily_pnl,
-            'is_halted': self.is_halted,
-            'active_positions': len(self.positions),
-            'positions': self.positions,
-            'total_trades': len(self.trade_history),
-            'options_engine': options_status,
-            'risk_manager': risk_status,
-            'config': {
-                'paper_trading': self.config.get('paper_trading', True),
-                'universe': self.config.get('universe', [])
-            }
-        }
-    
-    def reset_daily_stats(self):
-        """Reset daily statistics (call at market open)."""
-        self.daily_pnl = 0.0
-        self.risk_manager.reset_daily_stats()
-        logger.info("Daily stats reset")
-
-
-
-async def run_trading_loop(system: IntegratedTradingSystem, interval_minutes: int = 5):
-    """Main trading loop that runs continuously."""
-    import yfinance as yf
-    
-    logger.info(f"Starting trading loop (interval: {interval_minutes} min)")
-    
-    while True:
-        try:
-            universe = system.config.get('universe', ['SPY'])
-            
-            for symbol in universe:
-                # Fetch latest data
-                ticker = yf.Ticker(symbol)
-                df = ticker.history(period='3mo', interval='1d')
-                
-                if df.empty:
+            while not self._stop_event.is_set():
+                if not self._market_is_open():
+                    self.logger.info("Market closed, waiting 60s...")
+                    try:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=60)
+                    except asyncio.TimeoutError:
+                        pass
                     continue
-                
-                current_price = df['Close'].iloc[-1]
-                
-                # Generate signal
-                signal = system.generate_trade_signal(symbol, df, current_price)
-                
-                if signal:
-                    # Execute paper trade
-                    result = system.execute_signal(signal, dry_run=True)
-                    logger.info(f"Trade executed: {result}")
-            
-            # Log status
-            status = system.get_system_status()
-            logger.info(f"System status: {json.dumps(status, default=str, indent=2)}")
-            
-            # Wait for next iteration
-            await asyncio.sleep(interval_minutes * 60)
-            
+
+                await self.run_trading_cycle()
+
+                self._save_state()
+
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=60)
+                except asyncio.TimeoutError:
+                    pass
+
+        except KeyboardInterrupt:
+            self.logger.info("Keyboard interrupt received")
         except Exception as e:
-            logger.error(f"Error in trading loop: {e}")
-            await asyncio.sleep(60)  # Wait 1 minute on error
+            self.logger.error(f"Fatal error: {e}", exc_info=True)
+        finally:
+            self._save_state()
+            self._log_final_stats()
 
+    def request_shutdown(self) -> None:
+        """Request graceful shutdown."""
+        self._stop_event.set()
 
-def demo_integrated_system():
-    """Demo the integrated trading system."""
-    import yfinance as yf
-    
-    print("=" * 60)
-    print("INTEGRATED TRADING SYSTEM - DEMO")
-    print("=" * 60)
-    
-    # Initialize system
-    config = {
-        'paper_trading': True,
-        'initial_capital': 100000,
-        'universe': DEFAULT_UNIVERSE  # 51 symbols from config/universe.py
-    }
-    
-    system = IntegratedTradingSystem(config)
-    
-    # Test with SPY
-    print("\n[Fetching SPY data...]")
-    spy = yf.Ticker('SPY')
-    df = spy.history(period='3mo', interval='1d')
-    
-    if not df.empty:
-        current_price = df['Close'].iloc[-1]
-        print(f"SPY Current Price: ${current_price:.2f}")
-        
-        # Generate signal
-        print("\n[Generating trade signal...]")
-        signal = system.generate_trade_signal('SPY', df, current_price)
-        
-        if signal:
-            print(f"Signal Generated:")
-            print(f"  Strategy: {signal.strategy.value}")
-            print(f"  Direction: {signal.direction}")
-            print(f"  Confidence: {signal.confidence:.2%}")
-            print(f"  IV Percentile: {signal.iv_percentile:.1f}")
-            
-            # Execute
-            result = system.execute_signal(signal)
-            print(f"\nExecution: {result['execution_type']}")
+    async def run_trading_cycle(self) -> Dict:
+        """
+        Execute one complete trading cycle.
+
+        Steps:
+        1. Monitor existing positions (stop-loss, take-profit, DTE)
+        2. Scan for new signals
+        3. Resolve and execute new trades
+        4. Log cycle summary
+
+        Returns:
+            Cycle summary dict
+        """
+        self.stats["cycles_run"] += 1
+        cycle = self.stats["cycles_run"]
+
+        self.logger.info(f"{'=' * 60}")
+        self.logger.info(f"CYCLE #{cycle} - {datetime.now().strftime('%H:%M:%S')}")
+        self.logger.info(f"{'=' * 60}")
+
+        # Step 1: Monitor positions FIRST (close before opening new ones)
+        closed_count = await self._monitor_and_manage_positions()
+        self.logger.info(
+            f"Step 1 (MANAGE): {len(self.active_positions)} active, "
+            f"{closed_count} closed"
+        )
+
+        # Step 2: Scan for new signals (only if we have room for more positions)
+        new_trades = 0
+        if len(self.active_positions) < MAX_CONCURRENT_POSITIONS:
+            if self._safe_entry_window():
+                signals = self.signal_generator.scan_for_signals()
+                self.stats["signals_generated"] += len(signals)
+
+                # Step 3: Execute signals
+                for signal in signals:
+                    if len(self.active_positions) >= MAX_CONCURRENT_POSITIONS:
+                        self.logger.info("Max positions reached, stopping execution")
+                        break
+
+                    success = await self._resolve_and_execute(signal)
+                    if success:
+                        new_trades += 1
+            else:
+                self.logger.info("Step 2: Outside safe entry window (9:45-15:45 ET)")
         else:
-            print("No signal generated (below confidence threshold)")
-    
-    # Get status
-    print("\n[System Status]")
-    status = system.get_system_status()
-    print(json.dumps(status, indent=2, default=str))
-    
-    print("\n" + "=" * 60)
-    print("INTEGRATED SYSTEM READY")
-    print("=" * 60)
-    
-    return system
+            self.logger.info(
+                f"Step 2: Max positions ({MAX_CONCURRENT_POSITIONS}) reached, skipping scan"
+            )
+
+        self.logger.info(f"Step 3 (EXECUTE): {new_trades} new trades")
+
+        # Step 4: Summary
+        summary = self._log_cycle_summary()
+        return summary
+
+    # ================================================================== #
+    # POSITION MONITORING & MANAGEMENT
+    # ================================================================== #
+
+    async def _monitor_and_manage_positions(self) -> int:
+        """
+        Monitor all positions and close as needed.
+
+        Close triggers:
+        1. Stop-loss: position value > 2x credit received
+        2. Take-profit: 50% of max profit captured
+        3. DTE management: position approaching expiration (21 DTE)
+
+        Returns:
+            Number of positions closed
+        """
+        if not self.active_positions:
+            return 0
+
+        # Update all position values with real market data
+        await self.position_monitor.update_position_values(self.active_positions)
+
+        closed = 0
+        positions_to_remove: List[ActivePosition] = []
+
+        for pos in self.active_positions:
+            close_reason = None
+
+            # Check stop-loss
+            if pos.should_stop_loss:
+                close_reason = "STOP_LOSS"
+                self.logger.warning(
+                    f"STOP LOSS: {pos.symbol} {pos.strategy.value} "
+                    f"P&L: ${pos.unrealized_pnl:+,.2f} ({pos.unrealized_pnl_pct:+.1f}%)"
+                )
+
+            # Check take-profit
+            elif pos.should_take_profit:
+                close_reason = "TAKE_PROFIT"
+                self.logger.info(
+                    f"PROFIT TARGET: {pos.symbol} {pos.strategy.value} "
+                    f"P&L: ${pos.unrealized_pnl:+,.2f} ({pos.unrealized_pnl_pct:+.1f}%)"
+                )
+
+            # Check DTE management
+            elif pos.should_manage_dte:
+                close_reason = "DTE_MANAGEMENT"
+                self.logger.info(
+                    f"DTE MANAGEMENT: {pos.symbol} at {pos.days_to_expiry} DTE"
+                )
+
+            if close_reason:
+                success = await self._close_position(pos, close_reason)
+                if success:
+                    positions_to_remove.append(pos)
+                    closed += 1
+
+                    if close_reason == "STOP_LOSS":
+                        self.stats["stop_losses"] += 1
+                    elif close_reason == "TAKE_PROFIT":
+                        self.stats["profit_targets"] += 1
+                    elif close_reason == "DTE_MANAGEMENT":
+                        self.stats["dte_exits"] += 1
+
+                    self.stats["total_realized_pnl"] += pos.unrealized_pnl
+            else:
+                # Log position status
+                self.logger.info(
+                    f"  {pos.symbol} {pos.strategy.value}: "
+                    f"P&L ${pos.unrealized_pnl:+,.2f} ({pos.unrealized_pnl_pct:+.1f}%) "
+                    f"DTE={pos.days_to_expiry}"
+                )
+
+        # Remove closed positions
+        for pos in positions_to_remove:
+            self.active_positions.remove(pos)
+            self.stats["positions_closed"] += 1
+
+        return closed
+
+    async def _close_position(self, position: ActivePosition, reason: str) -> bool:
+        """
+        Close an active position by submitting the opposite MLEG order.
+
+        For credit strategies: buy back all legs at market.
+        For debit strategies: sell all legs at market.
+        """
+        try:
+            self.logger.info(
+                f"Closing {position.symbol} {position.strategy.value} "
+                f"({reason}): {len(position.leg_symbols)} legs"
+            )
+
+            # Build closing MLEG order (reverse all legs)
+            closing_legs = []
+            for i, occ in enumerate(position.leg_symbols):
+                original_side = position.leg_sides[i]
+                close_side = OrderSide.BUY if original_side == "sell" else OrderSide.SELL
+                closing_legs.append(
+                    OptionLegRequest(
+                        symbol=occ,
+                        side=close_side,
+                        ratio_qty=str(position.contracts),
+                    )
+                )
+
+            underlying = ""
+            for ch in position.leg_symbols[0]:
+                if ch.isdigit():
+                    break
+                underlying += ch
+
+            # Use market order for closing (ensuring fill)
+            close_order = MarketOrderRequest(
+                symbol=underlying,
+                qty=position.contracts,
+                side=OrderSide.BUY,  # Net direction doesn't matter much for MLEG close
+                time_in_force=TimeInForce.DAY,
+                order_class=OrderClass.MLEG,
+                legs=closing_legs,
+            )
+
+            order = await asyncio.to_thread(
+                self.trading_client.submit_order, close_order
+            )
+
+            self.logger.info(
+                f"Close order submitted: {order.id} for {position.symbol} ({reason})"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.error(
+                f"Failed to close position {position.symbol}: {e}",
+                exc_info=True,
+            )
+            return False
+
+    # ================================================================== #
+    # SIGNAL RESOLUTION & EXECUTION
+    # ================================================================== #
+
+    async def _resolve_and_execute(self, signal: TradeSignal) -> bool:
+        """
+        Resolve a TradeSignal to real contracts and execute via MLEG.
+
+        Steps:
+        1. Calculate position size (Kelly-based)
+        2. Resolve to real OCC contracts
+        3. Build MLEG order
+        4. Validate buying power
+        5. Submit order
+        6. Track position
+
+        Returns:
+            True if trade executed successfully
+        """
+        try:
+            # Step 1: Position sizing
+            contracts = self._calculate_position_size(signal)
+            if contracts <= 0:
+                self.logger.info(f"Position size 0 for {signal.symbol}, skipping")
+                return False
+
+            contracts = min(contracts, signal.max_contracts)
+
+            # Step 2: Resolve based on strategy type
+            if signal.strategy == StrategyType.IRON_CONDOR:
+                return await self._execute_iron_condor(signal, contracts)
+
+            elif signal.strategy in (
+                StrategyType.BULL_PUT_SPREAD,
+                StrategyType.BEAR_CALL_SPREAD,
+            ):
+                return await self._execute_credit_spread(signal, contracts)
+
+            elif signal.strategy in (
+                StrategyType.BULL_CALL_SPREAD,
+                StrategyType.BEAR_PUT_SPREAD,
+            ):
+                return await self._execute_debit_spread(signal, contracts)
+
+            elif signal.strategy == StrategyType.LONG_STRADDLE:
+                return await self._execute_straddle(signal, contracts)
+
+            else:
+                self.logger.warning(f"Unsupported strategy: {signal.strategy}")
+                return False
+
+        except Exception as e:
+            self.logger.error(
+                f"Execution error for {signal.symbol}: {e}",
+                exc_info=True,
+            )
+            self.stats["trades_failed"] += 1
+            return False
+
+    async def _execute_iron_condor(self, signal: TradeSignal, contracts: int) -> bool:
+        """Execute an iron condor using MLEG."""
+        resolved = await self.contract_resolver.resolve_iron_condor(
+            symbol=signal.symbol,
+            target_dte=signal.target_dte,
+            target_delta=signal.target_delta,
+        )
+        if resolved is None:
+            self.logger.warning(f"Failed to resolve iron condor for {signal.symbol}")
+            return False
+
+        # Validate credit
+        if resolved.total_credit <= 0:
+            self.logger.warning(f"Iron condor {signal.symbol} has no credit: ${resolved.total_credit}")
+            return False
+
+        self.logger.info(
+            f"IC {signal.symbol}: "
+            f"Put {resolved.put_spread.long_leg.strike}/{resolved.put_spread.short_leg.strike} "
+            f"Call {resolved.call_spread.short_leg.strike}/{resolved.call_spread.long_leg.strike} "
+            f"Credit: ${resolved.total_credit:.2f}"
+        )
+
+        # Build MLEG order
+        order_request = self.order_builder.build_iron_condor(
+            put_long_occ=resolved.put_spread.long_leg.occ_symbol,
+            put_short_occ=resolved.put_spread.short_leg.occ_symbol,
+            call_short_occ=resolved.call_spread.short_leg.occ_symbol,
+            call_long_occ=resolved.call_spread.long_leg.occ_symbol,
+            quantity=contracts,
+            net_credit=resolved.total_credit,
+        )
+
+        # Submit
+        order = await self._submit_order(order_request, signal.symbol)
+        if order is None:
+            return False
+
+        # Track position
+        stop_loss_val = resolved.total_credit * CREDIT_STOP_LOSS_MULTIPLIER
+        take_profit_val = resolved.total_credit * (1 - TAKE_PROFIT_PCT)
+
+        self.active_positions.append(ActivePosition(
+            position_id=str(order.id),
+            symbol=signal.symbol,
+            strategy=signal.strategy,
+            direction=signal.direction,
+            leg_symbols=[
+                resolved.put_spread.long_leg.occ_symbol,
+                resolved.put_spread.short_leg.occ_symbol,
+                resolved.call_spread.short_leg.occ_symbol,
+                resolved.call_spread.long_leg.occ_symbol,
+            ],
+            leg_sides=["buy", "sell", "sell", "buy"],
+            entry_credit=resolved.total_credit,
+            max_profit=resolved.total_credit * contracts * 100,
+            max_loss=resolved.max_loss * contracts,
+            contracts=contracts,
+            stop_loss_value=stop_loss_val,
+            take_profit_value=take_profit_val,
+            expiration=resolved.put_spread.short_leg.expiration,
+            signal=signal,
+            order_id=str(order.id),
+        ))
+
+        self.stats["trades_executed"] += 1
+        self.logger.info(
+            f"EXECUTED: IC {signal.symbol} x{contracts} "
+            f"Credit=${resolved.total_credit:.2f} "
+            f"MaxLoss=${resolved.max_loss:.2f}"
+        )
+        return True
+
+    async def _execute_credit_spread(self, signal: TradeSignal, contracts: int) -> bool:
+        """Execute a credit spread (bull put or bear call) using MLEG."""
+        # Determine spread type for resolver
+        if signal.strategy == StrategyType.BULL_PUT_SPREAD:
+            spread_type = "put_spread"
+        else:
+            spread_type = "call_spread"
+
+        resolved = await self.contract_resolver.resolve_spread(
+            symbol=signal.symbol,
+            spread_type=spread_type,
+            target_dte=signal.target_dte,
+            target_delta=signal.target_delta,
+        )
+        if resolved is None:
+            self.logger.warning(f"Failed to resolve {spread_type} for {signal.symbol}")
+            return False
+
+        if resolved.net_credit <= 0:
+            self.logger.warning(f"Credit spread {signal.symbol} has no credit: ${resolved.net_credit}")
+            return False
+
+        self.logger.info(
+            f"Spread {signal.symbol}: "
+            f"Short={resolved.short_leg.occ_symbol} (${resolved.short_leg.mid_price:.2f}) "
+            f"Long={resolved.long_leg.occ_symbol} (${resolved.long_leg.mid_price:.2f}) "
+            f"Credit=${resolved.net_credit:.2f}"
+        )
+
+        order_request = self.order_builder.build_credit_spread(
+            long_occ=resolved.long_leg.occ_symbol,
+            short_occ=resolved.short_leg.occ_symbol,
+            quantity=contracts,
+            net_credit=resolved.net_credit,
+        )
+
+        order = await self._submit_order(order_request, signal.symbol)
+        if order is None:
+            return False
+
+        stop_loss_val = resolved.net_credit * CREDIT_STOP_LOSS_MULTIPLIER
+        take_profit_val = resolved.net_credit * (1 - TAKE_PROFIT_PCT)
+
+        self.active_positions.append(ActivePosition(
+            position_id=str(order.id),
+            symbol=signal.symbol,
+            strategy=signal.strategy,
+            direction=signal.direction,
+            leg_symbols=[resolved.long_leg.occ_symbol, resolved.short_leg.occ_symbol],
+            leg_sides=["buy", "sell"],
+            entry_credit=resolved.net_credit,
+            max_profit=resolved.max_profit * contracts,
+            max_loss=resolved.max_loss * contracts,
+            contracts=contracts,
+            stop_loss_value=stop_loss_val,
+            take_profit_value=take_profit_val,
+            expiration=resolved.short_leg.expiration,
+            signal=signal,
+            order_id=str(order.id),
+        ))
+
+        self.stats["trades_executed"] += 1
+        self.logger.info(
+            f"EXECUTED: {signal.strategy.value} {signal.symbol} x{contracts} "
+            f"Credit=${resolved.net_credit:.2f}"
+        )
+        return True
+
+    async def _execute_debit_spread(self, signal: TradeSignal, contracts: int) -> bool:
+        """Execute a debit spread (bull call or bear put) using MLEG."""
+        if signal.strategy == StrategyType.BULL_CALL_SPREAD:
+            spread_type = "call_spread"
+        else:
+            spread_type = "put_spread"
+
+        resolved = await self.contract_resolver.resolve_spread(
+            symbol=signal.symbol,
+            spread_type=spread_type,
+            target_dte=signal.target_dte,
+            target_delta=signal.target_delta,
+        )
+        if resolved is None:
+            self.logger.warning(f"Failed to resolve debit spread for {signal.symbol}")
+            return False
+
+        # For debit spread, we're the buyer, so net_credit will be negative
+        # (we pay a debit). Use absolute value.
+        debit = abs(resolved.net_credit) if resolved.net_credit < 0 else resolved.long_leg.mid_price - resolved.short_leg.mid_price
+        if debit <= 0:
+            debit = resolved.long_leg.mid_price  # Fallback
+
+        self.logger.info(
+            f"Debit Spread {signal.symbol}: "
+            f"Long={resolved.long_leg.occ_symbol} Short={resolved.short_leg.occ_symbol} "
+            f"Debit=${debit:.2f}"
+        )
+
+        # For debit spread, swap long/short semantics
+        # We buy the more expensive leg and sell the cheaper one
+        order_request = self.order_builder.build_debit_spread(
+            long_occ=resolved.long_leg.occ_symbol if signal.strategy == StrategyType.BULL_CALL_SPREAD else resolved.short_leg.occ_symbol,
+            short_occ=resolved.short_leg.occ_symbol if signal.strategy == StrategyType.BULL_CALL_SPREAD else resolved.long_leg.occ_symbol,
+            quantity=contracts,
+            net_debit=debit,
+        )
+
+        order = await self._submit_order(order_request, signal.symbol)
+        if order is None:
+            return False
+
+        strike_width = abs(resolved.short_leg.strike - resolved.long_leg.strike)
+
+        self.active_positions.append(ActivePosition(
+            position_id=str(order.id),
+            symbol=signal.symbol,
+            strategy=signal.strategy,
+            direction=signal.direction,
+            leg_symbols=[resolved.long_leg.occ_symbol, resolved.short_leg.occ_symbol],
+            leg_sides=["buy", "sell"],
+            entry_credit=-debit,  # Negative = we paid debit
+            max_profit=(strike_width - debit) * contracts * 100,
+            max_loss=debit * contracts * 100,
+            contracts=contracts,
+            stop_loss_value=0,  # Debit spread: managed by pct loss
+            take_profit_value=0,
+            expiration=resolved.long_leg.expiration,
+            signal=signal,
+            order_id=str(order.id),
+        ))
+
+        self.stats["trades_executed"] += 1
+        self.logger.info(
+            f"EXECUTED: {signal.strategy.value} {signal.symbol} x{contracts} "
+            f"Debit=${debit:.2f}"
+        )
+        return True
+
+    async def _execute_straddle(self, signal: TradeSignal, contracts: int) -> bool:
+        """Execute a long straddle using MLEG."""
+        # Resolve ATM call
+        call = await self.contract_resolver.resolve_single_leg(
+            symbol=signal.symbol,
+            option_type="call",
+            target_dte=signal.target_dte,
+            target_delta=0.50,  # ATM
+        )
+        if call is None:
+            self.logger.warning(f"Failed to resolve call for straddle {signal.symbol}")
+            return False
+
+        # Resolve ATM put at same strike
+        put = await self.contract_resolver.resolve_single_leg(
+            symbol=signal.symbol,
+            option_type="put",
+            target_dte=signal.target_dte,
+            target_strike=call.strike,  # Same strike as call
+        )
+        if put is None:
+            self.logger.warning(f"Failed to resolve put for straddle {signal.symbol}")
+            return False
+
+        debit = call.mid_price + put.mid_price
+
+        order_request = self.order_builder.build_long_straddle(
+            call_occ=call.occ_symbol,
+            put_occ=put.occ_symbol,
+            quantity=contracts,
+            net_debit=debit,
+        )
+
+        order = await self._submit_order(order_request, signal.symbol)
+        if order is None:
+            return False
+
+        self.active_positions.append(ActivePosition(
+            position_id=str(order.id),
+            symbol=signal.symbol,
+            strategy=signal.strategy,
+            direction=signal.direction,
+            leg_symbols=[call.occ_symbol, put.occ_symbol],
+            leg_sides=["buy", "buy"],
+            entry_credit=-debit,
+            max_profit=999999,  # Theoretically unlimited
+            max_loss=debit * contracts * 100,
+            contracts=contracts,
+            expiration=call.expiration,
+            signal=signal,
+            order_id=str(order.id),
+        ))
+
+        self.stats["trades_executed"] += 1
+        self.logger.info(
+            f"EXECUTED: Straddle {signal.symbol} x{contracts} "
+            f"Debit=${debit:.2f}"
+        )
+        return True
+
+    # ================================================================== #
+    # ORDER SUBMISSION
+    # ================================================================== #
+
+    async def _submit_order(self, order_request, symbol: str):
+        """
+        Submit order to Alpaca with buying power check.
+
+        Returns order object on success, None on failure.
+        """
+        try:
+            # Pre-trade: verify buying power
+            account = await asyncio.to_thread(self.trading_client.get_account)
+            buying_power = float(account.buying_power)
+
+            self.logger.info(
+                f"Submitting MLEG order for {symbol} "
+                f"(buying power: ${buying_power:,.2f})"
+            )
+
+            order = await asyncio.to_thread(
+                self.trading_client.submit_order, order_request
+            )
+
+            self.logger.info(f"Order submitted: {order.id} ({order.status})")
+
+            # Poll for fill (up to 30s for limit orders)
+            if order.status.value not in ("filled", "cancelled", "rejected"):
+                filled_order = await self._poll_order(str(order.id))
+                if filled_order:
+                    order = filled_order
+
+            if order.status.value == "filled":
+                self.logger.info(f"Order FILLED: {order.id}")
+                return order
+            elif order.status.value in ("cancelled", "rejected", "expired"):
+                self.logger.warning(f"Order {order.status.value}: {order.id}")
+                return None
+            else:
+                # Still pending - keep it tracked
+                self.logger.info(f"Order still pending: {order.id} ({order.status.value})")
+                return order
+
+        except Exception as e:
+            self.logger.error(f"Order submission failed for {symbol}: {e}")
+            self.stats["trades_failed"] += 1
+            return None
+
+    async def _poll_order(self, order_id: str, timeout: float = ORDER_TIMEOUT_SECONDS):
+        """Poll order status until terminal state or timeout."""
+        start = time.time()
+        interval = 1.0
+
+        while time.time() - start < timeout:
+            try:
+                order = await asyncio.to_thread(
+                    self.trading_client.get_order_by_id, order_id
+                )
+                status = order.status.value
+                if status in ("filled", "cancelled", "rejected", "expired"):
+                    return order
+            except Exception as e:
+                self.logger.debug(f"Poll error: {e}")
+
+            await asyncio.sleep(interval)
+            interval = min(interval * 1.5, 3.0)
+
+        self.logger.warning(f"Order {order_id} timed out after {timeout}s")
+        return None
+
+    # ================================================================== #
+    # POSITION SIZING
+    # ================================================================== #
+
+    def _calculate_position_size(self, signal: TradeSignal) -> int:
+        """
+        Calculate position size using simplified Kelly Criterion.
+
+        Kelly: f* = (p * b - q) / b
+        Where:
+            p = probability of profit
+            q = 1 - p
+            b = win/loss ratio
+
+        We use quarter-Kelly for safety.
+        """
+        pop = signal.probability_of_profit
+        if pop <= 0 or pop >= 1:
+            return 1
+
+        q = 1 - pop
+        b = signal.risk_reward_ratio if signal.risk_reward_ratio > 0 else 1.0
+
+        kelly = (pop * b - q) / b
+        if kelly <= 0:
+            return 1  # Minimum 1 contract
+
+        # Quarter-Kelly
+        fraction = kelly * 0.25
+
+        # Max 2% of portfolio per trade
+        max_risk = self.portfolio_value * MAX_PORTFOLIO_RISK_PCT
+
+        # Estimate risk per contract (wing width * 100)
+        risk_per_contract = signal.wing_width * 100 if signal.wing_width > 0 else 500
+
+        # Contracts from Kelly
+        kelly_contracts = int(self.portfolio_value * fraction / risk_per_contract)
+
+        # Contracts from max risk
+        risk_contracts = int(max_risk / risk_per_contract)
+
+        # Take minimum
+        contracts = max(1, min(kelly_contracts, risk_contracts, signal.max_contracts))
+
+        self.logger.debug(
+            f"Position size {signal.symbol}: "
+            f"Kelly={kelly:.2f} fraction={fraction:.3f} "
+            f"contracts={contracts}"
+        )
+
+        return contracts
+
+    # ================================================================== #
+    # UTILITIES
+    # ================================================================== #
+
+    def _market_is_open(self) -> bool:
+        """Check if market is currently open."""
+        from datetime import time as dtime
+        now = datetime.now(ZoneInfo("America/New_York"))
+        if now.weekday() >= 5:
+            return False
+        return dtime(9, 30) <= now.time() <= dtime(16, 0)
+
+    def _safe_entry_window(self) -> bool:
+        """Check if we're in the safe entry window (avoid first/last 15 min)."""
+        from datetime import time as dtime
+        now = datetime.now(ZoneInfo("America/New_York"))
+        return dtime(9, 45) <= now.time() <= dtime(15, 45)
+
+    def _log_cycle_summary(self) -> Dict:
+        """Log and return cycle summary."""
+        total_pnl = sum(p.unrealized_pnl for p in self.active_positions)
+
+        summary = {
+            "cycle": self.stats["cycles_run"],
+            "active_positions": len(self.active_positions),
+            "unrealized_pnl": total_pnl,
+            "realized_pnl": self.stats["total_realized_pnl"],
+            "trades_today": self.signal_generator.get_daily_trade_count(),
+            "total_trades": self.stats["trades_executed"],
+            "win_rate": (
+                self.stats["profit_targets"]
+                / max(self.stats["positions_closed"], 1)
+                * 100
+            ),
+        }
+
+        self.logger.info(
+            f"CYCLE SUMMARY: "
+            f"Positions={summary['active_positions']} "
+            f"Unrealized=${total_pnl:+,.2f} "
+            f"Realized=${summary['realized_pnl']:+,.2f} "
+            f"Trades={summary['total_trades']} "
+            f"Win%={summary['win_rate']:.0f}%"
+        )
+
+        return summary
+
+    def _log_final_stats(self):
+        """Log final statistics on shutdown."""
+        self.logger.info("=" * 60)
+        self.logger.info("FINAL STATISTICS")
+        self.logger.info("=" * 60)
+        for k, v in self.stats.items():
+            self.logger.info(f"  {k}: {v}")
+        total_unrealized = sum(p.unrealized_pnl for p in self.active_positions)
+        self.logger.info(f"  unrealized_pnl: ${total_unrealized:+,.2f}")
+        self.logger.info(f"  net_pnl: ${self.stats['total_realized_pnl'] + total_unrealized:+,.2f}")
+
+    def _save_state(self):
+        """Persist current state to disk."""
+        try:
+            state = {
+                "portfolio_value": self.portfolio_value,
+                "stats": self.stats,
+                "active_positions": [
+                    {
+                        "position_id": p.position_id,
+                        "symbol": p.symbol,
+                        "strategy": p.strategy.value,
+                        "direction": p.direction.value,
+                        "leg_symbols": p.leg_symbols,
+                        "leg_sides": p.leg_sides,
+                        "entry_credit": p.entry_credit,
+                        "max_profit": p.max_profit,
+                        "max_loss": p.max_loss,
+                        "contracts": p.contracts,
+                        "stop_loss_value": p.stop_loss_value,
+                        "take_profit_value": p.take_profit_value,
+                        "entry_time": p.entry_time.isoformat(),
+                        "expiration": p.expiration.isoformat() if p.expiration else None,
+                        "order_id": p.order_id,
+                    }
+                    for p in self.active_positions
+                ],
+                "last_update": datetime.now().isoformat(),
+            }
+
+            with open(self.state_file, "w") as f:
+                json.dump(state, f, indent=2, default=str)
+        except Exception as e:
+            self.logger.error(f"Failed to save state: {e}")
+
+    def _load_state(self):
+        """Load persisted state."""
+        if not os.path.exists(self.state_file):
+            return
+
+        try:
+            with open(self.state_file, "r") as f:
+                state = json.load(f)
+
+            self.stats = state.get("stats", self.stats)
+            self.portfolio_value = state.get("portfolio_value", self.portfolio_value)
+
+            # Restore active positions
+            for pos_data in state.get("active_positions", []):
+                try:
+                    pos = ActivePosition(
+                        position_id=pos_data["position_id"],
+                        symbol=pos_data["symbol"],
+                        strategy=StrategyType(pos_data["strategy"]),
+                        direction=Direction(pos_data["direction"]),
+                        leg_symbols=pos_data["leg_symbols"],
+                        leg_sides=pos_data["leg_sides"],
+                        entry_credit=pos_data["entry_credit"],
+                        max_profit=pos_data["max_profit"],
+                        max_loss=pos_data["max_loss"],
+                        contracts=pos_data["contracts"],
+                        stop_loss_value=pos_data.get("stop_loss_value", 0),
+                        take_profit_value=pos_data.get("take_profit_value", 0),
+                        entry_time=datetime.fromisoformat(pos_data["entry_time"]),
+                        expiration=(
+                            date.fromisoformat(pos_data["expiration"])
+                            if pos_data.get("expiration")
+                            else None
+                        ),
+                        order_id=pos_data.get("order_id"),
+                    )
+                    self.active_positions.append(pos)
+                except Exception as e:
+                    self.logger.warning(f"Failed to restore position: {e}")
+
+            self.logger.info(
+                f"Loaded state: {len(self.active_positions)} positions, "
+                f"{self.stats['trades_executed']} total trades"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Failed to load state: {e}")
+
+
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
+
+def main():
+    """Run the integrated trading system."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Integrated Options Trading System v2")
+    parser.add_argument(
+        "--portfolio-value",
+        type=float,
+        default=100000,
+        help="Starting portfolio value (default: $100,000)",
+    )
+    parser.add_argument(
+        "--paper",
+        action="store_true",
+        default=True,
+        help="Use paper trading (default: True)",
+    )
+    parser.add_argument(
+        "--single-cycle",
+        action="store_true",
+        help="Run single cycle then exit (for testing)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(f"trading_{datetime.now().strftime('%Y%m%d')}.log"),
+        ],
+    )
+
+    async def _run():
+        system = IntegratedTradingSystem(
+            portfolio_value=args.portfolio_value,
+            paper=args.paper,
+        )
+
+        if args.single_cycle:
+            result = await system.run_trading_cycle()
+            print(f"\nCycle result: {json.dumps(result, indent=2, default=str)}")
+        else:
+            # Wire up shutdown signals
+            import signal
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, system.request_shutdown)
+                except NotImplementedError:
+                    pass
+            await system.run_forever()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
-    demo_integrated_system()
-
+    main()

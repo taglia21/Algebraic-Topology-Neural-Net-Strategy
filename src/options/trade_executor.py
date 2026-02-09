@@ -20,7 +20,7 @@ import os
 import time
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOrdersRequest, OptionLegRequest
 from alpaca.trading.enums import OrderSide as AlpacaOrderSide, TimeInForce, OrderClass, AssetClass
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import OptionLatestQuoteRequest
@@ -204,11 +204,11 @@ class AlpacaOptionsExecutor:
         net_debit: float = None,
     ) -> ExecutionResult:
         """
-        Submit 2-leg spread order (credit or debit spread).
+        Submit 2-leg spread order using Alpaca MLEG OrderClass.
         
         Args:
-            long_symbol: Option to buy
-            short_symbol: Option to sell
+            long_symbol: OCC symbol to buy (e.g., "SPY250620P00550000")
+            short_symbol: OCC symbol to sell
             quantity: Number of spreads
             net_credit: Net credit received (for credit spreads)
             net_debit: Net debit paid (for debit spreads)
@@ -216,64 +216,107 @@ class AlpacaOptionsExecutor:
         Returns:
             ExecutionResult
         """
-        self.logger.info(f"Submitting spread: LONG {long_symbol}, SHORT {short_symbol}")
+        self.logger.info(f"Submitting MLEG spread: LONG {long_symbol}, SHORT {short_symbol}")
         
-        legs = [
+        internal_legs = [
             OrderLeg(symbol=long_symbol, side=OrderSide.BUY, quantity=quantity),
             OrderLeg(symbol=short_symbol, side=OrderSide.SELL, quantity=quantity),
         ]
         
-        # Multi-leg order
-        order_data = {
-            "symbol": long_symbol.split()[0],  # Underlying symbol
-            "qty": quantity,
-            "side": "buy",  # Net position side
-            "type": "limit",
-            "time_in_force": "day",
-            "order_class": "oto",  # One-triggers-other
-            "legs": [
-                {
-                    "symbol": long_symbol,
-                    "side": "buy",
-                    "qty": quantity,
-                },
-                {
-                    "symbol": short_symbol,
-                    "side": "sell",
-                    "qty": quantity,
-                },
-            ],
-        }
+        # Extract underlying from OCC symbol
+        underlying = ""
+        for ch in long_symbol:
+            if ch.isdigit():
+                break
+            underlying += ch
         
-        # Set limit price based on credit/debit
-        if net_credit:
-            order_data["limit_price"] = net_credit
-        elif net_debit:
-            order_data["limit_price"] = net_debit
+        # Build MLEG legs
+        mleg_legs = [
+            OptionLegRequest(
+                symbol=long_symbol,
+                side=AlpacaOrderSide.BUY,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=short_symbol,
+                side=AlpacaOrderSide.SELL,
+                ratio_qty=str(quantity),
+            ),
+        ]
         
-        result = await self._execute_with_retry(order_data, legs)
+        # Determine limit price and net side
+        if net_credit and net_credit > 0:
+            limit_price = round(net_credit, 2)
+            net_side = AlpacaOrderSide.SELL
+        elif net_debit and net_debit > 0:
+            limit_price = round(net_debit, 2)
+            net_side = AlpacaOrderSide.BUY
+        else:
+            limit_price = 0.01
+            net_side = AlpacaOrderSide.BUY
         
-        return result
+        try:
+            order_request = LimitOrderRequest(
+                symbol=underlying,
+                qty=quantity,
+                side=net_side,
+                time_in_force=TimeInForce.DAY,
+                order_class=OrderClass.MLEG,
+                limit_price=limit_price,
+                legs=mleg_legs,
+            )
+            
+            order = self.trading_client.submit_order(order_request)
+            self.logger.info(f"MLEG spread order submitted: {order.id}")
+            
+            # Poll for fill
+            status, filled_qty, avg_price = await self._poll_order_status(
+                str(order.id), timeout=30.0
+            )
+            
+            success = status == "filled"
+            return ExecutionResult(
+                success=success,
+                order_id=str(order.id),
+                status=OrderStatus.FILLED if success else OrderStatus.REJECTED,
+                filled_quantity=filled_qty,
+                average_fill_price=avg_price,
+                timestamp=datetime.now(),
+                error_message="" if success else f"Order {status}",
+                legs=internal_legs,
+            )
+        except Exception as e:
+            self.logger.error(f"MLEG spread submission failed: {e}")
+            return ExecutionResult(
+                success=False,
+                order_id=None,
+                status=OrderStatus.REJECTED,
+                filled_quantity=0,
+                average_fill_price=0.0,
+                timestamp=datetime.now(),
+                error_message=str(e),
+                legs=internal_legs,
+            )
     
     async def submit_iron_condor(
         self,
         underlying: str,
-        put_buy_strike: float,
-        put_sell_strike: float,
-        call_sell_strike: float,
-        call_buy_strike: float,
+        put_long_occ: str,
+        put_short_occ: str,
+        call_short_occ: str,
+        call_long_occ: str,
         quantity: int,
         net_credit: float,
     ) -> ExecutionResult:
         """
-        Submit 4-leg iron condor order.
+        Submit 4-leg iron condor using Alpaca MLEG OrderClass.
         
         Args:
             underlying: Underlying symbol (e.g., "SPY")
-            put_buy_strike: Long put strike
-            put_sell_strike: Short put strike
-            call_sell_strike: Short call strike
-            call_buy_strike: Long call strike
+            put_long_occ: Long put OCC symbol (lowest strike)
+            put_short_occ: Short put OCC symbol
+            call_short_occ: Short call OCC symbol
+            call_long_occ: Long call OCC symbol (highest strike)
             quantity: Number of iron condors
             net_credit: Net credit received
             
@@ -281,53 +324,100 @@ class AlpacaOptionsExecutor:
             ExecutionResult
         """
         self.logger.info(
-            f"Submitting iron condor on {underlying}: "
-            f"Puts {put_buy_strike}/{put_sell_strike}, "
-            f"Calls {call_sell_strike}/{call_buy_strike}"
+            f"Submitting MLEG iron condor on {underlying}: "
+            f"Puts {put_long_occ}/{put_short_occ}, "
+            f"Calls {call_short_occ}/{call_long_occ} "
+            f"Credit=${net_credit:.2f}"
         )
         
-        # NOTE: This is simplified - actual OCC symbols would need to be constructed
-        # based on expiration, strike, and option type
-        
-        legs = [
-            OrderLeg(symbol=f"{underlying}_PUT_{put_buy_strike}", side=OrderSide.BUY, quantity=quantity),
-            OrderLeg(symbol=f"{underlying}_PUT_{put_sell_strike}", side=OrderSide.SELL, quantity=quantity),
-            OrderLeg(symbol=f"{underlying}_CALL_{call_sell_strike}", side=OrderSide.SELL, quantity=quantity),
-            OrderLeg(symbol=f"{underlying}_CALL_{call_buy_strike}", side=OrderSide.BUY, quantity=quantity),
+        internal_legs = [
+            OrderLeg(symbol=put_long_occ, side=OrderSide.BUY, quantity=quantity),
+            OrderLeg(symbol=put_short_occ, side=OrderSide.SELL, quantity=quantity),
+            OrderLeg(symbol=call_short_occ, side=OrderSide.SELL, quantity=quantity),
+            OrderLeg(symbol=call_long_occ, side=OrderSide.BUY, quantity=quantity),
         ]
         
-        order_data = {
-            "symbol": underlying,
-            "qty": quantity,
-            "side": "buy",
-            "type": "limit",
-            "limit_price": net_credit,
-            "time_in_force": "day",
-            "order_class": "oto",
-            "legs": [
-                {"symbol": leg.symbol, "side": leg.side.value, "qty": leg.quantity}
-                for leg in legs
-            ],
-        }
+        mleg_legs = [
+            OptionLegRequest(
+                symbol=put_long_occ,
+                side=AlpacaOrderSide.BUY,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=put_short_occ,
+                side=AlpacaOrderSide.SELL,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=call_short_occ,
+                side=AlpacaOrderSide.SELL,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=call_long_occ,
+                side=AlpacaOrderSide.BUY,
+                ratio_qty=str(quantity),
+            ),
+        ]
         
-        result = await self._execute_with_retry(order_data, legs)
-        
-        return result
+        try:
+            order_request = LimitOrderRequest(
+                symbol=underlying,
+                qty=quantity,
+                side=AlpacaOrderSide.SELL,  # Net credit
+                time_in_force=TimeInForce.DAY,
+                order_class=OrderClass.MLEG,
+                limit_price=round(net_credit, 2),
+                legs=mleg_legs,
+            )
+            
+            order = self.trading_client.submit_order(order_request)
+            self.logger.info(f"MLEG iron condor order submitted: {order.id}")
+            
+            status, filled_qty, avg_price = await self._poll_order_status(
+                str(order.id), timeout=30.0
+            )
+            
+            success = status == "filled"
+            return ExecutionResult(
+                success=success,
+                order_id=str(order.id),
+                status=OrderStatus.FILLED if success else OrderStatus.REJECTED,
+                filled_quantity=filled_qty,
+                average_fill_price=avg_price,
+                timestamp=datetime.now(),
+                error_message="" if success else f"Order {status}",
+                legs=internal_legs,
+            )
+        except Exception as e:
+            self.logger.error(f"MLEG iron condor submission failed: {e}")
+            return ExecutionResult(
+                success=False,
+                order_id=None,
+                status=OrderStatus.REJECTED,
+                filled_quantity=0,
+                average_fill_price=0.0,
+                timestamp=datetime.now(),
+                error_message=str(e),
+                legs=internal_legs,
+            )
     
     async def submit_straddle(
         self,
         underlying: str,
-        strike: float,
+        call_occ: str,
+        put_occ: str,
         quantity: int,
         net_debit: float,
         buy: bool = True,
     ) -> ExecutionResult:
         """
-        Submit straddle order (buy or sell call + put at same strike).
+        Submit straddle using Alpaca MLEG OrderClass.
         
         Args:
             underlying: Underlying symbol
-            strike: Strike price
+            call_occ: Call OCC symbol
+            put_occ: Put OCC symbol
             quantity: Number of straddles
             net_debit: Net debit paid (for long) or credit (for short)
             buy: True for long straddle, False for short
@@ -335,34 +425,73 @@ class AlpacaOptionsExecutor:
         Returns:
             ExecutionResult
         """
-        side = OrderSide.BUY if buy else OrderSide.SELL
+        alpaca_side = AlpacaOrderSide.BUY if buy else AlpacaOrderSide.SELL
+        internal_side = OrderSide.BUY if buy else OrderSide.SELL
         
         self.logger.info(
-            f"Submitting {'long' if buy else 'short'} straddle on {underlying} @ {strike}"
+            f"Submitting MLEG {'long' if buy else 'short'} straddle on {underlying}: "
+            f"Call={call_occ}, Put={put_occ}, Debit=${net_debit:.2f}"
         )
         
-        legs = [
-            OrderLeg(symbol=f"{underlying}_CALL_{strike}", side=side, quantity=quantity),
-            OrderLeg(symbol=f"{underlying}_PUT_{strike}", side=side, quantity=quantity),
+        internal_legs = [
+            OrderLeg(symbol=call_occ, side=internal_side, quantity=quantity),
+            OrderLeg(symbol=put_occ, side=internal_side, quantity=quantity),
         ]
         
-        order_data = {
-            "symbol": underlying,
-            "qty": quantity,
-            "side": side.value,
-            "type": "limit",
-            "limit_price": net_debit,
-            "time_in_force": "day",
-            "order_class": "oto",
-            "legs": [
-                {"symbol": leg.symbol, "side": leg.side.value, "qty": leg.quantity}
-                for leg in legs
-            ],
-        }
+        mleg_legs = [
+            OptionLegRequest(
+                symbol=call_occ,
+                side=alpaca_side,
+                ratio_qty=str(quantity),
+            ),
+            OptionLegRequest(
+                symbol=put_occ,
+                side=alpaca_side,
+                ratio_qty=str(quantity),
+            ),
+        ]
         
-        result = await self._execute_with_retry(order_data, legs)
-        
-        return result
+        try:
+            order_request = LimitOrderRequest(
+                symbol=underlying,
+                qty=quantity,
+                side=alpaca_side,
+                time_in_force=TimeInForce.DAY,
+                order_class=OrderClass.MLEG,
+                limit_price=round(net_debit, 2),
+                legs=mleg_legs,
+            )
+            
+            order = self.trading_client.submit_order(order_request)
+            self.logger.info(f"MLEG straddle order submitted: {order.id}")
+            
+            status, filled_qty, avg_price = await self._poll_order_status(
+                str(order.id), timeout=30.0
+            )
+            
+            success = status == "filled"
+            return ExecutionResult(
+                success=success,
+                order_id=str(order.id),
+                status=OrderStatus.FILLED if success else OrderStatus.REJECTED,
+                filled_quantity=filled_qty,
+                average_fill_price=avg_price,
+                timestamp=datetime.now(),
+                error_message="" if success else f"Order {status}",
+                legs=internal_legs,
+            )
+        except Exception as e:
+            self.logger.error(f"MLEG straddle submission failed: {e}")
+            return ExecutionResult(
+                success=False,
+                order_id=None,
+                status=OrderStatus.REJECTED,
+                filled_quantity=0,
+                average_fill_price=0.0,
+                timestamp=datetime.now(),
+                error_message=str(e),
+                legs=internal_legs,
+            )
     
     async def _execute_with_retry(
         self,

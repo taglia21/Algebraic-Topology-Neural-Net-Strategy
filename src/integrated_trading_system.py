@@ -1033,10 +1033,14 @@ class IntegratedTradingSystem:
 
     async def _close_position(self, position: ActivePosition, reason: str) -> bool:
         """
-        Close an active position by submitting the opposite MLEG order.
+        Close an active position.
 
-        For credit strategies: buy back all legs at market.
-        For debit strategies: sell all legs at market.
+        - Single-leg positions: close via Alpaca's DELETE /positions/{symbol}
+          endpoint, falling back to a simple (non-MLEG) market order.
+        - Multi-leg positions: submit the opposite MLEG market order.
+
+        Both paths include a final fallback that attempts to close each leg
+        individually through the REST close-position endpoint.
         """
         try:
             self.logger.info(
@@ -1044,6 +1048,74 @@ class IntegratedTradingSystem:
                 f"({reason}): {len(position.leg_symbols)} legs"
             )
 
+            # -------------------------------------------------------------- #
+            # SINGLE-LEG: close directly via the Alpaca REST endpoint or a
+            # plain (non-MLEG) market order on the OCC symbol.
+            # -------------------------------------------------------------- #
+            if len(position.leg_symbols) == 1:
+                return await self._close_single_leg(position, reason)
+
+            # -------------------------------------------------------------- #
+            # MULTI-LEG (2+): use MLEG market order
+            # -------------------------------------------------------------- #
+            return await self._close_multi_leg(position, reason)
+
+        except Exception as e:
+            self.logger.error(
+                f"Failed to close position {position.symbol}: {e}",
+                exc_info=True,
+            )
+            # Last-resort fallback: try closing each leg individually
+            return await self._close_legs_individually(position, reason)
+
+    async def _close_single_leg(self, position: ActivePosition, reason: str) -> bool:
+        """Close a single-option-leg position."""
+        occ = position.leg_symbols[0]
+
+        # Attempt 1: Alpaca DELETE /positions/{symbol}  (simplest)
+        try:
+            order = await asyncio.to_thread(
+                self.trading_client.close_position, occ
+            )
+            self.logger.info(
+                f"Single-leg close via REST for {occ} ({reason}): "
+                f"order {getattr(order, 'id', order)}"
+            )
+            return True
+        except Exception as e:
+            self.logger.warning(
+                f"REST close_position failed for {occ}: {e} — "
+                "falling back to market order"
+            )
+
+        # Attempt 2: submit a plain market order (non-MLEG)
+        try:
+            original_side = position.leg_sides[0]
+            close_side = OrderSide.BUY if original_side == "sell" else OrderSide.SELL
+
+            close_order = MarketOrderRequest(
+                symbol=occ,
+                qty=position.contracts,
+                side=close_side,
+                time_in_force=TimeInForce.DAY,
+            )
+
+            order = await asyncio.to_thread(
+                self.trading_client.submit_order, close_order
+            )
+            self.logger.info(
+                f"Single-leg market order submitted: {order.id} for {occ} ({reason})"
+            )
+            return True
+        except Exception as e:
+            self.logger.error(
+                f"Single-leg market order also failed for {occ}: {e}"
+            )
+            return False
+
+    async def _close_multi_leg(self, position: ActivePosition, reason: str) -> bool:
+        """Close a multi-leg position via an MLEG market order."""
+        try:
             # Build closing MLEG order (reverse all legs)
             closing_legs = []
             for i, occ in enumerate(position.leg_symbols):
@@ -1057,17 +1129,12 @@ class IntegratedTradingSystem:
                     )
                 )
 
-            underlying = ""
-            for ch in position.leg_symbols[0]:
-                if ch.isdigit():
-                    break
-                underlying += ch
+            underlying = self._parse_underlying_from_occ(position.leg_symbols[0])
 
-            # Use market order for closing (ensuring fill)
             close_order = MarketOrderRequest(
                 symbol=underlying,
                 qty=position.contracts,
-                side=OrderSide.BUY,  # Net direction doesn't matter much for MLEG close
+                side=OrderSide.BUY,  # Net direction doesn't matter for MLEG close
                 time_in_force=TimeInForce.DAY,
                 order_class=OrderClass.MLEG,
                 legs=closing_legs,
@@ -1078,16 +1145,38 @@ class IntegratedTradingSystem:
             )
 
             self.logger.info(
-                f"Close order submitted: {order.id} for {position.symbol} ({reason})"
+                f"MLEG close order submitted: {order.id} for {position.symbol} ({reason})"
             )
             return True
 
         except Exception as e:
             self.logger.error(
-                f"Failed to close position {position.symbol}: {e}",
-                exc_info=True,
+                f"MLEG close failed for {position.symbol}: {e} — "
+                "falling back to individual leg closes"
             )
-            return False
+            return await self._close_legs_individually(position, reason)
+
+    async def _close_legs_individually(self, position: ActivePosition, reason: str) -> bool:
+        """Last-resort fallback: close each leg via DELETE /positions/{symbol}."""
+        any_success = False
+        for i, occ in enumerate(position.leg_symbols):
+            try:
+                order = await asyncio.to_thread(
+                    self.trading_client.close_position, occ
+                )
+                self.logger.info(
+                    f"Individually closed leg {occ}: "
+                    f"order {getattr(order, 'id', order)}"
+                )
+                any_success = True
+            except Exception as e:
+                self.logger.warning(f"Failed to close leg {occ}: {e}")
+
+        if not any_success:
+            self.logger.error(
+                f"ALL close attempts failed for {position.symbol} ({reason})"
+            )
+        return any_success
 
     # ================================================================== #
     # SIGNAL RESOLUTION & EXECUTION

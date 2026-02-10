@@ -501,10 +501,11 @@ class StrategySelector:
         regime = regime_result.regime
         technicals = regime_result.technicals
 
+        rsi_str = f"{technicals.rsi_14:.0f}" if technicals else "N/A"
         self.logger.info(
             f"Selecting strategy for {symbol}: "
             f"IV_Rank={iv_rank:.0f} Regime={regime.value} "
-            f"RSI={technicals.rsi_14:.0f if technicals else 'N/A'}"
+            f"RSI={rsi_str}"
         )
 
         # Gate 1: Unknown regime

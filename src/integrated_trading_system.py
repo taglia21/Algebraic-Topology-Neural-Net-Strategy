@@ -25,6 +25,7 @@ import asyncio
 import logging
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, date
@@ -565,6 +566,293 @@ class IntegratedTradingSystem:
         # Load saved state
         self._load_state()
 
+        # CRITICAL: Load real positions from Alpaca so we're aware of
+        # ALL existing exposure, not just positions this bot created.
+        self._load_existing_positions_from_alpaca()
+
+    # ================================================================== #
+    # ALPACA POSITION SYNC
+    # ================================================================== #
+
+    def _load_existing_positions_from_alpaca(self) -> None:
+        """
+        Load all existing option positions from the Alpaca account.
+
+        This ensures that on startup the system is aware of every position
+        in the account—not just positions it created in a prior session.
+        Positions that already appear in ``self.active_positions`` (from
+        the JSON state file) are *not* duplicated.
+        """
+        try:
+            alpaca_positions = self.trading_client.get_all_positions()
+        except Exception as e:
+            self.logger.error(f"Failed to load positions from Alpaca: {e}")
+            return
+
+        # Build set of OCC symbols we already track so we don't double-count
+        tracked_occ: set[str] = set()
+        for pos in self.active_positions:
+            tracked_occ.update(pos.leg_symbols)
+
+        # ------------------------------------------------------------------ #
+        # Group Alpaca option positions by underlying so we can detect
+        # multi-leg structures (spreads, condors).  Single-leg positions
+        # are still loaded individually.
+        # ------------------------------------------------------------------ #
+        option_positions = []
+        for pos in alpaca_positions:
+            if getattr(pos, 'asset_class', None) != AssetClass.US_OPTION:
+                continue
+            if pos.symbol in tracked_occ:
+                # Already tracked from a prior state-file restore – skip
+                continue
+            option_positions.append(pos)
+
+        if not option_positions:
+            self.logger.info(
+                "Alpaca position sync: 0 new option legs to import "
+                f"({len(self.active_positions)} already tracked)"
+            )
+            return
+
+        # Group by underlying
+        by_underlying: Dict[str, list] = {}
+        for pos in option_positions:
+            underlying = self._parse_underlying_from_occ(pos.symbol)
+            by_underlying.setdefault(underlying, []).append(pos)
+
+        imported = 0
+        for underlying, legs in by_underlying.items():
+            try:
+                new_pos = self._build_active_position_from_alpaca_legs(
+                    underlying, legs
+                )
+                if new_pos is not None:
+                    self.active_positions.append(new_pos)
+                    imported += 1
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to import Alpaca position for {underlying}: {e}"
+                )
+
+        self.logger.info(
+            f"Alpaca position sync: imported {imported} positions "
+            f"({len(option_positions)} option legs) – "
+            f"total tracked: {len(self.active_positions)}"
+        )
+
+    def _sync_positions_with_alpaca(self) -> None:
+        """Lightweight per-cycle sync: import new positions & prune stale ones.
+
+        Called at the top of every trading cycle so we always reflect
+        reality before making new-trade or close decisions.
+        """
+        try:
+            alpaca_positions = self.trading_client.get_all_positions()
+        except Exception as e:
+            self.logger.warning(f"Cycle sync: failed to fetch Alpaca positions: {e}")
+            return
+
+        # OCC symbols currently held in Alpaca
+        alpaca_occ: set[str] = set()
+        for pos in alpaca_positions:
+            if getattr(pos, 'asset_class', None) == AssetClass.US_OPTION:
+                alpaca_occ.add(pos.symbol)
+
+        # 1) Remove tracked positions whose legs are ALL gone from Alpaca
+        #    (they were closed externally, or expired).
+        before = len(self.active_positions)
+        self.active_positions = [
+            p for p in self.active_positions
+            if any(leg in alpaca_occ for leg in p.leg_symbols)
+        ]
+        pruned = before - len(self.active_positions)
+        if pruned:
+            self.logger.info(
+                f"Cycle sync: pruned {pruned} positions no longer in Alpaca"
+            )
+
+        # 2) Import any Alpaca option positions we don't yet track
+        tracked_occ: set[str] = set()
+        for p in self.active_positions:
+            tracked_occ.update(p.leg_symbols)
+
+        new_legs = [
+            pos for pos in alpaca_positions
+            if getattr(pos, 'asset_class', None) == AssetClass.US_OPTION
+            and pos.symbol not in tracked_occ
+        ]
+
+        if new_legs:
+            by_underlying: Dict[str, list] = {}
+            for pos in new_legs:
+                underlying = self._parse_underlying_from_occ(pos.symbol)
+                by_underlying.setdefault(underlying, []).append(pos)
+
+            imported = 0
+            for underlying, legs in by_underlying.items():
+                try:
+                    new_pos = self._build_active_position_from_alpaca_legs(
+                        underlying, legs,
+                    )
+                    if new_pos is not None:
+                        self.active_positions.append(new_pos)
+                        imported += 1
+                except Exception as e:
+                    self.logger.warning(
+                        f"Cycle sync: failed to import {underlying}: {e}"
+                    )
+            if imported:
+                self.logger.info(
+                    f"Cycle sync: imported {imported} new positions from Alpaca"
+                )
+
+    # -- helpers for Alpaca import ----------------------------------------- #
+
+    @staticmethod
+    def _parse_underlying_from_occ(occ_symbol: str) -> str:
+        """Extract the underlying ticker from an OCC symbol.
+
+        OCC format: ``AAPL  250117C00150000``  (padded) or
+                    ``AAPL250117C00150000``   (no spaces).
+        """
+        cleaned = occ_symbol.replace(" ", "")
+        m = re.match(r'^([A-Z]+)', cleaned)
+        return m.group(1) if m else cleaned[:4]
+
+    @staticmethod
+    def _parse_occ_expiration(occ_symbol: str) -> Optional[date]:
+        """Extract expiration date from an OCC symbol → ``date``."""
+        cleaned = occ_symbol.replace(" ", "")
+        m = re.match(r'^[A-Z]+(\d{6})[CP]', cleaned)
+        if not m:
+            return None
+        raw = m.group(1)  # YYMMDD
+        try:
+            return datetime.strptime(raw, "%y%m%d").date()
+        except ValueError:
+            return None
+
+    def _build_active_position_from_alpaca_legs(
+        self,
+        underlying: str,
+        legs: list,
+    ) -> Optional[ActivePosition]:
+        """Convert a list of Alpaca option-position objects into an ActivePosition.
+
+        Heuristics used to guess the strategy:
+        * 4 legs (2 puts + 2 calls)  → ``IRON_CONDOR``
+        * 2 legs same type, one long one short → credit or debit spread
+        * 2 legs different type, both long       → ``LONG_STRADDLE``
+        * Anything else → fall back to ``IRON_CONDOR`` with neutral direction
+          so the position is still *tracked* and counted against the limit.
+        """
+        leg_symbols = []
+        leg_sides = []
+        total_cost_basis = 0.0
+        total_market_value = 0.0
+        total_qty = 0
+        expiration: Optional[date] = None
+
+        for lp in legs:
+            occ = lp.symbol
+            qty = int(lp.qty)  # signed: positive = long, negative = short
+            side = "buy" if qty > 0 else "sell"
+            leg_symbols.append(occ)
+            leg_sides.append(side)
+
+            cost_basis = float(lp.cost_basis) if lp.cost_basis else 0.0
+            mkt_value = float(lp.market_value) if lp.market_value else 0.0
+            total_cost_basis += cost_basis
+            total_market_value += mkt_value
+            total_qty = max(total_qty, abs(qty))
+
+            if expiration is None:
+                expiration = self._parse_occ_expiration(occ)
+
+        # ------ guess strategy & direction -------------------------------- #
+        strategy, direction = self._guess_strategy(leg_symbols, leg_sides)
+
+        # ------ economics (best-effort from Alpaca data) ------------------- #
+        # cost_basis is negative for credits, positive for debits
+        entry_credit = -total_cost_basis / 100.0 if total_cost_basis != 0 else 0.0
+        unrealized_pnl = total_market_value + total_cost_basis  # MV - |cost|
+
+        contracts = max(total_qty, 1)
+
+        # Conservative risk estimates – we lack the original signal data
+        max_profit = abs(entry_credit) * contracts * 100 if entry_credit > 0 else abs(total_market_value)
+        max_loss = max_profit * 2  # placeholder
+
+        stop_loss_val = abs(entry_credit) * CREDIT_STOP_LOSS_MULTIPLIER if entry_credit > 0 else 0
+        take_profit_val = abs(entry_credit) * (1 - TAKE_PROFIT_PCT) if entry_credit > 0 else 0
+
+        position_id = f"alpaca_import_{underlying}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        return ActivePosition(
+            position_id=position_id,
+            symbol=underlying,
+            strategy=strategy,
+            direction=direction,
+            leg_symbols=leg_symbols,
+            leg_sides=leg_sides,
+            entry_credit=entry_credit,
+            max_profit=max_profit,
+            max_loss=max_loss,
+            contracts=contracts,
+            current_value=total_market_value / (contracts * 100) if contracts else 0,
+            unrealized_pnl=unrealized_pnl,
+            stop_loss_value=stop_loss_val,
+            take_profit_value=take_profit_val,
+            entry_time=datetime.now(),
+            expiration=expiration,
+            signal=None,
+            order_id=None,
+        )
+
+    @staticmethod
+    def _guess_strategy(
+        leg_symbols: List[str],
+        leg_sides: List[str],
+    ) -> Tuple[StrategyType, Direction]:
+        """Best-effort strategy classification from OCC symbols and sides."""
+        # Classify each leg as call/put from its OCC symbol
+        types = []
+        for occ in leg_symbols:
+            cleaned = occ.replace(" ", "")
+            m = re.search(r'\d{6}([CP])', cleaned)
+            types.append(m.group(1) if m else "?")
+
+        calls = [(s, sd) for s, sd, t in zip(leg_symbols, leg_sides, types) if t == "C"]
+        puts  = [(s, sd) for s, sd, t in zip(leg_symbols, leg_sides, types) if t == "P"]
+
+        n_legs = len(leg_symbols)
+
+        # 4 legs: 2 puts + 2 calls → iron condor
+        if n_legs == 4 and len(puts) == 2 and len(calls) == 2:
+            return StrategyType.IRON_CONDOR, Direction.NEUTRAL
+
+        # 2 legs, same type
+        if n_legs == 2 and len(set(types)) == 1:
+            has_sell = any(sd == "sell" for sd in leg_sides)
+            has_buy  = any(sd == "buy"  for sd in leg_sides)
+            if types[0] == "P":
+                if has_sell and has_buy:
+                    return StrategyType.BULL_PUT_SPREAD, Direction.BULLISH
+                return StrategyType.BEAR_PUT_SPREAD, Direction.BEARISH
+            else:  # calls
+                if has_sell and has_buy:
+                    return StrategyType.BEAR_CALL_SPREAD, Direction.BEARISH
+                return StrategyType.BULL_CALL_SPREAD, Direction.BULLISH
+
+        # 2 legs, different types, both long → straddle
+        if n_legs == 2 and len(puts) == 1 and len(calls) == 1:
+            if all(sd == "buy" for sd in leg_sides):
+                return StrategyType.LONG_STRADDLE, Direction.NEUTRAL
+
+        # Fallback – still track the position
+        return StrategyType.IRON_CONDOR, Direction.NEUTRAL
+
     # ================================================================== #
     # MAIN TRADING LOOP
     # ================================================================== #
@@ -623,6 +911,9 @@ class IntegratedTradingSystem:
         self.logger.info(f"{'=' * 60}")
         self.logger.info(f"CYCLE #{cycle} - {datetime.now().strftime('%H:%M:%S')}")
         self.logger.info(f"{'=' * 60}")
+
+        # Step 0: Sync with Alpaca so we see positions opened/closed externally
+        self._sync_positions_with_alpaca()
 
         # Step 1: Monitor positions FIRST (close before opening new ones)
         closed_count = await self._monitor_and_manage_positions()

@@ -171,6 +171,7 @@ class SignalGeneratorV2:
         universe: Optional[List[str]] = None,
         min_confidence: float = 0.40,
         max_signals: int = MAX_SIGNALS_PER_SCAN,
+        max_daily_trades: int = 15,
     ):
         """
         Initialize signal generator.
@@ -179,10 +180,12 @@ class SignalGeneratorV2:
             universe: List of symbols to scan (default: DEFAULT_UNIVERSE)
             min_confidence: Minimum confidence to emit a signal
             max_signals: Maximum signals per scan
+            max_daily_trades: Max new-trade signals emitted per day (default 15)
         """
         self.universe = universe or DEFAULT_UNIVERSE
         self.min_confidence = min_confidence
         self.max_signals = max_signals
+        self.max_daily_trades = max_daily_trades
 
         # Sub-components
         self.iv_engine = IVAnalysisEngine()
@@ -259,14 +262,17 @@ class SignalGeneratorV2:
         qualified.sort(key=lambda s: s.confidence, reverse=True)
         result = qualified[: self.max_signals]
 
-        # Check daily limit (max 5 new trades per day)
-        daily_remaining = 5 - len(self._daily_signals)
+        # Check daily limit
+        daily_remaining = self.max_daily_trades - len(self._daily_signals)
         if daily_remaining <= 0:
-            self.logger.warning("Daily trade limit (5) reached - no new signals")
+            self.logger.warning(
+                f"Daily trade limit ({self.max_daily_trades}) reached - no new signals"
+            )
             return []
         result = result[:daily_remaining]
 
-        # Track
+        # Track (only actionable signals count — NO_TRADE is already
+        # filtered out above so everything in *result* is tradeable)
         self._daily_signals.extend(result)
 
         # Summary

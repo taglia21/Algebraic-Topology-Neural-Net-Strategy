@@ -80,12 +80,30 @@ WING_WIDTHS: Dict[str, float] = {
     "QQQ": 5.0,
     "IWM": 5.0,
 }
-DEFAULT_WING_WIDTH = 2.5
+DEFAULT_WING_WIDTH = 5.0  # Raised from 2.5 — too narrow caused same-contract
+
+# MINIMUM acceptable spread width (in dollars).  If the resolved legs are
+# closer than this the spread is rejected.
+MIN_SPREAD_WIDTH = 1.0
 
 
-def _get_wing_width(symbol: str) -> float:
-    """Get the wing width for a given underlying symbol."""
-    return WING_WIDTHS.get(symbol, DEFAULT_WING_WIDTH)
+def _get_wing_width(symbol: str, current_price: Optional[float] = None) -> float:
+    """Get the wing width for a given underlying symbol.
+
+    Falls back to a price-adaptive heuristic when no explicit mapping exists:
+      price < $50  → $2.5
+      price < $200 → $5
+      price >= $200 → $10
+    """
+    if symbol in WING_WIDTHS:
+        return WING_WIDTHS[symbol]
+    if current_price is not None:
+        if current_price < 50:
+            return 2.5
+        if current_price < 200:
+            return 5.0
+        return 10.0
+    return DEFAULT_WING_WIDTH
 
 
 # ============================================================================
@@ -219,6 +237,10 @@ class OptionContractResolver:
         """
         Resolve a two-leg spread to real OCC contracts.
 
+        Both legs are selected from a **single** contract fetch so that the
+        long leg is guaranteed to be a *different* strike from the short leg,
+        separated by at least ``MIN_SPREAD_WIDTH`` in strike dollars.
+
         For credit put spread (bull put):
           - Short leg: near-ATM put (higher strike, closer to current price)
           - Long leg:  OTM protective put (lower strike, further from price)
@@ -246,15 +268,15 @@ class OptionContractResolver:
                 self.logger.warning(f"Cannot get price for {symbol}")
                 return None
 
-            wing = _get_wing_width(symbol)
+            wing = _get_wing_width(symbol, current_price)
 
-            # Determine option type and strikes based on spread type
+            # Determine option type and strike targets based on spread type
             if spread_type in ("put_spread", "credit_spread"):
                 option_type = "put"
-                # Short put closer to ATM, long put further OTM
                 short_strike_target = self._estimate_strike(
                     current_price, "put", target_delta
                 )
+                # Long leg is further OTM (lower strike for puts)
                 long_strike_target = short_strike_target - wing
             elif spread_type == "call_spread":
                 option_type = "call"
@@ -270,47 +292,95 @@ class OptionContractResolver:
                 )
                 long_strike_target = short_strike_target - wing
 
-            # Resolve both legs
-            short_leg = await self.resolve_single_leg(
+            # ---------------------------------------------------------- #
+            # Fetch ALL contracts once, then pick two distinct legs.
+            # ---------------------------------------------------------- #
+            contracts = await self._fetch_contracts(
                 symbol=symbol,
                 option_type=option_type,
                 target_dte=target_dte,
-                target_strike=short_strike_target,
             )
+            if not contracts or len(contracts) < 2:
+                self.logger.warning(
+                    f"Not enough contracts for {symbol} {spread_type} spread "
+                    f"(found {len(contracts) if contracts else 0})"
+                )
+                return None
+
+            # Pick short leg – closest to short_strike_target
+            short_contract = self._select_best_contract(contracts, short_strike_target)
+            if short_contract is None:
+                self.logger.warning(f"Failed to select short contract for {symbol}")
+                return None
+            short_strike = float(getattr(short_contract, "strike_price", 0))
+
+            # Pick long leg – closest to long_strike_target, but MUST be a
+            # different strike separated by at least MIN_SPREAD_WIDTH dollars.
+            if option_type == "put":
+                # Long put must be at a LOWER strike than the short put
+                long_contract = self._select_best_contract_excluding(
+                    contracts,
+                    long_strike_target,
+                    exclude_strike=short_strike,
+                    must_be_below=short_strike,
+                    min_distance=max(MIN_SPREAD_WIDTH, wing * 0.5),
+                )
+            else:
+                # Long call must be at a HIGHER strike than the short call
+                long_contract = self._select_best_contract_excluding(
+                    contracts,
+                    long_strike_target,
+                    exclude_strike=short_strike,
+                    must_be_above=short_strike,
+                    min_distance=max(MIN_SPREAD_WIDTH, wing * 0.5),
+                )
+
+            if long_contract is None:
+                self.logger.warning(
+                    f"Failed to find a distinct long leg for {symbol} {spread_type} "
+                    f"(short strike={short_strike}, target long={long_strike_target})"
+                )
+                return None
+
+            # Hydrate both legs with live quotes
+            short_leg = await self._hydrate_contract(short_contract, symbol, option_type)
             if short_leg is None:
-                self.logger.warning(f"Failed to resolve short leg for {symbol} spread")
+                self.logger.warning(f"Failed to get quote for short leg {symbol}")
                 return None
 
-            long_leg = await self.resolve_single_leg(
-                symbol=symbol,
-                option_type=option_type,
-                target_dte=target_dte,
-                target_strike=long_strike_target,
-            )
+            long_leg = await self._hydrate_contract(long_contract, symbol, option_type)
             if long_leg is None:
-                self.logger.warning(f"Failed to resolve long leg for {symbol} spread")
+                self.logger.warning(f"Failed to get quote for long leg {symbol}")
                 return None
 
-            # Ensure legs are different contracts
+            # Final safety: reject if legs somehow ended up the same
             if short_leg.occ_symbol == long_leg.occ_symbol:
-                self.logger.warning(f"Short and long legs resolved to same contract for {symbol}")
+                self.logger.error(
+                    f"BUG: Short and long legs resolved to same contract "
+                    f"{short_leg.occ_symbol} for {symbol} — rejecting spread"
+                )
+                return None
+
+            strike_width = abs(short_leg.strike - long_leg.strike)
+            if strike_width < MIN_SPREAD_WIDTH:
+                self.logger.warning(
+                    f"Spread width ${strike_width:.2f} below minimum "
+                    f"${MIN_SPREAD_WIDTH:.2f} for {symbol} — rejecting"
+                )
                 return None
 
             # Calculate spread economics
-            # Credit spread: sell the expensive leg, buy the cheap protection
             net_credit = short_leg.mid_price - long_leg.mid_price
-            strike_width = abs(short_leg.strike - long_leg.strike)
             max_loss = (strike_width - net_credit) * 100  # per contract
             max_profit = net_credit * 100
 
-            # Sanity: net_credit should be positive for credit spread
             if net_credit <= 0:
                 self.logger.warning(
                     f"Spread {symbol} has non-positive credit: "
                     f"${net_credit:.2f} (short mid={short_leg.mid_price:.2f}, "
                     f"long mid={long_leg.mid_price:.2f})"
                 )
-                # Still return it — the engine can decide to skip
+                # Still return — the calling engine can decide to skip
 
             spread = ResolvedSpread(
                 long_leg=long_leg,
@@ -322,7 +392,9 @@ class OptionContractResolver:
 
             self.logger.info(
                 f"Resolved spread {symbol}: short={short_leg.occ_symbol} "
-                f"long={long_leg.occ_symbol} credit=${net_credit:.2f}"
+                f"(K={short_leg.strike}) long={long_leg.occ_symbol} "
+                f"(K={long_leg.strike}) width=${strike_width:.2f} "
+                f"credit=${net_credit:.2f}"
             )
             return spread
 
@@ -550,6 +622,78 @@ class OptionContractResolver:
 
         best = min(
             contracts,
+            key=lambda c: abs(float(getattr(c, "strike_price", 0)) - target_strike),
+        )
+        return best
+
+    def _select_best_contract_excluding(
+        self,
+        contracts: List,
+        target_strike: float,
+        exclude_strike: float,
+        min_distance: float = MIN_SPREAD_WIDTH,
+        must_be_above: Optional[float] = None,
+        must_be_below: Optional[float] = None,
+    ) -> Optional[object]:
+        """
+        Select the best contract closest to *target_strike*, but guaranteed
+        to be at a **different** strike from ``exclude_strike`` by at least
+        ``min_distance`` dollars.
+
+        Optionally enforces that the selected strike is strictly above or
+        below a threshold (used to keep the long leg further OTM).
+
+        Args:
+            contracts: Filtered list of OptionContract objects.
+            target_strike: Ideal strike price for this leg.
+            exclude_strike: Strike that must NOT be reused (the other leg).
+            min_distance: Minimum required distance from ``exclude_strike``.
+            must_be_above: If set, only consider strikes > this value.
+            must_be_below: If set, only consider strikes < this value.
+
+        Returns:
+            Best OptionContract or None.
+        """
+        candidates = []
+        for c in contracts:
+            k = float(getattr(c, "strike_price", 0))
+            if abs(k - exclude_strike) < min_distance:
+                continue
+            if must_be_above is not None and k <= must_be_above:
+                continue
+            if must_be_below is not None and k >= must_be_below:
+                continue
+            candidates.append(c)
+
+        if not candidates:
+            # Relax: allow any strike that is simply different from the
+            # excluded one (by at least $0.50) so we don't return None.
+            candidates = [
+                c for c in contracts
+                if abs(float(getattr(c, "strike_price", 0)) - exclude_strike) >= 0.50
+            ]
+            # Re-apply directional filter so we don't flip the spread
+            if must_be_above is not None:
+                candidates = [
+                    c for c in candidates
+                    if float(getattr(c, "strike_price", 0)) > must_be_above
+                ]
+            if must_be_below is not None:
+                candidates = [
+                    c for c in candidates
+                    if float(getattr(c, "strike_price", 0)) < must_be_below
+                ]
+
+        if not candidates:
+            self.logger.warning(
+                f"No eligible long-leg contract: exclude_strike={exclude_strike}, "
+                f"min_distance={min_distance}, must_above={must_be_above}, "
+                f"must_below={must_be_below}, pool_size={len(contracts)}"
+            )
+            return None
+
+        best = min(
+            candidates,
             key=lambda c: abs(float(getattr(c, "strike_price", 0)) - target_strike),
         )
         return best

@@ -560,11 +560,13 @@ class RuleBasedRegimeDetector:
 
         self._cache[symbol] = (result, datetime.now())
 
+        adx_str = f"{technicals.adx:.1f}" if technicals else "N/A"
+        atr_str = f"{technicals.atr_pct:.2%}" if technicals else "N/A"
         self.logger.info(
             f"Regime [{symbol}]: {result.regime.value} "
             f"(confidence: {result.confidence:.0%}) "
-            f"ADX={technicals.adx:.1f if technicals else 'N/A'} "
-            f"ATR%={technicals.atr_pct:.2% if technicals else 'N/A'}"
+            f"ADX={adx_str} "
+            f"ATR%={atr_str}"
         )
 
         return result

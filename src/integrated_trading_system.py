@@ -918,6 +918,13 @@ class IntegratedTradingSystem:
                         self.logger.info("Max positions reached, stopping execution")
                         break
 
+                    # Skip if we already hold a position in this underlying
+                    if self._has_position_in(signal.symbol):
+                        self.logger.info(
+                            f"Skipping {signal.symbol}: already have active position"
+                        )
+                        continue
+
                     success = await self._resolve_and_execute(signal)
                     if success:
                         new_trades += 1
@@ -1170,17 +1177,25 @@ class IntegratedTradingSystem:
         Resolve a TradeSignal to real contracts and execute via MLEG.
 
         Steps:
-        1. Calculate position size (Kelly-based)
-        2. Resolve to real OCC contracts
-        3. Build MLEG order
-        4. Validate buying power
-        5. Submit order
-        6. Track position
+        1. Check for duplicate underlying position
+        2. Calculate position size (Kelly-based)
+        3. Resolve to real OCC contracts
+        4. Build MLEG order
+        5. Validate buying power
+        6. Submit order
+        7. Track position
 
         Returns:
             True if trade executed successfully
         """
         try:
+            # Guard: reject if we already have exposure to this underlying
+            if self._has_position_in(signal.symbol):
+                self.logger.info(
+                    f"Skipping {signal.symbol}: duplicate underlying position"
+                )
+                return False
+
             # Step 1: Position sizing
             contracts = self._calculate_position_size(signal)
             if contracts <= 0:
@@ -1616,6 +1631,11 @@ class IntegratedTradingSystem:
     # ================================================================== #
     # UTILITIES
     # ================================================================== #
+
+    def _has_position_in(self, symbol: str) -> bool:
+        """Check if there is already an active position in this underlying."""
+        sym_upper = symbol.upper()
+        return any(p.symbol.upper() == sym_upper for p in self.active_positions)
 
     def _market_is_open(self) -> bool:
         """Check if market is currently open."""

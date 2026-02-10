@@ -77,8 +77,10 @@ MAX_PORTFOLIO_RISK_PCT = 0.02         # 2% max risk per trade
 POSITION_MONITOR_INTERVAL = 30        # Check positions every 30s
 CREDIT_STOP_LOSS_MULTIPLIER = 2.0     # Stop at 2x credit received
 TAKE_PROFIT_PCT = 0.50                # Take profit at 50% of max profit
-DTE_MANAGEMENT_THRESHOLD = 21         # Manage positions at 21 DTE
+DTE_CLOSE_THRESHOLD = 5               # Close positions at 5 DTE (gamma risk)
+DTE_MANAGEMENT_THRESHOLD = 21         # Log a warning at 21 DTE
 ORDER_TIMEOUT_SECONDS = 30            # Max time to wait for fill
+DEBIT_STOP_LOSS_PCT = 0.50            # Close debit positions at 50% loss
 
 
 # ============================================================================
@@ -126,23 +128,56 @@ class ActivePosition:
 
     @property
     def should_stop_loss(self) -> bool:
-        """Check if stop-loss triggered (loss exceeds 2x credit)."""
+        """Check if stop-loss triggered.
+
+        Credit strategies: loss exceeds 2x the credit received.
+        Debit strategies: unrealized loss exceeds 50% of debit paid.
+
+        Uses both the pre-computed stop_loss_value (when available) and a
+        direct P&L check so that Alpaca-imported positions (where
+        stop_loss_value may be 0) are still protected.
+        """
         if self.entry_credit > 0:  # Credit strategy
-            return self.current_value > self.stop_loss_value
+            # Primary: current cost-to-close exceeds threshold
+            if self.stop_loss_value > 0 and self.current_value > self.stop_loss_value:
+                return True
+            # Fallback P&L check: loss > 2x credit (in dollar terms)
+            max_acceptable_loss = self.entry_credit * CREDIT_STOP_LOSS_MULTIPLIER * self.contracts * 100
+            if self.unrealized_pnl < -max_acceptable_loss:
+                return True
+            return False
         else:  # Debit strategy
-            return self.unrealized_pnl_pct <= -50  # 50% loss on debit
+            return self.unrealized_pnl_pct <= -DEBIT_STOP_LOSS_PCT * 100
 
     @property
     def should_take_profit(self) -> bool:
-        """Check if profit target hit (50% of max profit)."""
+        """Check if profit target hit (50% of max profit for credit, 100% for debit).
+
+        Credit strategies: we captured >= 50% of the credit received.
+        Debit strategies: unrealized gain >= 100%.
+
+        Uses both the pre-computed take_profit_value and a direct P&L check.
+        """
         if self.entry_credit > 0:  # Credit strategy
-            return self.current_value <= self.take_profit_value
+            # Primary: cost-to-close dropped below threshold
+            if self.take_profit_value > 0 and self.current_value <= self.take_profit_value:
+                return True
+            # Fallback P&L check: captured >= 50% of max credit
+            target_profit = self.entry_credit * TAKE_PROFIT_PCT * self.contracts * 100
+            if self.unrealized_pnl >= target_profit and target_profit > 0:
+                return True
+            return False
         else:  # Debit strategy
             return self.unrealized_pnl_pct >= 100  # 100% gain on debit
 
     @property
+    def should_close_dte(self) -> bool:
+        """Close position at 5 DTE to avoid gamma risk."""
+        return self.days_to_expiry <= DTE_CLOSE_THRESHOLD
+
+    @property
     def should_manage_dte(self) -> bool:
-        """Check if position needs to be managed at 21 DTE."""
+        """Check if position needs attention at 21 DTE (warning level)."""
         return self.days_to_expiry <= DTE_MANAGEMENT_THRESHOLD
 
 
@@ -949,10 +984,10 @@ class IntegratedTradingSystem:
         """
         Monitor all positions and close as needed.
 
-        Close triggers:
-        1. Stop-loss: position value > 2x credit received
-        2. Take-profit: 50% of max profit captured
-        3. DTE management: position approaching expiration (21 DTE)
+        Close triggers (evaluated in priority order):
+        1. Stop-loss: loss exceeds 2x credit (credit) or 50% (debit)
+        2. Take-profit: captured >= 50% of max profit (credit) or 100% (debit)
+        3. DTE close: position within 5 DTE — forced close (gamma risk)
 
         Returns:
             Number of positions closed
@@ -969,27 +1004,37 @@ class IntegratedTradingSystem:
         for pos in self.active_positions:
             close_reason = None
 
-            # Check stop-loss
+            # 1. Check stop-loss (highest priority — cut losses immediately)
             if pos.should_stop_loss:
                 close_reason = "STOP_LOSS"
                 self.logger.warning(
                     f"STOP LOSS: {pos.symbol} {pos.strategy.value} "
-                    f"P&L: ${pos.unrealized_pnl:+,.2f} ({pos.unrealized_pnl_pct:+.1f}%)"
+                    f"P&L: ${pos.unrealized_pnl:+,.2f} ({pos.unrealized_pnl_pct:+.1f}%) "
+                    f"credit={pos.entry_credit:.2f} val={pos.current_value:.2f}"
                 )
 
-            # Check take-profit
+            # 2. Check take-profit
             elif pos.should_take_profit:
                 close_reason = "TAKE_PROFIT"
                 self.logger.info(
                     f"PROFIT TARGET: {pos.symbol} {pos.strategy.value} "
-                    f"P&L: ${pos.unrealized_pnl:+,.2f} ({pos.unrealized_pnl_pct:+.1f}%)"
+                    f"P&L: ${pos.unrealized_pnl:+,.2f} ({pos.unrealized_pnl_pct:+.1f}%) "
+                    f"credit={pos.entry_credit:.2f} val={pos.current_value:.2f}"
                 )
 
-            # Check DTE management
-            elif pos.should_manage_dte:
-                close_reason = "DTE_MANAGEMENT"
+            # 3. Forced close at 5 DTE (gamma risk)
+            elif pos.should_close_dte:
+                close_reason = "DTE_CLOSE"
                 self.logger.info(
-                    f"DTE MANAGEMENT: {pos.symbol} at {pos.days_to_expiry} DTE"
+                    f"DTE CLOSE (<=5): {pos.symbol} at {pos.days_to_expiry} DTE "
+                    f"P&L: ${pos.unrealized_pnl:+,.2f}"
+                )
+
+            # 4. Warning at 21 DTE (informational only — no close)
+            elif pos.should_manage_dte:
+                self.logger.info(
+                    f"  DTE WARNING: {pos.symbol} at {pos.days_to_expiry} DTE "
+                    f"P&L: ${pos.unrealized_pnl:+,.2f} — consider managing"
                 )
 
             if close_reason:
@@ -1002,12 +1047,12 @@ class IntegratedTradingSystem:
                         self.stats["stop_losses"] += 1
                     elif close_reason == "TAKE_PROFIT":
                         self.stats["profit_targets"] += 1
-                    elif close_reason == "DTE_MANAGEMENT":
+                    elif close_reason in ("DTE_CLOSE", "DTE_MANAGEMENT"):
                         self.stats["dte_exits"] += 1
 
                     self.stats["total_realized_pnl"] += pos.unrealized_pnl
-            else:
-                # Log position status
+            elif not pos.should_manage_dte:
+                # Log position status (only if we didn't already log a DTE warning)
                 self.logger.info(
                     f"  {pos.symbol} {pos.strategy.value}: "
                     f"P&L ${pos.unrealized_pnl:+,.2f} ({pos.unrealized_pnl_pct:+.1f}%) "

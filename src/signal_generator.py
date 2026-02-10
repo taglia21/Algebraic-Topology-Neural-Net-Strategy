@@ -263,13 +263,13 @@ class SignalGeneratorV2:
         result = qualified[: self.max_signals]
 
         # Check daily limit
-        daily_remaining = self.max_daily_trades - len(self._daily_signals)
-        if daily_remaining <= 0:
-            self.logger.warning(
-                f"Daily trade limit ({self.max_daily_trades}) reached - no new signals"
-            )
-            return []
-        result = result[:daily_remaining]
+        # LIMIT REMOVED: daily_remaining = self.max_daily_trades - len(self._daily_signals)
+        # LIMIT REMOVED: if daily_remaining <= 0:
+        # LIMIT REMOVED: self.logger.warning(
+        # LIMIT REMOVED: f"Daily trade limit ({self.max_daily_trades}) reached - no new signals"
+        # LIMIT REMOVED: )
+        # LIMIT REMOVED: return []
+        # LIMIT REMOVED: result = result[:daily_remaining]
 
         # Track (only actionable signals count — NO_TRADE is already
         # filtered out above so everything in *result* is tradeable)

@@ -188,12 +188,12 @@ class MLEGOrderBuilder:
             OptionLegRequest(
                 symbol=short_occ,
                 side=OrderSide.SELL,
-                ratio_qty=str(quantity),
+                ratio_qty='1',
             ),
             OptionLegRequest(
                 symbol=long_occ,
                 side=OrderSide.BUY,
-                ratio_qty=str(quantity),
+                ratio_qty='1',
             ),
         ]
 
@@ -235,12 +235,12 @@ class MLEGOrderBuilder:
             OptionLegRequest(
                 symbol=long_occ,
                 side=OrderSide.BUY,
-                ratio_qty=str(quantity),
+                ratio_qty='1',
             ),
             OptionLegRequest(
                 symbol=short_occ,
                 side=OrderSide.SELL,
-                ratio_qty=str(quantity),
+                ratio_qty='1',
             ),
         ]
 
@@ -289,22 +289,22 @@ class MLEGOrderBuilder:
             OptionLegRequest(
                 symbol=put_long_occ,
                 side=OrderSide.BUY,
-                ratio_qty=str(quantity),
+                ratio_qty='1',
             ),
             OptionLegRequest(
                 symbol=put_short_occ,
                 side=OrderSide.SELL,
-                ratio_qty=str(quantity),
+                ratio_qty='1',
             ),
             OptionLegRequest(
                 symbol=call_short_occ,
                 side=OrderSide.SELL,
-                ratio_qty=str(quantity),
+                ratio_qty='1',
             ),
             OptionLegRequest(
                 symbol=call_long_occ,
                 side=OrderSide.BUY,
-                ratio_qty=str(quantity),
+                ratio_qty='1',
             ),
         ]
 
@@ -345,12 +345,12 @@ class MLEGOrderBuilder:
             OptionLegRequest(
                 symbol=call_occ,
                 side=OrderSide.BUY,
-                ratio_qty=str(quantity),
+                ratio_qty='1',
             ),
             OptionLegRequest(
                 symbol=put_occ,
                 side=OrderSide.BUY,
-                ratio_qty=str(quantity),
+                ratio_qty='1',
             ),
         ]
 

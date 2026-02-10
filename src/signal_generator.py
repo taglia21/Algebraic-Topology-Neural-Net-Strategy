@@ -51,20 +51,75 @@ logger = logging.getLogger(__name__)
 
 # Liquid underlyings with good options markets
 DEFAULT_UNIVERSE = [
-    "SPY",    # S&P 500 ETF - most liquid
+    # === MAJOR ETFs (highest options liquidity) ===
+    "SPY",    # S&P 500 ETF
     "QQQ",    # Nasdaq 100 ETF
     "IWM",    # Russell 2000 ETF
+    "DIA",    # Dow Jones ETF
+    "EEM",    # Emerging Markets ETF
+    "XLF",    # Financials Sector
+    "XLK",    # Technology Sector
+    "XLE",    # Energy Sector
+    "XLV",    # Healthcare Sector
+    "XLP",    # Consumer Staples
+    "XLI",    # Industrials Sector
+    "GLD",    # Gold ETF
+    "SLV",    # Silver ETF
+    "TLT",    # 20+ Year Treasury Bond ETF
+    "HYG",    # High Yield Corporate Bond
+    "SMH",    # Semiconductor ETF
+    "XBI",    # Biotech ETF
+    "ARKK",   # ARK Innovation ETF
+    "GDX",    # Gold Miners ETF
+    "EWZ",    # Brazil ETF
+    "KWEB",   # China Internet ETF
+    # === MEGA-CAP TECH (highest single-stock options volume) ===
     "AAPL",   # Apple
     "MSFT",   # Microsoft
     "NVDA",   # NVIDIA
-    "TSLA",   # Tesla
     "AMZN",   # Amazon
-    "META",   # Meta
     "GOOGL",  # Alphabet
+    "META",   # Meta Platforms
+    "TSLA",   # Tesla
+    "AVGO",   # Broadcom
+    "NFLX",   # Netflix
+    "CRM",    # Salesforce
+    # === HIGH-VOLUME GROWTH/MOMENTUM ===
+    "AMD",    # Advanced Micro Devices
+    "COIN",   # Coinbase
+    "PLTR",   # Palantir
+    "UBER",   # Uber
+    "SHOP",   # Shopify
+    "SNOW",   # Snowflake
+    "SQ",     # Block (Square)
+    "PYPL",   # PayPal
+    "ABNB",   # Airbnb
+    "ARM",    # ARM Holdings
+    "SMCI",   # Super Micro Computer
+    "MU",     # Micron Technology
+    "ROKU",   # Roku
+    "MARA",   # Marathon Digital
+    # === BLUE-CHIP VALUE/DIVIDEND ===
+    "JPM",    # JPMorgan Chase
+    "BAC",    # Bank of America
+    "V",      # Visa
+    "MA",     # Mastercard
+    "WMT",    # Walmart
+    "JNJ",    # Johnson & Johnson
+    "XOM",    # Exxon Mobil
+    "CVX",    # Chevron
+    "BA",     # Boeing
+    "DIS",    # Disney
+    "INTC",   # Intel
+    "LLY",    # Eli Lilly
+    "UNH",    # UnitedHealth
+    "HD",     # Home Depot
+    "CAT",    # Caterpillar
+    "GS",     # Goldman Sachs
 ]
 
 # Maximum signals per scan cycle
-MAX_SIGNALS_PER_SCAN = 5
+MAX_SIGNALS_PER_SCAN = 999  # Effectively unlimited
 
 
 # ============================================================================

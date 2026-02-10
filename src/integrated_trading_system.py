@@ -171,6 +171,10 @@ class MLEGOrderBuilder:
         For bull put spread: sell higher put, buy lower put.
         For bear call spread: sell lower call, buy higher call.
 
+        Per Alpaca MLEG docs:
+        - symbol and side must NOT be set (determined by legs)
+        - limit_price negative = credit, positive = debit
+
         Args:
             long_occ: OCC symbol for the long (protective) leg
             short_occ: OCC symbol for the short (income) leg
@@ -180,13 +184,6 @@ class MLEGOrderBuilder:
         Returns:
             LimitOrderRequest with MLEG legs
         """
-        # Extract underlying from OCC symbol (letters before first digit)
-        underlying = ""
-        for ch in long_occ:
-            if ch.isdigit():
-                break
-            underlying += ch
-
         legs = [
             OptionLegRequest(
                 symbol=short_occ,
@@ -201,12 +198,10 @@ class MLEGOrderBuilder:
         ]
 
         return LimitOrderRequest(
-            symbol=underlying,
             qty=quantity,
-            side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
             order_class=OrderClass.MLEG,
-            limit_price=round(net_credit, 2),
+            limit_price=-round(net_credit, 2),  # negative = credit
             legs=legs,
         )
 
@@ -223,6 +218,10 @@ class MLEGOrderBuilder:
         For bull call spread: buy lower call, sell higher call.
         For bear put spread: buy higher put, sell lower put.
 
+        Per Alpaca MLEG docs:
+        - symbol and side must NOT be set (determined by legs)
+        - limit_price positive = debit
+
         Args:
             long_occ: OCC symbol for the long (main) leg
             short_occ: OCC symbol for the short (financing) leg
@@ -232,12 +231,6 @@ class MLEGOrderBuilder:
         Returns:
             LimitOrderRequest with MLEG legs
         """
-        underlying = ""
-        for ch in long_occ:
-            if ch.isdigit():
-                break
-            underlying += ch
-
         legs = [
             OptionLegRequest(
                 symbol=long_occ,
@@ -252,12 +245,10 @@ class MLEGOrderBuilder:
         ]
 
         return LimitOrderRequest(
-            symbol=underlying,
             qty=quantity,
-            side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
             order_class=OrderClass.MLEG,
-            limit_price=round(net_debit, 2),
+            limit_price=round(net_debit, 2),  # positive = debit
             legs=legs,
         )
 
@@ -279,6 +270,10 @@ class MLEGOrderBuilder:
         - SELL lower call (income)
         - BUY higher call (protection)
 
+        Per Alpaca MLEG docs:
+        - symbol and side must NOT be set (determined by legs)
+        - limit_price negative = credit
+
         Args:
             put_long_occ: Long put OCC symbol (lowest strike)
             put_short_occ: Short put OCC symbol
@@ -290,12 +285,6 @@ class MLEGOrderBuilder:
         Returns:
             LimitOrderRequest with 4 MLEG legs
         """
-        underlying = ""
-        for ch in put_long_occ:
-            if ch.isdigit():
-                break
-            underlying += ch
-
         legs = [
             OptionLegRequest(
                 symbol=put_long_occ,
@@ -320,12 +309,10 @@ class MLEGOrderBuilder:
         ]
 
         return LimitOrderRequest(
-            symbol=underlying,
             qty=quantity,
-            side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY,
             order_class=OrderClass.MLEG,
-            limit_price=round(net_credit, 2),
+            limit_price=-round(net_credit, 2),  # negative = credit
             legs=legs,
         )
 
@@ -341,6 +328,10 @@ class MLEGOrderBuilder:
 
         Buy call + buy put at same strike.
 
+        Per Alpaca MLEG docs:
+        - symbol and side must NOT be set (determined by legs)
+        - limit_price positive = debit
+
         Args:
             call_occ: ATM call OCC symbol
             put_occ: ATM put OCC symbol
@@ -350,12 +341,6 @@ class MLEGOrderBuilder:
         Returns:
             LimitOrderRequest with 2 MLEG legs
         """
-        underlying = ""
-        for ch in call_occ:
-            if ch.isdigit():
-                break
-            underlying += ch
-
         legs = [
             OptionLegRequest(
                 symbol=call_occ,
@@ -370,12 +355,10 @@ class MLEGOrderBuilder:
         ]
 
         return LimitOrderRequest(
-            symbol=underlying,
             qty=quantity,
-            side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
             order_class=OrderClass.MLEG,
-            limit_price=round(net_debit, 2),
+            limit_price=round(net_debit, 2),  # positive = debit
             legs=legs,
         )
 

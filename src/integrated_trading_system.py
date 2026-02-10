@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION
 # ============================================================================
 
-MAX_CONCURRENT_POSITIONS = 5
+MAX_CONCURRENT_POSITIONS = 50
 MAX_PORTFOLIO_RISK_PCT = 0.02         # 2% max risk per trade
 POSITION_MONITOR_INTERVAL = 30        # Check positions every 30s
 CREDIT_STOP_LOSS_MULTIPLIER = 2.0     # Stop at 2x credit received

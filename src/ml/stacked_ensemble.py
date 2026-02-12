@@ -248,11 +248,24 @@ class StackedEnsemble:
         
         logger.info(f"Training stacked ensemble with {n_learners} base learners, {n_folds} folds")
         
-        # Generate out-of-fold predictions
+        # Generate out-of-fold predictions using TimeSeriesSplit (FIX: was KFold with shuffle — lookahead bias)
         oof_predictions = np.zeros((len(X), n_learners))
-        kf = KFold(n_splits=n_folds, shuffle=True, random_state=self.config.random_state)
-        
-        for fold_idx, (train_idx, val_idx) in enumerate(kf.split(X_scaled)):
+        oof_valid = np.zeros(len(X), dtype=bool)  # track which rows have OOF preds
+
+        fold_size = len(X) // (n_folds + 1)
+        purge_gap = 5  # days between train and test to prevent leakage
+
+        for fold_idx in range(n_folds):
+            train_end = fold_size * (fold_idx + 1)
+            test_start = train_end + purge_gap
+            test_end = min(test_start + fold_size, len(X))
+
+            if test_start >= len(X) or test_end <= test_start:
+                continue
+
+            train_idx = list(range(0, train_end))
+            val_idx = list(range(test_start, test_end))
+
             X_train_fold = X_scaled[train_idx]
             y_train_fold = y[train_idx]
             X_val_fold = X_scaled[val_idx]
@@ -265,12 +278,16 @@ class StackedEnsemble:
                 
                 # Get out-of-fold predictions
                 oof_predictions[val_idx, learner_idx] = fold_learner.predict(X_val_fold)
+                oof_valid[val_idx] = True
                 
             logger.debug(f"Fold {fold_idx + 1}/{n_folds} complete")
         
-        # Train meta-learner on out-of-fold predictions
+        # Train meta-learner on out-of-fold predictions (only valid rows)
         self.meta_learner = Ridge(alpha=self.config.meta_alpha)
-        self.meta_learner.fit(oof_predictions, y)
+        if oof_valid.sum() >= 50:
+            self.meta_learner.fit(oof_predictions[oof_valid], y[oof_valid])
+        else:
+            self.meta_learner.fit(oof_predictions, y)
         self.base_learner_weights_ = self.meta_learner.coef_
         
         logger.info(f"Meta-learner weights: {dict(zip(self.base_learner_names, np.round(self.base_learner_weights_, 4)))}")

@@ -20,35 +20,53 @@ SECTOR_MAP: Dict[str, str] = {
     'AAPL': 'technology', 'MSFT': 'technology', 'GOOGL': 'technology',
     'NVDA': 'technology', 'META': 'technology', 'AMD': 'technology',
     'CRM': 'technology', 'PLTR': 'technology', 'SHOP': 'technology',
-    'XLK': 'technology',
+    'XLK': 'technology', 'ADBE': 'technology', 'ORCL': 'technology',
+    'AVGO': 'technology', 'QCOM': 'technology',
     # Consumer Discretionary
     'AMZN': 'consumer_discretionary', 'TSLA': 'consumer_discretionary',
-    'NFLX': 'consumer_discretionary',
+    'NFLX': 'consumer_discretionary', 'DIS': 'consumer_discretionary',
     # Financials
     'JPM': 'financials', 'GS': 'financials', 'BAC': 'financials',
     'V': 'financials', 'MA': 'financials', 'XLF': 'financials',
     'SQ': 'financials', 'PYPL': 'financials', 'COIN': 'financials',
     'MSTR': 'financials',
+    # Healthcare
+    'UNH': 'healthcare', 'JNJ': 'healthcare', 'LLY': 'healthcare',
+    'PFE': 'healthcare', 'ABBV': 'healthcare', 'MRK': 'healthcare',
     # Energy
-    'XOM': 'energy', 'CVX': 'energy',
+    'XOM': 'energy', 'CVX': 'energy', 'COP': 'energy', 'SLB': 'energy',
     # Consumer Staples
     'KO': 'consumer_staples', 'PEP': 'consumer_staples',
-    # Industrials / Home Improvement
+    'PG': 'consumer_staples', 'COST': 'consumer_staples', 'WMT': 'consumer_staples',
+    # Industrials
     'HD': 'industrials', 'LOW': 'industrials',
+    'CAT': 'industrials', 'HON': 'industrials', 'UPS': 'industrials',
+    'GE': 'industrials', 'RTX': 'industrials', 'DE': 'industrials',
+    # Utilities
+    'NEE': 'utilities', 'SO': 'utilities',
+    # REITs
+    'AMT': 'reits',
+    # Materials
+    'LIN': 'materials', 'FCX': 'materials', 'NEM': 'materials',
     # Broad Market ETFs (treated as their own "sector" so they don't crowd out)
     'SPY': 'broad_market', 'QQQ': 'broad_market', 'IWM': 'broad_market',
+    'DIA': 'broad_market',
 }
 
 # Default maximum % of equity that any single sector can consume.
 # Broad-market ETFs get a higher cap since they're already diversified.
 DEFAULT_SECTOR_CAPS: Dict[str, float] = {
-    'technology': 0.35,            # max 35% in tech
+    'technology': 0.30,            # max 30% in tech (reduced from 35%)
     'consumer_discretionary': 0.20,
     'financials': 0.20,
+    'healthcare': 0.20,
     'energy': 0.15,
     'consumer_staples': 0.15,
     'industrials': 0.15,
-    'broad_market': 0.30,          # SPY/QQQ/IWM can be up to 30%
+    'utilities': 0.10,
+    'reits': 0.10,
+    'materials': 0.10,
+    'broad_market': 0.30,          # SPY/QQQ/IWM/DIA can be up to 30%
     'unknown': 0.10,               # unknown tickers limited to 10%
 }
 

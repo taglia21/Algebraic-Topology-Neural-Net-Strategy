@@ -64,6 +64,13 @@ except ImportError:
     ML_AVAILABLE = False
 
 try:
+    from src.ml.adaptive_ensemble import AdaptiveEnsemble
+    ADAPTIVE_ML_AVAILABLE = True
+except ImportError:
+    AdaptiveEnsemble = None
+    ADAPTIVE_ML_AVAILABLE = False
+
+try:
     from src.ml.continuous_learner import ContinuousLearner
     CONTINUOUS_LEARNER_AVAILABLE = True
 except ImportError:
@@ -229,19 +236,18 @@ class EnhancedTradingEngine:
             except Exception as e:
                 logger.warning(f"GARCH init failed: {e}")
 
+        # AdaptiveEnsemble — self-training ML pipeline (replaces broken StackedEnsemble)
+        self.adaptive_ml = None
+        if ADAPTIVE_ML_AVAILABLE:
+            try:
+                self.adaptive_ml = AdaptiveEnsemble()
+                logger.info("✓ AdaptiveEnsemble (self-training ML) wired into equity engine")
+            except Exception as e:
+                logger.warning(f"AdaptiveEnsemble init failed: {e}")
+
+        # Legacy ML (kept for fallback but no longer primary)
         self.ml_ensemble = None
         self.ml_transformer = None
-        if ML_AVAILABLE:
-            try:
-                self.ml_ensemble = StackedEnsemble()
-                logger.info("✓ ML StackedEnsemble wired into equity engine")
-            except Exception as e:
-                logger.warning(f"StackedEnsemble init failed: {e}")
-            try:
-                self.ml_transformer = TransformerPredictor()
-                logger.info("✓ ML TransformerPredictor wired into equity engine")
-            except Exception as e:
-                logger.warning(f"TransformerPredictor init failed: {e}")
 
         self.continuous_learner = None
         if CONTINUOUS_LEARNER_AVAILABLE:
@@ -262,7 +268,7 @@ class EnhancedTradingEngine:
         logger.info("EnhancedTradingEngine initialized with all modules (including Medallion Math)")
         logger.info(f"Phase4 modules: Aggregator={self.signal_aggregator is not None}, "
                    f"CAPM={self.capm_model is not None}, GARCH={self.garch_model is not None}, "
-                   f"ML={self.ml_ensemble is not None}")
+                   f"AdaptiveML={self.adaptive_ml is not None}")
     
     @retry_yfinance(max_retries=3)
     def _calculate_atr(self, symbol: str, period: int = 14) -> float:
@@ -536,36 +542,17 @@ class EnhancedTradingEngine:
             except Exception as e:
                 logger.debug(f"SignalAggregator failed for {symbol}: {e}")
 
-        # 4d: ML StackedEnsemble confidence gating
-        ml_ensemble_signal = None
-        if self.ml_ensemble is not None:
+        # 4d: AdaptiveEnsemble ML signal (self-training, replaces broken StackedEnsemble + Transformer)
+        ml_signal = None
+        ml_confidence = 0.0
+        if self.adaptive_ml is not None:
             try:
-                features = self._build_ml_features(symbol)
-                if features is not None:
-                    prediction = self.ml_ensemble.predict(features)
-                    if hasattr(prediction, '__len__') and len(prediction) > 0:
-                        pred_val = float(prediction[-1]) if hasattr(prediction, '__getitem__') else float(prediction)
-                    else:
-                        pred_val = float(prediction)
-                    ml_ensemble_signal = float(np.clip(pred_val, -1, 1))
-                    logger.info(f"  ML Ensemble: prediction={ml_ensemble_signal:.3f}")
-                    # Use ML signal to adjust score
-                    aggregator_boost += ml_ensemble_signal * 0.10  # ±10% additional
+                ml_signal, ml_confidence = self.adaptive_ml.predict(symbol)
+                logger.info(f"  AdaptiveML: signal={ml_signal:+.3f}, confidence={ml_confidence:.3f}")
+                # ML contributes up to ±15% of combined score, weighted by its own confidence
+                aggregator_boost += ml_signal * ml_confidence * 0.15
             except Exception as e:
-                logger.debug(f"ML Ensemble failed for {symbol}: {e}")
-
-        # 4e: Transformer prediction
-        ml_transformer_signal = None
-        if self.ml_transformer is not None:
-            try:
-                prediction = self.ml_transformer.predict(symbol)
-                if prediction is not None:
-                    direction_prob = getattr(prediction, "direction_prob", 0.5)
-                    ml_transformer_signal = float((direction_prob - 0.5) * 2)
-                    logger.info(f"  Transformer: direction_prob={direction_prob:.3f}, signal={ml_transformer_signal:.3f}")
-                    aggregator_boost += ml_transformer_signal * 0.08  # ±8%
-            except Exception as e:
-                logger.debug(f"Transformer failed for {symbol}: {e}")
+                logger.debug(f"AdaptiveEnsemble failed for {symbol}: {e}")
 
         combined_score = self._calculate_combined_score(mtf_score, sentiment_score)
         combined_score = max(0.0, min(1.0, combined_score + aggregator_boost))
@@ -667,7 +654,8 @@ class EnhancedTradingEngine:
         # Final decision
         is_tradeable = (
             len(rejection_reasons) == 0 and
-            signal in [TradeSignal.BUY, TradeSignal.STRONG_BUY] and
+            signal in [TradeSignal.BUY, TradeSignal.STRONG_BUY,
+                       TradeSignal.SELL, TradeSignal.STRONG_SELL] and
             quantity > 0
         )
         
@@ -785,6 +773,10 @@ class EnhancedTradingEngine:
         if self.continuous_learner is not None:
             try:
                 from src.ml.continuous_learner import TradeResult
+                agg_signal_obj = decision.metadata.get("aggregated_signal")
+                regime_val = "unknown"
+                if agg_signal_obj is not None and hasattr(agg_signal_obj, 'regime'):
+                    regime_val = agg_signal_obj.regime.value if hasattr(agg_signal_obj.regime, 'value') else str(agg_signal_obj.regime)
                 result = TradeResult(
                     timestamp=datetime.now(),
                     ticker=symbol,
@@ -798,8 +790,7 @@ class EnhancedTradingEngine:
                         "sentiment": decision.sentiment_score,
                         "combined": decision.combined_score,
                     },
-                    regime=decision.metadata.get("aggregated_signal", {}).regime.value
-                           if decision.metadata.get("aggregated_signal") else "unknown",
+                    regime=regime_val,
                 )
                 learner_result = self.continuous_learner.record_trade(result)
                 if learner_result.get("needs_recalibration"):
@@ -814,6 +805,17 @@ class EnhancedTradingEngine:
                 self.signal_aggregator.update_after_trade(symbol, agg_signal, pnl)
             except Exception as e:
                 logger.debug(f"SignalAggregator trade update failed: {e}")
+
+        # Feed outcome to AdaptiveEnsemble for online learning
+        if self.adaptive_ml is not None:
+            try:
+                self.adaptive_ml.record_outcome(
+                    symbol=symbol,
+                    signal=decision.combined_score * 2 - 1,  # map [0,1] → [-1,1]
+                    pnl=pnl,
+                )
+            except Exception as e:
+                logger.debug(f"AdaptiveEnsemble outcome recording failed: {e}")
 
     def _build_ml_features(self, symbol: str) -> Optional[np.ndarray]:
         """Build feature vector for ML models from recent price data."""

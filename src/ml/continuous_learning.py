@@ -385,19 +385,26 @@ class ContinuousLearner:
                     optimizer: optim.Optimizer, criterion: nn.Module) -> float:
         """Train for one epoch."""
         model.train()
-        total_loss = 0
-        
+        total_loss = 0.0
+        n_batches = 0
+
         for X_batch, y_batch in dataloader:
             X_batch = X_batch.to(self.device)
             y_batch = y_batch.to(self.device)
-            
+
             optimizer.zero_grad()
             outputs = model(X_batch)
-            
+
             loss = criterion(outputs['direction'], y_batch)
             loss.backward()
-            
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+            total_loss += loss.item()
+            n_batches += 1
+
+        return total_loss / max(n_batches, 1)
     
     def save_model(self, name: str):
         """Save model checkpoint."""
@@ -408,7 +415,7 @@ class ContinuousLearner:
             'model_state': self.model.state_dict(),
             'feature_names': self.feature_engineer.feature_names,
             'training_history': self.training_history,
-            'best_sharpe': self.best_sharpe
+            'best_sharpe': getattr(self, 'best_sharpe', 0.0)
         }, path)
         logger.info(f"Model saved to {path}")
 

@@ -407,22 +407,28 @@ async def run_premarket_analysis():
 # ---------------------------------------------------------------------------
 
 EQUITY_UNIVERSE = [
-    # ETFs / broad market
-    "SPY", "QQQ", "IWM",
-    # Technology (~27%)
-    "AAPL", "MSFT", "GOOGL", "NVDA",
+    # Broad Market ETFs
+    "SPY", "QQQ", "IWM", "DIA",
+    # Technology (~20%)
+    "AAPL", "MSFT", "GOOGL", "NVDA", "AMD", "CRM", "ADBE", "ORCL",
     # Consumer / Communication
-    "AMZN", "META", "TSLA",
+    "AMZN", "META", "TSLA", "NFLX", "DIS",
     # Financials
-    "JPM", "V", "GS",
+    "JPM", "V", "GS", "MA", "BAC",
     # Healthcare
-    "UNH", "JNJ", "LLY",
+    "UNH", "JNJ", "LLY", "PFE", "ABBV", "MRK",
     # Energy
-    "XOM", "CVX",
+    "XOM", "CVX", "COP", "SLB",
     # Industrials
-    "CAT", "HON",
+    "CAT", "HON", "UPS", "GE", "RTX", "DE",
     # Consumer Staples
-    "PG", "KO",
+    "PG", "KO", "PEP", "COST", "WMT",
+    # Utilities / REITs
+    "NEE", "SO", "AMT",
+    # Materials
+    "LIN", "FCX", "NEM",
+    # Semiconductors (separate from broad tech)
+    "AVGO", "QCOM",
 ]
 
 EQUITY_CYCLE_INTERVAL = 300  # 5 minutes

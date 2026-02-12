@@ -961,36 +961,46 @@ class AutonomousTradingEngine:
         self.logger.info(f"Total Trades: {self.stats['trades_executed']}")
         self.logger.info(f"Total P&L: ${self.stats['total_pnl']:,.0f}")
     
+    @staticmethod
+    def _to_json_native(v):
+        """Convert a value to a JSON-native type preserving numeric precision."""
+        if v is None or isinstance(v, (bool, int, float, str)):
+            return v
+        if isinstance(v, (list, tuple)):
+            return [AutonomousTradingEngine._to_json_native(i) for i in v]
+        if isinstance(v, dict):
+            return {str(k): AutonomousTradingEngine._to_json_native(val) for k, val in v.items()}
+        if isinstance(v, datetime):
+            return v.isoformat()
+        if hasattr(v, 'value'):  # Enum
+            return v.value
+        if hasattr(v, '__dict__'):
+            return {k: AutonomousTradingEngine._to_json_native(val) for k, val in vars(v).items()}
+        return str(v)
+
     def _save_state(self):
         """Save engine state to file with proper serialization (issue #16)."""
         # Serialize positions to plain dicts with JSON-native types only
         serializable_positions = []
         for pos in self.current_positions:
             if isinstance(pos, dict):
-                clean = {}
-                for k, v in pos.items():
-                    if hasattr(v, '__dict__'):
-                        # Convert dataclass/object to dict of primitives
-                        clean[k] = {ak: str(av) for ak, av in vars(v).items()}
-                    else:
-                        clean[k] = v
-                serializable_positions.append(clean)
+                serializable_positions.append(self._to_json_native(pos))
             elif hasattr(pos, '__dict__'):
-                serializable_positions.append({k: str(v) for k, v in vars(pos).items()})
+                serializable_positions.append(self._to_json_native(vars(pos)))
             else:
                 serializable_positions.append(str(pos))
 
         state = {
-            "portfolio_value": self.portfolio_value,
-            "portfolio_delta": self.portfolio_delta,
+            "portfolio_value": float(self.portfolio_value),
+            "portfolio_delta": float(self.portfolio_delta),
             "current_positions": serializable_positions,
-            "stats": self.stats,
+            "stats": self._to_json_native(self.stats),
             "last_update": datetime.now().isoformat(),
         }
         
         try:
             with open(self.state_file, "w") as f:
-                json.dump(state, f, indent=2, default=str)
+                json.dump(state, f, indent=2)
         except Exception as e:
             self.logger.error(f"Failed to save state: {e}")
     

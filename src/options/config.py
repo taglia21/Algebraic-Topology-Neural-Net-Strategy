@@ -44,7 +44,7 @@ RISK_CONFIG: Dict[str, Any] = {
     "iv_rank_extreme_low": 20.0,  # Extremely low IV
     
     # Strategy-specific parameters
-    "min_probability_of_profit": 0.50,  # Minimum 50% PoP
+    "min_probability_of_profit": 0.60,  # Minimum 60% PoP (was 50% — coin-flip too risky)
     "min_premium_credit": 0.30,  # Minimum $0.30 credit per contract
     "max_bid_ask_spread_pct": 0.15,  # Max 15% bid-ask spread
     

@@ -114,8 +114,8 @@ class AlpacaClient:
     
     def __init__(self):
         """Initialize client from environment variables."""
-        self.api_key = os.getenv("ALPACA_API_KEY")
-        self.secret_key = os.getenv("ALPACA_SECRET_KEY")
+        self.api_key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
+        self.secret_key = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
         self.base_url = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
         self.is_paper = os.getenv("PAPER_TRADING", "true").lower() == "true"
         

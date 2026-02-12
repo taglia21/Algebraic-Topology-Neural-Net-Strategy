@@ -204,6 +204,10 @@ class EquityEngine:
             except Exception:
                 pass
 
+        # ── Position monitoring: check existing equity positions for SL/TP ──
+        if self.client:
+            await self._monitor_equity_positions(equity)
+
         for symbol in symbols:
             try:
                 decision = self.engine.analyze(symbol)
@@ -234,6 +238,51 @@ class EquityEngine:
                         self.logger.info(f"[PAPER] Would trade {symbol}: {decision.signal.name}")
             except Exception as exc:
                 self.logger.error(f"Equity cycle error for {symbol}: {exc}", exc_info=True)
+
+    # ── Position monitoring thresholds ──
+    EQUITY_STOP_LOSS_PCT = -0.05    # -5% unrealized P&L → close
+    EQUITY_TAKE_PROFIT_PCT = 0.10   # +10% unrealized P&L → close
+
+    async def _monitor_equity_positions(self, equity: float):
+        """Monitor existing equity positions and close on SL/TP thresholds."""
+        try:
+            positions = self.client.get_positions()
+        except Exception as exc:
+            self.logger.error(f"Failed to fetch positions for monitoring: {exc}")
+            return
+
+        for pos in positions:
+            # Skip option positions (handled by OptionsEngine)
+            if len(pos.symbol) > 6 or any(ch.isdigit() for ch in pos.symbol[:4]):
+                continue
+
+            try:
+                unrealized_pnl = float(pos.unrealized_pl)
+                cost_basis = abs(float(pos.cost_basis))
+                if cost_basis <= 0:
+                    continue
+
+                pnl_pct = unrealized_pnl / cost_basis
+
+                if pnl_pct <= self.EQUITY_STOP_LOSS_PCT:
+                    self.logger.warning(
+                        f"🛑 EQUITY STOP-LOSS: {pos.symbol} "
+                        f"P&L ${unrealized_pnl:+,.2f} ({pnl_pct:+.1%}) — closing"
+                    )
+                    self.client.close_position(pos.symbol)
+                elif pnl_pct >= self.EQUITY_TAKE_PROFIT_PCT:
+                    self.logger.info(
+                        f"🎯 EQUITY TAKE-PROFIT: {pos.symbol} "
+                        f"P&L ${unrealized_pnl:+,.2f} ({pnl_pct:+.1%}) — closing"
+                    )
+                    self.client.close_position(pos.symbol)
+                else:
+                    self.logger.debug(
+                        f"  Equity holding {pos.symbol}: {float(pos.qty):.0f} sh, "
+                        f"P&L ${unrealized_pnl:+,.2f} ({pnl_pct:+.1%})"
+                    )
+            except Exception as exc:
+                self.logger.error(f"Error monitoring {pos.symbol}: {exc}")
 
     async def _execute_equity_trade(self, decision, regime_scale: float = 1.0):
         """Place equity order via Alpaca REST — limit order with bracket stop/TP."""
@@ -358,8 +407,22 @@ async def run_premarket_analysis():
 # ---------------------------------------------------------------------------
 
 EQUITY_UNIVERSE = [
-    "SPY", "QQQ", "IWM", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
-    "META", "TSLA", "JPM", "V", "UNH", "XOM", "JNJ",
+    # ETFs / broad market
+    "SPY", "QQQ", "IWM",
+    # Technology (~27%)
+    "AAPL", "MSFT", "GOOGL", "NVDA",
+    # Consumer / Communication
+    "AMZN", "META", "TSLA",
+    # Financials
+    "JPM", "V", "GS",
+    # Healthcare
+    "UNH", "JNJ", "LLY",
+    # Energy
+    "XOM", "CVX",
+    # Industrials
+    "CAT", "HON",
+    # Consumer Staples
+    "PG", "KO",
 ]
 
 EQUITY_CYCLE_INTERVAL = 300  # 5 minutes

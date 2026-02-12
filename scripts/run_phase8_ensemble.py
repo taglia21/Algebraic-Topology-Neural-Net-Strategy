@@ -536,7 +536,14 @@ class Phase8Backtester:
         sector_set = set(self.sectors.values())
         other_count = sum(1 for s in self.sectors.values() if s in ('Other', 'Diversified'))
         other_pct = other_count / max(1, len(self.sectors))
-        
+
+        # Compute max sector concentration from final portfolio weights
+        sector_weights: dict[str, float] = {}
+        for ticker, weight in portfolio_weights.items():
+            sec = self.sectors.get(ticker, 'Other')
+            sector_weights[sec] = sector_weights.get(sec, 0.0) + weight
+        max_sec_conc = max(sector_weights.values()) if sector_weights else 0.0
+
         metrics = Phase8Metrics(
             total_return=total_return,
             cagr=cagr,
@@ -548,7 +555,7 @@ class Phase8Backtester:
             avg_trade_return=avg_trade,
             n_trades=len(trade_returns),
             n_sectors=len(sector_set),
-            max_sector_concentration=0.0,  # TODO
+            max_sector_concentration=max_sec_conc,
             sector_other_pct=other_pct,
             regime_distribution=regime_counts,
         )

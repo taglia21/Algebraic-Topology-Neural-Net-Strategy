@@ -632,7 +632,7 @@ class EnhancedTradingEngine:
         # Step 7: Portfolio limit checks
         logger.info("Step 7: Portfolio limit checks...")
         # Simple portfolio limit check (can be enhanced with actual RiskManager method)
-        max_position_pct = 0.20  # Max 20% per position
+        max_position_pct = 0.05  # Max 5% per position (was 20% — way too concentrated)
         position_pct = position_size.position_value / portfolio_value if portfolio_value > 0 else 0
         
         if position_pct > max_position_pct:

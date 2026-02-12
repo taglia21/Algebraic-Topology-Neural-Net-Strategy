@@ -47,6 +47,13 @@ apscheduler>=3.10.0
 # Environment
 python-dotenv>=1.0.0
 
+# Alpaca SDK (alpaca-py for options, alpaca-trade-api for equities)
+alpaca-py>=0.25.0
+alpaca-trade-api>=3.0.0
+
+# Timezone
+pytz>=2023.3
+
 # Phase 2: Quant Models dependencies
 numpy>=1.24.0
 pandas>=2.0.0

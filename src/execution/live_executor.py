@@ -100,9 +100,10 @@ class LiveExecutor:
         if self.paper_trading:
             return self._execute_paper_order(order)
         else:
-            # TODO: Implement real TDA API execution
-            logger.error("Live trading not yet implemented")
-            return None
+            raise NotImplementedError(
+                "Live TDA execution is not implemented. "
+                "Use AlpacaClient from src/trading/alpaca_client.py for live trading."
+            )
     
     def _execute_paper_order(self, order: Order) -> Order:
         """Execute order in paper trading mode."""

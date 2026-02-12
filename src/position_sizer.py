@@ -121,11 +121,11 @@ class PerformanceMetrics:
 class SizingConfig:
     """Position sizing configuration."""
     # Kelly parameters
-    sizing_mode: SizingMode = SizingMode.HALF_KELLY
-    kelly_multiplier: float = 0.5  # 0.5 = half-Kelly, 1.0 = full Kelly
+    sizing_mode: SizingMode = SizingMode.QUARTER_KELLY
+    kelly_multiplier: float = 0.25  # 0.25 = quarter-Kelly (conservative)
     
     # Portfolio constraints
-    max_position_pct: float = 0.10  # 10% max position
+    max_position_pct: float = 0.05  # 5% max position (was 10%)
     min_position_pct: float = 0.01  # 1% min position
     min_position_value: float = 100.0  # $100 minimum
     max_position_value: Optional[float] = None  # Optional cap

@@ -108,6 +108,20 @@ except ImportError:
 # MARKET HOURS
 # ============================================================================
 
+# NYSE holidays (2025-2027)
+_NYSE_HOLIDAYS = {
+    (2025, 1, 1), (2025, 1, 20), (2025, 2, 17), (2025, 4, 18),
+    (2025, 5, 26), (2025, 6, 19), (2025, 7, 4), (2025, 9, 1),
+    (2025, 11, 27), (2025, 12, 25),
+    (2026, 1, 1), (2026, 1, 19), (2026, 2, 16), (2026, 4, 3),
+    (2026, 5, 25), (2026, 6, 19), (2026, 7, 3), (2026, 9, 7),
+    (2026, 11, 26), (2026, 12, 25),
+    (2027, 1, 1), (2027, 1, 18), (2027, 2, 15), (2027, 3, 26),
+    (2027, 5, 31), (2027, 6, 18), (2027, 7, 5), (2027, 9, 6),
+    (2027, 11, 25), (2027, 12, 24),
+}
+
+
 def market_is_open() -> bool:
     """
     Check if market is currently open.
@@ -118,14 +132,13 @@ def market_is_open() -> bool:
     now_et_dt = datetime.now(ZoneInfo("America/New_York"))
     now = now_et_dt.time()
     
-    # Check if within trading hours (9:30 AM - 4:00 PM ET)
     market_open = time(9, 30)
     market_close = time(16, 0)
     
-    # TODO: Also check for holidays and weekends
-    is_weekday = now_et_dt.weekday() < 5  # Monday=0, Friday=4
+    is_weekday = now_et_dt.weekday() < 5
+    is_holiday = (now_et_dt.year, now_et_dt.month, now_et_dt.day) in _NYSE_HOLIDAYS
     
-    return is_weekday and market_open <= now <= market_close
+    return is_weekday and not is_holiday and market_open <= now <= market_close
 
 
 def safe_entry_window() -> bool:
@@ -158,7 +171,7 @@ class AutonomousTradingEngine:
         self,
         portfolio_value: float,
         paper: bool = True,
-        state_file: str = "trading_state.json",
+        state_file: str = "",
     ):
         """
         Initialize engine.
@@ -166,8 +179,15 @@ class AutonomousTradingEngine:
         Args:
             portfolio_value: Starting portfolio value ($)
             paper: Use paper trading (default True)
-            state_file: File to persist state
+            state_file: File to persist state (default: state/trading_state.json)
         """
+        # Deterministic state path (issue #15)
+        if not state_file:
+            import pathlib
+            _project_root = pathlib.Path(__file__).resolve().parent.parent.parent
+            _state_dir = _project_root / "state"
+            _state_dir.mkdir(exist_ok=True)
+            state_file = str(_state_dir / "trading_state.json")
         # get_config() in options/config.py requires a key and returns a single value.
         # The engine expects a dict-like config, so we merge the relevant config dicts.
         self.config = {**RISK_CONFIG, **MONITORING_CONFIG}
@@ -360,7 +380,35 @@ class AutonomousTradingEngine:
         self.logger.info(f"CYCLE #{cycle_num} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self.logger.info(f"{'='*60}")
         
-        # STEP 0 (NEW): REGIME DETECTION & WEIGHT OPTIMIZATION
+        # STEP 0a: Refresh portfolio value from Alpaca (issue #5)
+        try:
+            acct = self.trade_executor.trading_client.get_account()
+            new_equity = float(acct.equity)
+            if new_equity > 0:
+                self.portfolio_value = new_equity
+                self.logger.info(f"Portfolio value refreshed: ${self.portfolio_value:,.2f}")
+        except Exception as e:
+            self.logger.warning(f"Could not refresh portfolio value: {e}")
+        
+        # STEP 0b: Refresh portfolio delta from Alpaca positions (issue #10)
+        try:
+            alpaca_positions = self.trade_executor.trading_client.get_all_positions()
+            total_delta = 0.0
+            for ap in alpaca_positions:
+                # For options, qty * delta ≈ position delta
+                # Alpaca doesn't expose greeks directly, so approximate:
+                # qty > 0 = long, qty < 0 = short; assume ~0.50 delta per contract
+                qty = float(ap.qty) if ap.qty else 0
+                # If it's an option (OCC symbol has digits), approximate delta
+                if any(c.isdigit() for c in ap.symbol[:4]):
+                    total_delta += qty * 50  # 1 option contract ≈ 50 delta (0.50 * 100 shares)
+                else:
+                    total_delta += qty  # equity position = qty delta
+            self.portfolio_delta = total_delta
+        except Exception as e:
+            self.logger.warning(f"Could not refresh portfolio delta: {e}")
+        
+        # STEP 0c (NEW): REGIME DETECTION & WEIGHT OPTIMIZATION
         await self._update_regime_and_weights()
         
         # STEP 1: SCAN - Generate signals
@@ -665,10 +713,10 @@ class AutonomousTradingEngine:
 
             result = await self.trade_executor.submit_iron_condor(
                 underlying=signal.symbol,
-                put_buy_strike=resolved.put_spread.long_leg.strike,
-                put_sell_strike=resolved.put_spread.short_leg.strike,
-                call_sell_strike=resolved.call_spread.short_leg.strike,
-                call_buy_strike=resolved.call_spread.long_leg.strike,
+                put_long_occ=resolved.put_spread.long_leg.occ_symbol,
+                put_short_occ=resolved.put_spread.short_leg.occ_symbol,
+                call_short_occ=resolved.call_spread.short_leg.occ_symbol,
+                call_long_occ=resolved.call_spread.long_leg.occ_symbol,
                 quantity=position_size.contracts,
                 net_credit=resolved.total_credit,
             )
@@ -841,7 +889,7 @@ class AutonomousTradingEngine:
             except Exception as e:
                 self.logger.warning(f"Error checking position: {e}")
         
-        # Close triggered positions
+        # Close triggered positions — ACTUALLY CLOSE ON ALPACA (issue #4)
         for position, reason, pnl in positions_to_close:
             symbol = None
             if isinstance(position, dict):
@@ -851,6 +899,25 @@ class AutonomousTradingEngine:
                 symbol = position.symbol
             
             self.logger.info(f"Closing position: {symbol} ({reason}) P&L=${pnl:+,.2f}")
+            
+            # Send closing orders to Alpaca for all option legs matching this underlying
+            try:
+                alpaca_positions = self.trade_executor.trading_client.get_all_positions()
+                for ap in alpaca_positions:
+                    occ_underlying = ''
+                    for ch in ap.symbol:
+                        if ch.isdigit():
+                            break
+                        occ_underlying += ch
+                    if occ_underlying.upper() == (symbol or '').upper():
+                        self.logger.info(f"  Closing Alpaca position: {ap.symbol}")
+                        try:
+                            self.trade_executor.trading_client.close_position(ap.symbol)
+                        except Exception as close_err:
+                            self.logger.error(f"  Failed to close {ap.symbol}: {close_err}")
+            except Exception as e:
+                self.logger.error(f"Failed to close positions on Alpaca for {symbol}: {e}")
+            
             self.current_positions.remove(position)
             self.stats["positions_closed"] += 1
             self.stats["total_pnl"] += pnl
@@ -895,11 +962,28 @@ class AutonomousTradingEngine:
         self.logger.info(f"Total P&L: ${self.stats['total_pnl']:,.0f}")
     
     def _save_state(self):
-        """Save engine state to file."""
+        """Save engine state to file with proper serialization (issue #16)."""
+        # Serialize positions to plain dicts with JSON-native types only
+        serializable_positions = []
+        for pos in self.current_positions:
+            if isinstance(pos, dict):
+                clean = {}
+                for k, v in pos.items():
+                    if hasattr(v, '__dict__'):
+                        # Convert dataclass/object to dict of primitives
+                        clean[k] = {ak: str(av) for ak, av in vars(v).items()}
+                    else:
+                        clean[k] = v
+                serializable_positions.append(clean)
+            elif hasattr(pos, '__dict__'):
+                serializable_positions.append({k: str(v) for k, v in vars(pos).items()})
+            else:
+                serializable_positions.append(str(pos))
+
         state = {
             "portfolio_value": self.portfolio_value,
             "portfolio_delta": self.portfolio_delta,
-            "current_positions": self.current_positions,
+            "current_positions": serializable_positions,
             "stats": self.stats,
             "last_update": datetime.now().isoformat(),
         }

@@ -444,12 +444,12 @@ class AlpacaOptionsExecutor:
             OptionLegRequest(
                 symbol=call_occ,
                 side=alpaca_side,
-                ratio_qty=str(quantity),
+                ratio_qty="1",
             ),
             OptionLegRequest(
                 symbol=put_occ,
                 side=alpaca_side,
-                ratio_qty=str(quantity),
+                ratio_qty="1",
             ),
         ]
         

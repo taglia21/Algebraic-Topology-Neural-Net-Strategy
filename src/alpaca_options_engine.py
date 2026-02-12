@@ -233,10 +233,22 @@ class AlpacaOptionsEngine:
                 # Calculate P&L
                 entry_price = float(pos.avg_entry_price)
                 current_price = float(pos.current_price)
-                quantity = int(pos.qty)
+                quantity = int(pos.qty)  # Negative for short positions
                 
+                # P&L dollar amount: signed qty handles direction correctly
                 unrealized_pnl = (current_price - entry_price) * quantity * 100
-                unrealized_pnl_pct = ((current_price / entry_price) - 1) * 100 if entry_price > 0 else 0
+                
+                # P&L percentage must account for direction:
+                # For longs (qty > 0): price up = profit → (current/entry - 1)
+                # For shorts (qty < 0): price up = loss → negate the ratio
+                if entry_price > 0:
+                    raw_pct = ((current_price / entry_price) - 1) * 100
+                    if quantity < 0:
+                        unrealized_pnl_pct = -raw_pct  # Flip for shorts
+                    else:
+                        unrealized_pnl_pct = raw_pct
+                else:
+                    unrealized_pnl_pct = 0
                 
                 # Determine status
                 status = PositionStatus.OPEN

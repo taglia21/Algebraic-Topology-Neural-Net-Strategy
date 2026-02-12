@@ -22,6 +22,13 @@ except:
 
 import alpaca_trade_api as tradeapi
 
+# Import trading gate for circuit breaker protection
+try:
+    from src.risk.trading_gate import check_trading_allowed, update_breaker_state
+    HAS_TRADING_GATE = True
+except ImportError:
+    HAS_TRADING_GATE = False
+
 class AggressiveAutoTrader:
     """Aggressive automated trading system"""
     
@@ -114,13 +121,32 @@ class AggressiveAutoTrader:
         signal = (mom_5 * 0.4 + mom_10 * 0.35 + mom_20 * 0.25) * 10
         signal = max(-1, min(1, signal))
         
-        # Confidence based on RSI extremes
-        if rsi > 70:
-            confidence = 0.8  # Overbought but trending
-        elif rsi < 30:
-            confidence = 0.9  # Oversold - high conviction buy
-        else:
-            confidence = 0.6
+        # Confidence based on RSI — FIXED: align RSI interpretation with signal direction
+        # For a momentum BUY signal:
+        #   RSI 30-50 = oversold recovering, high confidence
+        #   RSI 50-70 = normal, moderate confidence
+        #   RSI > 70 = overbought, LOW confidence (likely to reverse)
+        # For a momentum SELL signal:
+        #   RSI > 70 = overbought, high confidence for sell
+        #   RSI < 30 = oversold, LOW confidence for sell (likely to bounce)
+        if signal > 0:  # Buy signal
+            if rsi < 40:
+                confidence = 0.85  # Oversold + positive momentum = strong buy
+            elif rsi < 60:
+                confidence = 0.65  # Normal range
+            elif rsi > 70:
+                confidence = 0.30  # Overbought - low confidence for buying
+            else:
+                confidence = 0.50
+        else:  # Sell signal
+            if rsi > 70:
+                confidence = 0.85  # Overbought + negative momentum = strong sell
+            elif rsi > 50:
+                confidence = 0.65
+            elif rsi < 30:
+                confidence = 0.30  # Oversold - low confidence for selling
+            else:
+                confidence = 0.50
             
         return signal, confidence
         
@@ -197,10 +223,10 @@ class AggressiveAutoTrader:
         account = self.get_account()
         positions = self.get_positions()
         
-        # Allocate 60% of buying power to momentum
-        momentum_budget = account['buying_power'] * 0.6
+        # FIXED: Use equity (not buying_power which includes margin)
+        momentum_budget = account['equity'] * 0.40  # 40% of equity (was 60% of buying_power)
         per_stock = momentum_budget / len(self.MOMENTUM_UNIVERSE)
-        per_stock = min(per_stock, 5000)  # Max $5k per position
+        per_stock = min(per_stock, 3000)  # Max $3k per position (was $5k)
         
         logger.info(f"Running momentum strategy - Budget: ${momentum_budget:.2f}")
         
@@ -223,14 +249,14 @@ class AggressiveAutoTrader:
                 self.close_position(symbol)
                 
     def run_leveraged_etf_strategy(self):
-        """Aggressive leveraged ETF strategy"""
+        """Leveraged ETF strategy - FIXED: require strong signals and use equity-based budget"""
         account = self.get_account()
         positions = self.get_positions()
         
-        # Allocate 30% to leveraged ETFs
-        etf_budget = account['buying_power'] * 0.3
+        # FIXED: Use equity (not buying_power), reduced allocation since these are 3x leveraged
+        etf_budget = account['equity'] * 0.10  # Only 10% of equity to leveraged ETFs (was 30% of buying_power)
         per_etf = etf_budget / 4  # Top 4 ETFs
-        per_etf = min(per_etf, 10000)  # Max $10k per ETF
+        per_etf = min(per_etf, 3000)  # Max $3k per ETF (was $10k)
         
         logger.info(f"Running leveraged ETF strategy - Budget: ${etf_budget:.2f}")
         
@@ -239,12 +265,12 @@ class AggressiveAutoTrader:
             signal, confidence = self.calculate_momentum_signal(symbol)
             signals.append((symbol, signal, confidence))
             
-        # Buy top 4 with positive momentum
+        # FIXED: Require strong positive signal AND minimum confidence
         signals.sort(key=lambda x: x[1] * x[2], reverse=True)
         
         for symbol, signal, confidence in signals[:4]:
-            if symbol not in positions and signal > 0:
-                self.execute_trade(symbol, 'buy', per_etf)
+            if symbol not in positions and signal > 0.4 and confidence > 0.5:
+                self.execute_trade(symbol, 'buy', per_etf * confidence)
 
 
     def run(self):
@@ -257,6 +283,13 @@ class AggressiveAutoTrader:
         if not self.is_market_open():
             logger.info("Market is closed - skipping run")
             return
+        
+        # Circuit breaker check
+        if HAS_TRADING_GATE:
+            allowed, reason = check_trading_allowed()
+            if not allowed:
+                logger.warning(f'⚠️ CIRCUIT BREAKER: {reason} - skipping run')
+                return
             
         # Get current state
         account = self.get_account()

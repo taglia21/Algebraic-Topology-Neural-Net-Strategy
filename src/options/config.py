@@ -16,10 +16,10 @@ from typing import Dict, Any
 
 RISK_CONFIG: Dict[str, Any] = {
     # Portfolio-level risk limits
-    "max_portfolio_delta": 50.0,  # Maximum net delta exposure
-    "max_position_size_pct": 0.05,  # 5% max per position
-    "max_daily_loss_pct": 0.03,  # 3% max daily drawdown
-    "max_portfolio_heat": 0.10,  # 10% max total risk exposure
+    "max_portfolio_delta": 50.0,  # Maximum net delta exposure (shares equivalent)
+    "max_position_size_pct": 0.03,  # 3% max per position (was 5%)
+    "max_daily_loss_pct": 0.02,  # 2% max daily drawdown (was 3%)
+    "max_portfolio_heat": 0.08,  # 8% max total risk exposure (was 10%)
     
     # Position-level risk limits
     "max_risk_per_trade_pct": 0.02,  # 2% max risk per trade
@@ -38,8 +38,8 @@ RISK_CONFIG: Dict[str, Any] = {
     "trailing_stop_pct": 0.35,  # Trailing stop at 35%
     
     # IV-based thresholds
-    "iv_rank_sell_threshold": 50.0,  # Sell premium above this IV rank
-    "iv_rank_buy_threshold": 30.0,  # Buy options below this IV rank
+    "iv_rank_sell_threshold": 65.0,  # Sell premium above this IV rank (was 50 - too aggressive)
+    "iv_rank_buy_threshold": 25.0,  # Buy options below this IV rank
     "iv_rank_extreme_high": 80.0,  # Extremely high IV
     "iv_rank_extreme_low": 20.0,  # Extremely low IV
     
@@ -54,8 +54,8 @@ RISK_CONFIG: Dict[str, Any] = {
     "lookback_period": 252,  # 1 year lookback for z-score
     
     # Delta hedging
-    "delta_hedge_threshold": 0.10,  # Hedge when delta > +/-0.10
-    "delta_rebalance_threshold": 0.05,  # Rebalance at +/-0.05
+    "delta_hedge_threshold": 25.0,  # Hedge when portfolio delta > +/-25 shares equivalent
+    "delta_rebalance_threshold": 10.0,  # Rebalance at +/-10 shares equivalent
     
     # Kelly Criterion
     "kelly_fraction": 0.25,  # Quarter-Kelly for safety

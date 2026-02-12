@@ -7,6 +7,14 @@ import logging
 import time
 from datetime import datetime, timedelta
 import json
+import pytz
+
+# Import trading gate for circuit breaker protection
+try:
+    from src.risk.trading_gate import check_trading_allowed, update_breaker_state
+    HAS_TRADING_GATE = True
+except ImportError:
+    HAS_TRADING_GATE = False
 
 load_dotenv()
 
@@ -27,9 +35,9 @@ alpaca_headers = {
 UNIVERSE = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'SPY', 'QQQ']
 SCAN_INTERVAL = 120  # Scan every 2 minutes
 MAX_POSITIONS = 5
-POSITION_SIZE = 2  # shares per position
-PROFIT_TARGET = 0.015  # 1.5% profit target
-STOP_LOSS = 0.02  # 2% stop loss
+POSITION_SIZE_PCT = 0.05  # 5% of equity per position (replaces fixed 2 shares)
+PROFIT_TARGET = 0.03  # 3% profit target (was 1.5%)
+STOP_LOSS = 0.015  # 1.5% stop loss (was 2%) -> 2:1 reward:risk
 
 def get_account():
     r = requests.get(f'{ALPACA_BASE}/account', headers=alpaca_headers)
@@ -39,8 +47,8 @@ def get_positions():
     r = requests.get(f'{ALPACA_BASE}/positions', headers=alpaca_headers)
     return r.json() if r.status_code == 200 else []
 
-def get_bars(symbol, timeframe='5Min', limit=20):
-    """Get recent price bars for technical analysis"""
+def get_bars(symbol, timeframe='5Min', limit=50):
+    """Get recent price bars for technical analysis - FIXED: increased limit for reliable RSI"""
     r = requests.get(
         f'{ALPACA_BASE}/stocks/{symbol}/bars',
         headers=alpaca_headers,
@@ -152,13 +160,21 @@ trade_count = 0
 
 try:
     while True:
-        now = datetime.now()
+        now = datetime.now(pytz.timezone('US/Eastern'))  # FIXED: use EST timezone
         
-        # Market hours check
+        # Market hours check - now uses correct EST timezone
         if now.hour < 9 or (now.hour == 9 and now.minute < 30) or now.hour >= 16:
             logger.info('⏳ Market closed')
             time.sleep(300)
             continue
+        
+        # Circuit breaker check
+        if HAS_TRADING_GATE:
+            allowed, reason = check_trading_allowed()
+            if not allowed:
+                logger.warning(f'⚠️ CIRCUIT BREAKER: {reason} - skipping cycle')
+                time.sleep(60)
+                continue
         
         logger.info(f'\n🔍 Scanning {len(UNIVERSE)} stocks for opportunities...')
         
@@ -204,10 +220,19 @@ try:
                 logger.info(f"   Momentum: {best['momentum']*100:.2f}%")
                 logger.info(f"   Score: {best['score']}/5")
                 
-                result = place_order(best['symbol'], POSITION_SIZE, 'buy')
+                # FIXED: Position size based on equity %, not fixed 2 shares
+                acct = get_account()
+                if acct:
+                    equity = float(acct['equity'])
+                    dollar_size = equity * POSITION_SIZE_PCT
+                    qty = max(1, int(dollar_size / best['price']))
+                else:
+                    qty = 1
+                
+                result = place_order(best['symbol'], qty, 'buy')
                 if result:
                     trade_count += 1
-                    logger.info(f"✅ Order {trade_count}: BOUGHT {POSITION_SIZE} {best['symbol']}")
+                    logger.info(f"\u2705 Order {trade_count}: BOUGHT {qty} {best['symbol']}")
         
         account = get_account()
         if account:

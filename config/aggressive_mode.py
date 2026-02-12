@@ -18,67 +18,67 @@ class AggressiveConfig:
     """Aggressive trading configuration for fast P&L demonstration."""
     
     # =========================================================================
-    # SIGNAL THRESHOLDS - LOOSE for maximum trades
+    # SIGNAL THRESHOLDS - CONSERVATIVE to filter noise
     # =========================================================================
     
-    buy_threshold: float = 0.52   # Was 0.55 - more trades
-    sell_threshold: float = 0.48  # Was 0.45 - more trades
-    min_confidence: float = 0.05  # Was 0.3 - take almost all signals
+    buy_threshold: float = 0.58   # Only trade strong signals
+    sell_threshold: float = 0.42  # Only trade strong signals
+    min_confidence: float = 0.50  # Require 50%+ confidence to trade
     
     # =========================================================================
-    # POSITION SIZING - AGGRESSIVE
+    # POSITION SIZING - CONSERVATIVE
     # =========================================================================
     
-    # Full Kelly criterion (normally use half-Kelly)
-    kelly_fraction: float = 1.0   # Was 0.5
+    # Quarter-Kelly for safety (academic standard is half-Kelly max)
+    kelly_fraction: float = 0.25
     
     # Position sizes
-    position_size_pct: float = 0.25  # 25% of portfolio per trade (was 10%)
-    max_position_pct: float = 0.40   # Max 40% in single position
-    min_position_dollars: int = 5000
-    max_position_dollars: int = 50000
+    position_size_pct: float = 0.05  # 5% of portfolio per trade
+    max_position_pct: float = 0.10   # Max 10% in single position
+    min_position_dollars: int = 500
+    max_position_dollars: int = 7500
     
-    # Leverage
-    max_leverage: float = 2.0     # Use margin if available
-    use_margin: bool = True
+    # Leverage - DISABLED for safety
+    max_leverage: float = 1.0     # No leverage
+    use_margin: bool = False
     
     # Capital allocation
-    max_cash_deployed_pct: float = 0.95  # Deploy 95% of capital
-    reserve_cash_pct: float = 0.05       # Keep only 5% reserve
+    max_cash_deployed_pct: float = 0.70  # Deploy max 70% of capital
+    reserve_cash_pct: float = 0.30       # Keep 30% reserve
     
     # =========================================================================
-    # TRADE FREQUENCY - MAXIMUM
+    # TRADE FREQUENCY - MEASURED
     # =========================================================================
     
-    cycle_seconds: int = 30       # Was 60 - faster cycles
-    trade_all_signals: bool = True
-    skip_neutral: bool = False    # Trade neutral signals too
+    cycle_seconds: int = 120      # 2-minute cycles to reduce noise trading
+    trade_all_signals: bool = False  # Only trade clear signals
+    skip_neutral: bool = True     # Skip ambiguous signals
     
     # =========================================================================
-    # MOMENTUM CHASING - ENABLED
+    # MOMENTUM CHASING - DISABLED (chasing causes buying at tops)
     # =========================================================================
     
-    enable_momentum_chase: bool = True
-    momentum_threshold: float = 0.005  # 0.5% move triggers chase
-    chase_strength: bool = True        # Buy into strength
-    chase_weakness: bool = True        # Sell into weakness
+    enable_momentum_chase: bool = False
+    momentum_threshold: float = 0.02   # Require 2% move (rarely triggers)
+    chase_strength: bool = False       # Don't buy into strength
+    chase_weakness: bool = False       # Don't sell into weakness
     
     # Intraday momentum factors
     use_vwap_signal: bool = True
-    use_price_acceleration: bool = True
+    use_price_acceleration: bool = False
     
     # =========================================================================
-    # RISK CONTROLS - LOOSE
+    # RISK CONTROLS - TIGHT
     # =========================================================================
     
-    max_loss_per_trade_pct: float = 0.05   # 5% max loss per trade
-    portfolio_heat_pct: float = 2.0        # 200% exposure allowed
-    stop_loss_pct: float = 0.03            # 3% stop loss (wider)
-    take_profit_pct: float = 0.02          # 2% take profit (quick)
+    max_loss_per_trade_pct: float = 0.01   # 1% max loss per trade
+    portfolio_heat_pct: float = 0.25       # 25% max exposure
+    stop_loss_pct: float = 0.02            # 2% stop loss
+    take_profit_pct: float = 0.04          # 4% take profit (2:1 reward:risk)
     
     # Drawdown limits
-    max_daily_drawdown_pct: float = 0.15   # 15% max daily loss
-    max_portfolio_drawdown_pct: float = 0.30  # 30% max total loss
+    max_daily_drawdown_pct: float = 0.03   # 3% max daily loss
+    max_portfolio_drawdown_pct: float = 0.10  # 10% max total loss
     
     # =========================================================================
     # UNIVERSE - FULL
@@ -96,12 +96,12 @@ class AggressiveConfig:
     excluded_tickers: Set[str] = field(default_factory=set)
     
     # =========================================================================
-    # SCALPING MODE
+    # SCALPING MODE - DISABLED (transaction costs eat profits on small moves)
     # =========================================================================
     
-    enable_scalping: bool = True
-    scalp_profit_target: float = 0.005  # 0.5% profit target
-    scalp_time_limit_minutes: int = 5   # Close scalps after 5 min
+    enable_scalping: bool = False
+    scalp_profit_target: float = 0.01   # 1% profit target (if enabled)
+    scalp_time_limit_minutes: int = 15  # Close scalps after 15 min
     
     def to_dict(self):
         """Convert to dictionary."""

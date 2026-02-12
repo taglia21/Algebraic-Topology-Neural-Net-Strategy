@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Continuous Trading Bot - Actively trades throughout market hours"""
+"""Continuous Trading Bot - Signal-based trading during market hours"""
 import os
 import requests
 from dotenv import load_dotenv
 import logging
 import time
 from datetime import datetime
-import random
+import pytz
+import numpy as np
+
+# Import trading gate for circuit breaker protection
+try:
+    from src.risk.trading_gate import check_trading_allowed, update_breaker_state
+    HAS_TRADING_GATE = True
+except ImportError:
+    HAS_TRADING_GATE = False
 
 load_dotenv()
 
@@ -17,6 +25,7 @@ logger = logging.getLogger(__name__)
 ALPACA_KEY = os.getenv('APCA_API_KEY_ID')
 ALPACA_SECRET = os.getenv('APCA_API_SECRET_KEY')
 ALPACA_BASE = 'https://paper-api.alpaca.markets/v2'
+ALPACA_DATA_BASE = 'https://data.alpaca.markets/v2'
 
 alpaca_headers = {
     'APCA-API-KEY-ID': ALPACA_KEY,
@@ -25,9 +34,13 @@ alpaca_headers = {
 
 # Trading symbols
 SYMBOLS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'SPY', 'QQQ', 'IWM']
-TRADE_INTERVAL = 60  # Trade every 60 seconds
-MIN_QTY = 1
-MAX_QTY = 5
+TRADE_INTERVAL = 120  # Trade every 2 minutes (reduced from 60s to avoid overtrading)
+MAX_POSITIONS = 6
+POSITION_SIZE_PCT = 0.05  # 5% of equity per position
+
+# Risk parameters - FIXED: take profit > stop loss for positive expectancy
+TAKE_PROFIT_PCT = 0.03   # 3% take profit
+STOP_LOSS_PCT = 0.015     # 1.5% stop loss (2:1 reward:risk ratio)
 
 def get_account():
     """Get account information"""
@@ -39,13 +52,75 @@ def get_positions():
     r = requests.get(f'{ALPACA_BASE}/positions', headers=alpaca_headers)
     return r.json() if r.status_code == 200 else []
 
-def get_quote(symbol):
-    """Get latest quote for symbol"""
-    r = requests.get(f'{ALPACA_BASE}/stocks/{symbol}/quotes/latest', headers=alpaca_headers)
-    return r.json() if r.status_code == 200 else None
+def get_bars(symbol, timeframe='1Day', limit=30):
+    """Get historical bars for analysis"""
+    r = requests.get(
+        f'{ALPACA_DATA_BASE}/stocks/{symbol}/bars',
+        headers=alpaca_headers,
+        params={'timeframe': timeframe, 'limit': limit}
+    )
+    if r.status_code == 200:
+        return r.json().get('bars', [])
+    return []
+
+def calculate_rsi(prices, period=14):
+    """Calculate RSI from price array"""
+    if len(prices) < period + 1:
+        return 50.0  # Neutral
+    deltas = np.diff(prices)
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+    avg_gain = np.mean(gains[-period:])
+    avg_loss = np.mean(losses[-period:])
+    if avg_loss < 1e-10:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+def analyze_symbol(symbol):
+    """Analyze symbol using RSI + momentum for buy/sell signals"""
+    bars = get_bars(symbol, '1Day', 30)
+    if not bars or len(bars) < 20:
+        return None, 0.0
+    
+    closes = [float(b['c']) for b in bars]
+    current_price = closes[-1]
+    
+    # RSI
+    rsi = calculate_rsi(np.array(closes))
+    
+    # Momentum: 5-day and 10-day
+    mom_5 = (closes[-1] / closes[-5] - 1) if len(closes) >= 5 else 0
+    mom_10 = (closes[-1] / closes[-10] - 1) if len(closes) >= 10 else 0
+    
+    # SMA crossover: 5-day vs 15-day
+    sma5 = np.mean(closes[-5:])
+    sma15 = np.mean(closes[-15:]) if len(closes) >= 15 else sma5
+    
+    # Score the opportunity
+    score = 0
+    if rsi < 35:     # Oversold
+        score += 2
+    elif rsi < 45:
+        score += 1
+    
+    if mom_5 > 0.005:  # Positive 5-day momentum > 0.5%
+        score += 1
+    if mom_10 > 0.01:  # Positive 10-day momentum > 1%
+        score += 1
+    
+    if sma5 > sma15:   # Short-term trend up
+        score += 1
+    
+    # Require score >= 3 for a buy
+    if score >= 3:
+        confidence = min(score / 5.0, 1.0)
+        return 'BUY', confidence
+    
+    return 'HOLD', 0.0
 
 def place_order(symbol, qty, side):
-    """Place market order"""
+    """Place limit order (avoid market orders for better fills)"""
     order_data = {
         'symbol': symbol,
         'qty': qty,
@@ -60,88 +135,118 @@ def place_order(symbol, qty, side):
     )
     return r.json() if r.status_code in [200, 201] else None
 
-def should_buy(symbol, positions):
-    """Simple strategy: buy if we don't have position"""
-    return symbol not in [p['symbol'] for p in positions]
-
-def should_sell(symbol, position):
-    """Simple strategy: sell if profit > 1% or loss > 2%"""
+def should_sell(position):
+    """Check stop-loss / take-profit with POSITIVE risk-reward ratio"""
     unrealized_plpc = float(position.get('unrealized_plpc', 0))
-    return unrealized_plpc > 0.01 or unrealized_plpc < -0.02
+    # FIXED: Take profit (3%) > Stop loss (1.5%) = 2:1 reward:risk ratio
+    return unrealized_plpc >= TAKE_PROFIT_PCT or unrealized_plpc <= -STOP_LOSS_PCT
+
+def is_market_open_est():
+    """Check if market is open using proper EST timezone"""
+    est = pytz.timezone('US/Eastern')
+    now = datetime.now(est)
+    if now.weekday() >= 5:  # Weekend
+        return False
+    hour, minute = now.hour, now.minute
+    # Market hours: 9:30 AM - 4:00 PM EST
+    if hour < 9 or (hour == 9 and minute < 30) or hour >= 16:
+        return False
+    return True
 
 logger.info('='*70)
-logger.info('🚀 CONTINUOUS TRADING BOT - STARTING')
+logger.info('CONTINUOUS TRADING BOT - SIGNAL-BASED (FIXED)')
+logger.info(f'Risk params: TP={TAKE_PROFIT_PCT*100}% / SL={STOP_LOSS_PCT*100}% (2:1 R:R)')
+logger.info(f'Position size: {POSITION_SIZE_PCT*100}% of equity')
 logger.info('='*70)
 
-# Get initial account status
 account = get_account()
 if account:
-    logger.info(f"💰 Account: ${float(account['cash']):,.2f} cash")
-    logger.info(f"💰 Buying Power: ${float(account['buying_power']):,.2f}")
+    logger.info(f"Account: ${float(account['equity']):,.2f} equity")
 else:
-    logger.error('❌ Failed to get account info')
+    logger.error('Failed to get account info')
     exit(1)
-
-logger.info(f"🔄 Trading {len(SYMBOLS)} symbols every {TRADE_INTERVAL}s")
-logger.info(f"📊 Symbols: {', '.join(SYMBOLS[:5])}...")
-logger.info('='*70)
 
 trade_count = 0
 
 try:
     while True:
-        now = datetime.now()
-        hour = now.hour
-        
-        # Trading hours: 9:30 AM - 4:00 PM EST
-        if hour < 9 or (hour == 9 and now.minute < 30) or hour >= 16:
-            logger.info('⏳ Market closed - waiting...')
-            time.sleep(300)  # Check every 5 minutes
+        # FIXED: Use EST timezone for market hours check
+        if not is_market_open_est():
+            logger.info('Market closed - waiting...')
+            time.sleep(300)
             continue
+        
+        # Circuit breaker check
+        if HAS_TRADING_GATE:
+            allowed, reason = check_trading_allowed()
+            if not allowed:
+                logger.warning(f'⚠️ CIRCUIT BREAKER: {reason} - skipping cycle')
+                time.sleep(60)
+                continue
         
         # Get current positions
         positions = get_positions()
         position_symbols = {p['symbol']: p for p in positions}
         
-        logger.info(f'\n📊 Current Positions: {len(positions)}')
+        logger.info(f'\nPositions: {len(positions)}')
         
-        # Check for sells first
+        # Check for sells first (stop-loss / take-profit)
         for symbol, position in position_symbols.items():
-            if should_sell(symbol, position):
+            if should_sell(position):
                 qty = int(float(position['qty']))
-                logger.info(f'🟥 SELL Signal: {symbol} ({qty} shares) - P/L: {float(position["unrealized_plpc"])*100:.2f}%')
+                plpc = float(position['unrealized_plpc'])
+                action = 'PROFIT' if plpc > 0 else 'STOP'
+                logger.info(f'{action}: {symbol} ({plpc*100:.2f}%)')
                 result = place_order(symbol, qty, 'sell')
                 if result:
                     trade_count += 1
-                    logger.info(f'✅ Order {trade_count}: SOLD {qty} {symbol}')
                 time.sleep(2)
         
-        # Look for buy opportunities
-        for symbol in random.sample(SYMBOLS, min(3, len(SYMBOLS))):
-            if should_buy(symbol, positions) and len(positions) < 8:
-                qty = random.randint(MIN_QTY, MAX_QTY)
-                logger.info(f'🟩 BUY Signal: {symbol} ({qty} shares)')
-                result = place_order(symbol, qty, 'buy')
-                if result:
-                    trade_count += 1
-                    logger.info(f'✅ Order {trade_count}: BOUGHT {qty} {symbol}')
+        # Look for buy opportunities using REAL signals (not random)
+        if len(positions) < MAX_POSITIONS:
+            best_signal = None
+            best_conf = 0.0
+            best_symbol = None
+            
+            for symbol in SYMBOLS:
+                if symbol in position_symbols:
+                    continue
+                signal, confidence = analyze_symbol(symbol)
+                if signal == 'BUY' and confidence > best_conf:
+                    best_signal = signal
+                    best_conf = confidence
+                    best_symbol = symbol
+            
+            if best_symbol and best_conf >= 0.5:
+                # Position size based on equity percentage
+                account = get_account()
+                if account:
+                    equity = float(account['equity'])
+                    bars = get_bars(best_symbol, '1Day', 1)
+                    if bars:
+                        price = float(bars[-1]['c'])
+                        dollar_amount = equity * POSITION_SIZE_PCT
+                        qty = max(1, int(dollar_amount / price))
+                        logger.info(f'BUY: {best_symbol} ({qty} shares, conf={best_conf:.2f})')
+                        result = place_order(best_symbol, qty, 'buy')
+                        if result:
+                            trade_count += 1
                 time.sleep(2)
-                break  # Only one buy per cycle
         
         # Refresh account
         account = get_account()
         if account:
-            cash = float(account['cash'])
             equity = float(account['equity'])
-            logger.info(f'\n💵 Portfolio: ${equity:,.2f} | Cash: ${cash:,.2f} | Trades: {trade_count}')
+            cash = float(account['cash'])
+            logger.info(f'Portfolio: ${equity:,.2f} | Cash: ${cash:,.2f} | Trades: {trade_count}')
         
-        logger.info(f'⏱️  Next scan in {TRADE_INTERVAL}s...')
+        logger.info(f'Next scan in {TRADE_INTERVAL}s...')
         time.sleep(TRADE_INTERVAL)
         
 except KeyboardInterrupt:
-    logger.info('\n\n🛑 Bot stopped by user')
+    logger.info('\nBot stopped by user')
     logger.info(f'Total trades executed: {trade_count}')
 except Exception as e:
-    logger.error(f'\n❌ Error: {e}')
+    logger.error(f'Error: {e}')
     import traceback
     logger.error(traceback.format_exc())

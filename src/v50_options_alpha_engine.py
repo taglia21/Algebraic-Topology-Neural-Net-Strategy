@@ -421,14 +421,24 @@ class V50OptionsAlphaEngine:
     
     def calculate_position_size(self, strategy: StrategyType, max_loss: float,
                                 confidence: float) -> int:
-        """Calculate position size using modified Kelly criterion."""
+        """Calculate position size using modified Kelly criterion.
+        
+        FIXED: Uses payoff ratio in Kelly formula. Old version ignored
+        the reward/risk ratio, leading to oversized positions on low-edge bets.
+        """
         max_risk = self.portfolio_value * self.max_position_pct
         
-        # Kelly fraction = (p * b - q) / b where p=win prob, q=lose prob, b=odds
-        # Modified to be more conservative (half Kelly)
+        # Kelly fraction = (p * b - q) / b where p=win prob, q=lose prob, b=win/loss ratio
         win_prob = 0.5 + (confidence - 0.5) * 0.5  # Map confidence to win probability
-        expected_edge = win_prob - 0.5
-        kelly_fraction = max(0.01, min(0.25, expected_edge * 2))  # Cap at 25%
+        lose_prob = 1.0 - win_prob
+        payoff_ratio = 2.0  # Target 2:1 reward/risk
+        
+        kelly_full = (win_prob * payoff_ratio - lose_prob) / payoff_ratio
+        # Use quarter Kelly for safety
+        kelly_fraction = max(0.0, min(0.15, kelly_full * 0.25))
+        
+        if kelly_fraction <= 0:
+            return 0  # No edge = no trade
         
         risk_budget = max_risk * kelly_fraction
         
@@ -437,7 +447,7 @@ class V50OptionsAlphaEngine:
         else:
             contracts = 1
         
-        return max(1, min(contracts, 10))  # Min 1, max 10 contracts
+        return max(0, min(contracts, 5))  # Max 5 contracts, 0 if no edge
 
     
     def generate_signal(self, symbol: str, underlying_price: float,
@@ -509,8 +519,9 @@ class V50OptionsAlphaEngine:
             else:
                 direction = 'neutral'
         
-        # Calculate confidence
-        confidence = min(1.0, abs(combined_signal) + 0.3)  # Base confidence + signal strength
+        # Calculate confidence - require real signal strength
+        # FIXED: Old formula base of +0.3 meant even noise got 0.3 confidence
+        confidence = min(1.0, abs(combined_signal) * 1.5)  # Pure signal-based confidence
         
         # Use override min_confidence if available
         min_conf = overrides.min_confidence if _HAS_OVERRIDES else self.min_confidence
@@ -528,15 +539,24 @@ class V50OptionsAlphaEngine:
         # Select strategy
         strategy = self.select_strategy(iv_percentile, direction)
         
-        # Calculate expected metrics based on strategy
+        # Calculate expected metrics based on strategy and actual IV/DTE
+        # Use 30 DTE as default if not provided
+        dte = 30
+        atm_iv = option_chain.get('atm_iv', 0.30) if option_chain else 0.30
+        
         if strategy in self.high_iv_strategies:
-            expected_return = 0.15  # Premium capture
-            max_loss = underlying_price * 0.10  # 10% max move risk
-            pop = 0.70  # Higher POP for premium selling
+            # Premium selling strategies: expected premium is a fraction of IV-based moves
+            expected_move = underlying_price * atm_iv * np.sqrt(dte / 365.0)
+            expected_return = min(0.25, atm_iv * np.sqrt(dte / 365.0) * 0.3)  # ~30% of expected move as premium
+            max_loss = expected_move * 2  # Roughly 2x expected move as max risk
+            # PoP for premium selling depends on how far OTM
+            pop = min(0.80, 0.50 + (1 - confidence) * 0.3 + 0.10)  # Higher PoP for safer setups
         else:
-            expected_return = 0.30  # Directional plays
-            max_loss = underlying_price * 0.03  # Premium paid
-            pop = 0.45  # Lower POP but higher reward
+            # Directional plays: risk is premium paid
+            premium_estimate = underlying_price * atm_iv * np.sqrt(dte / 365.0) * 0.15
+            expected_return = min(0.50, confidence * 0.4)  # Scale with confidence
+            max_loss = premium_estimate  # Max loss is premium paid
+            pop = min(0.55, confidence * 0.5)  # Directional plays have lower PoP
         
         signal = OptionsSignal(
             timestamp=datetime.now(),

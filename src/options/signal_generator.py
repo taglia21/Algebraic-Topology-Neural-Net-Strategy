@@ -342,14 +342,45 @@ class MeanReversionStrategy:
     
     async def _calculate_z_score(self, symbol: str) -> Optional[float]:
         """
-        Calculate z-score for symbol.
+        Calculate z-score for symbol using actual historical price data.
         
-        TODO: Implement actual calculation using historical prices
-        For now, return mock value
+        Uses a 20-day rolling mean and standard deviation to compute the
+        z-score of the current price (how many stdevs from the mean).
+        Returns None if insufficient data is available.
         """
-        # Mock implementation - would fetch real data
-        import random
-        return random.uniform(-3.0, 3.0) if random.random() > 0.7 else 0.0
+        try:
+            import yfinance as yf
+            data = yf.download(symbol, period='60d', interval='1d', progress=False)
+            if data is None or len(data) < 20:
+                self.logger.debug(f"Insufficient data for z-score: {symbol}")
+                return None
+            
+            # Handle multi-index columns from yfinance
+            import pandas as pd
+            if isinstance(data.columns, pd.MultiIndex):
+                closes = data['Close'].iloc[:, 0].dropna().values
+            else:
+                closes = data['Close'].dropna().values
+            
+            if len(closes) < 20:
+                return None
+            
+            # 20-day rolling statistics
+            recent = closes[-20:]
+            mean_price = float(recent.mean())
+            std_price = float(recent.std())
+            
+            if std_price < 1e-8:  # Avoid division by zero
+                return 0.0
+            
+            current_price = float(closes[-1])
+            z_score = (current_price - mean_price) / std_price
+            
+            return z_score
+            
+        except Exception as e:
+            self.logger.debug(f"Z-score calculation failed for {symbol}: {e}")
+            return None
 
 
 # ============================================================================

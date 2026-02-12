@@ -33,6 +33,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.ml_integration import MLIntegration, get_ml_signal, record_trade, get_ml_stats
 from config.strategy_overrides import get_overrides
 
+# Import trading gate for circuit breaker protection
+try:
+    from src.risk.trading_gate import check_trading_allowed, update_breaker_state
+    HAS_TRADING_GATE = True
+except ImportError:
+    HAS_TRADING_GATE = False
+
 # Try to import Alpaca
 try:
     import alpaca_trade_api as tradeapi
@@ -294,6 +301,13 @@ class PaperTradingBot:
         """Run one trading cycle."""
         logger.info("-" * 60)
         logger.info("TRADING CYCLE START")
+        
+        # Circuit breaker check
+        if HAS_TRADING_GATE:
+            allowed, reason = check_trading_allowed()
+            if not allowed:
+                logger.warning(f'⚠️ CIRCUIT BREAKER: {reason} - skipping cycle')
+                return
         
         signals_generated = 0
         trades_executed = 0

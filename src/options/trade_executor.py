@@ -231,16 +231,18 @@ class AlpacaOptionsExecutor:
             underlying += ch
         
         # Build MLEG legs
+        # ratio_qty is the ratio between legs (1:1 for standard spread)
+        # The actual quantity goes in the main order's qty field
         mleg_legs = [
             OptionLegRequest(
                 symbol=long_symbol,
                 side=AlpacaOrderSide.BUY,
-                ratio_qty=str(quantity),
+                ratio_qty="1",
             ),
             OptionLegRequest(
                 symbol=short_symbol,
                 side=AlpacaOrderSide.SELL,
-                ratio_qty=str(quantity),
+                ratio_qty="1",
             ),
         ]
         
@@ -341,22 +343,22 @@ class AlpacaOptionsExecutor:
             OptionLegRequest(
                 symbol=put_long_occ,
                 side=AlpacaOrderSide.BUY,
-                ratio_qty=str(quantity),
+                ratio_qty="1",
             ),
             OptionLegRequest(
                 symbol=put_short_occ,
                 side=AlpacaOrderSide.SELL,
-                ratio_qty=str(quantity),
+                ratio_qty="1",
             ),
             OptionLegRequest(
                 symbol=call_short_occ,
                 side=AlpacaOrderSide.SELL,
-                ratio_qty=str(quantity),
+                ratio_qty="1",
             ),
             OptionLegRequest(
                 symbol=call_long_occ,
                 side=AlpacaOrderSide.BUY,
-                ratio_qty=str(quantity),
+                ratio_qty="1",
             ),
         ]
         
@@ -508,7 +510,7 @@ class AlpacaOptionsExecutor:
         Returns:
             ExecutionResult
         """
-        max_retries = self.config["order_retry_attempts"]
+        max_retries = self.config.get("retry_attempts", 3)
         
         for attempt in range(max_retries):
             try:

@@ -426,8 +426,8 @@ class AutonomousTradingEngine:
             if signal.signal_type == SignalType.HOLD:
                 continue
             
-            # Skip low confidence - LOWERED for paper trading to get trades flowing
-            min_confidence = 0.15 if self.paper else 0.30
+            # Skip low confidence - require meaningful signal quality
+            min_confidence = 0.40 if self.paper else 0.50
 
             # PHASE 5: Boost confidence using SignalAggregator on the underlying
             if self.signal_aggregator is not None:
@@ -503,11 +503,14 @@ class AutonomousTradingEngine:
         sized_signals = []
         
         for signal in signals:
-            # Estimate max loss per contract
+            # Estimate max loss per contract using actual signal data
+            strike_width = 5.0  # Default $5 wide spreads
+            # Use actual expected premium from signal if available, otherwise conservative default
+            premium_estimate = signal.expected_premium if signal.expected_premium and signal.expected_premium > 0 else 0.0
             max_loss = calculate_max_loss_per_contract(
                 strategy=signal.strategy,
-                strike_width=5.0,  # Default $5 wide spreads
-                premium_received=0.30,  # Assume $30 credit per spread
+                strike_width=strike_width,
+                premium_received=premium_estimate,
             )
             
             # Calculate position size
@@ -777,20 +780,39 @@ class AutonomousTradingEngine:
                 if not symbol:
                     continue
                 
-                # Check against Alpaca data
+                # Check against Alpaca data — FIXED: use exact symbol prefix match
+                # instead of substring ("A" in "AAPL..." was matching everything)
                 unrealized_pnl = 0.0
                 unrealized_pnl_pct = 0.0
                 
-                # Look for matching option positions
+                # Look for matching option positions using exact underlying prefix
                 for occ_sym, data in alpaca_map.items():
-                    if symbol.upper() in occ_sym.upper():
+                    # OCC format: AAPL250620P00150000 — extract underlying correctly
+                    occ_underlying = ''
+                    for ch in occ_sym:
+                        if ch.isdigit():
+                            break
+                        occ_underlying += ch
+                    if occ_underlying.upper() == symbol.upper():
                         unrealized_pnl += data["unrealized_pl"]
                 
-                # Calculate P&L percentage
-                if max_loss > 0:
+                # Calculate P&L percentage using real cost_basis from Alpaca
+                total_cost_basis = 0.0
+                for occ_sym, data in alpaca_map.items():
+                    occ_underlying = ''
+                    for ch in occ_sym:
+                        if ch.isdigit():
+                            break
+                        occ_underlying += ch
+                    if occ_underlying.upper() == symbol.upper():
+                        total_cost_basis += abs(data.get("cost_basis", 0.0))
+                
+                if total_cost_basis > 0:
+                    unrealized_pnl_pct = unrealized_pnl / total_cost_basis
+                elif max_loss > 0:
                     unrealized_pnl_pct = unrealized_pnl / max_loss
-                elif entry_credit > 0:
-                    unrealized_pnl_pct = unrealized_pnl / (entry_credit * 100)
+                # If we have no cost basis and no max_loss, pnl_pct stays 0
+                # which means stops won't trigger — this is intentionally safe
                 
                 close_reason = None
                 
@@ -852,14 +874,16 @@ class AutonomousTradingEngine:
     def _has_position(self, symbol: str) -> bool:
         """Check if we have a position in symbol."""
         for pos in self.current_positions:
-            if pos == symbol:
-                return True
+            # Handle dict positions (normal case)
             if isinstance(pos, dict):
                 if pos.get("symbol") == symbol:
                     return True
                 signal = pos.get("signal")
-                if getattr(signal, "symbol", None) == symbol:
+                if signal is not None and getattr(signal, "symbol", None) == symbol:
                     return True
+            # Handle string positions (legacy)
+            elif isinstance(pos, str) and pos == symbol:
+                return True
         return False
     
     def _log_cycle_summary(self):

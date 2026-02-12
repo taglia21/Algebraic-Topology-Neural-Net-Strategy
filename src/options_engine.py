@@ -71,8 +71,9 @@ class TradierOptionsEngine:
         
         # For wheel strategy, sell cash-secured puts
         if strategy == 'wheel':
-            # Find put ~0.3 delta (30% OTM)
-            target_strike = underlying_price * 0.97
+            # Find put ~0.30 delta (~3-5% OTM depending on IV)
+            # 0.95 multiplier targets roughly 0.30 delta for 30-45 DTE with moderate IV
+            target_strike = underlying_price * 0.95
             
             puts = [opt for opt in chain.get('options', {}).get('option', []) 
                    if opt.get('option_type') == 'put']
@@ -147,11 +148,14 @@ class TradierOptionsEngine:
                 if optimal_put:
                     contracts = capital_per_trade // (optimal_put.get('strike', 1) * 100)
                     if contracts > 0:
-                        logger.info(f'Selling {contracts} puts on {symbol}')
-                        # Execute the trade
-                        # self.execute_option_trade(
-                        #     symbol, 'sell_to_open', contracts, 
-                        #     optimal_put.get('symbol')
-                        # )
+                        logger.info(f'Selling {contracts} puts on {symbol} at strike {optimal_put.get("strike")}')
+                        result = self.execute_option_trade(
+                            symbol, 'sell_to_open', contracts, 
+                            optimal_put.get('symbol')
+                        )
+                        if result:
+                            logger.info(f'Wheel put trade executed for {symbol}: {result}')
+                        else:
+                            logger.warning(f'Wheel put trade FAILED for {symbol}')
                         
             await asyncio.sleep(1)  # Rate limiting

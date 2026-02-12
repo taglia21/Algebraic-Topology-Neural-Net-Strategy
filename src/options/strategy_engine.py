@@ -420,8 +420,9 @@ class StrategyEngine:
         candidates = []
         target_dte = (dte_rec.entry_dte_min + dte_rec.entry_dte_max) // 2
         
-        # Spread width: $5 for stocks under $200, $10 for higher
-        spread_width = 5 if underlying_price < 200 else 10
+        # Spread width: ~2.5% of underlying price, rounded to nearest $1
+        # This keeps risk proportional regardless of share price
+        spread_width = max(1, round(underlying_price * 0.025))
         
         # Generate strikes
         if spread_type == SpreadType.BULL_PUT:
@@ -716,7 +717,15 @@ class StrategyEngine:
         dte_range: Tuple[int, int],
         option_type: OptionType
     ) -> List[Dict]:
-        """Generate synthetic option chain for testing."""
+        """Generate synthetic option chain for testing.
+        
+        WARNING: This generates FAKE data and should only be used for
+        backtesting/simulation. Never trade real money on synthetic chains.
+        """
+        self.logger.warning(
+            "Using SYNTHETIC option chain - not real market data! "
+            "Do not use for live trading decisions."
+        )
         chain = []
         
         # Generate strikes around current price
@@ -785,22 +794,33 @@ class StrategyEngine:
         is_above: bool
     ) -> float:
         """
-        Estimate probability of profit (simplified).
+        Estimate probability of profit using lognormal distribution.
         
-        Uses lognormal distribution.
+        FIXED: Includes risk-free drift term (r - 0.5*sigma^2)*T in the
+        lognormal model. Without drift, put probabilities are underestimated
+        and call probabilities are overestimated.
         """
         T = dte / 365.0
+        r = 0.05  # Risk-free rate
         
         # Standard deviation of log returns
         std_dev = iv * np.sqrt(T)
         
-        # Log of strike/spot ratio
-        log_ratio = np.log(target_strike / current_price)
+        if std_dev < 1e-10:
+            # Near-zero vol: price stays at current level
+            if is_above:
+                return (100.0 if current_price > target_strike else 0.0)
+            else:
+                return (100.0 if current_price < target_strike else 0.0)
+        
+        # Log of strike/spot ratio with drift adjustment
+        drift = (r - 0.5 * iv * iv) * T
+        log_ratio = np.log(target_strike / current_price) - drift
         
         # Z-score
         z = log_ratio / std_dev
         
-        # Probability using normal CDF approximation
+        # Probability using normal CDF
         from scipy.stats import norm
         
         if is_above:
@@ -820,10 +840,29 @@ class StrategyEngine:
         iv: float,
         dte: int
     ) -> float:
-        """Estimate probability price stays in range."""
-        pop_above_lower = self._estimate_pop(current_price, lower_strike, iv, dte, is_above=True)
-        pop_below_upper = self._estimate_pop(current_price, upper_strike, iv, dte, is_above=False)
+        """Estimate probability price stays in range.
         
-        # Probability of being in range = both conditions true
-        # Approximation: assume independence
-        return (pop_above_lower / 100) * (pop_below_upper / 100) * 100
+        FIXED: Use P(<upper) - P(<lower) which is the correct CDF difference.
+        The old formula P(>lower) * P(<upper) incorrectly assumed independence,
+        dramatically underestimating iron condor probability of profit.
+        """
+        from scipy.stats import norm
+        
+        T = dte / 365.0
+        r = 0.05  # Risk-free rate
+        std_dev = iv * np.sqrt(T)
+        
+        if std_dev < 1e-10:
+            # Near-zero vol: price stays at current level
+            in_range = lower_strike <= current_price <= upper_strike
+            return 100.0 if in_range else 0.0
+        
+        drift = (r - 0.5 * iv * iv) * T
+        
+        z_lower = (np.log(lower_strike / current_price) - drift) / std_dev
+        z_upper = (np.log(upper_strike / current_price) - drift) / std_dev
+        
+        # P(lower < S_T < upper) = CDF(z_upper) - CDF(z_lower)
+        prob = norm.cdf(z_upper) - norm.cdf(z_lower)
+        
+        return prob * 100

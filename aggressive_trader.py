@@ -33,6 +33,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Import configs
 from config.aggressive_mode import get_aggressive_config
 
+# Import trading gate for circuit breaker protection
+try:
+    from src.risk.trading_gate import check_trading_allowed, update_breaker_state
+    HAS_TRADING_GATE = True
+except ImportError:
+    HAS_TRADING_GATE = False
+
 # Try yfinance
 try:
     import yfinance as yf
@@ -125,18 +132,9 @@ class AggressiveTrader:
                         'prices': prices.tolist()
                     }
             
-            # Fallback mock data
-            np.random.seed(int(time.time()) + hash(ticker) % 1000)
-            base = 100 + hash(ticker) % 400
-            current = base * (1 + np.random.normal(0, 0.01))
-            return {
-                'price': current,
-                'mom_5m': np.random.normal(0.001, 0.005),
-                'mom_15m': np.random.normal(0.002, 0.008),
-                'mom_30m': np.random.normal(0.003, 0.01),
-                'vwap_signal': np.random.normal(0, 0.005),
-                'prices': [current]
-            }
+            # No fallback to mock data — refuse to trade on fake prices
+            logger.warning(f"No price data available for {ticker} (yfinance unavailable)")
+            return None
             
         except Exception as e:
             logger.error(f"Error fetching {ticker}: {e}")
@@ -160,11 +158,11 @@ class AggressiveTrader:
         # Combine signals
         combined = mom * 0.6 + vwap * 0.4
         
-        # Convert to probability
-        prob = 1 / (1 + np.exp(-combined * 50))  # More sensitive
+        # Convert to probability — FIXED: use moderate scaling (was 50, caused binary outputs)
+        prob = 1 / (1 + np.exp(-combined * 3))  # Smooth sigmoid, not binary
         
-        # Confidence based on signal strength
-        conf = min(abs(combined) * 20, 1.0)
+        # Confidence based on signal strength — FIXED: moderate scaling
+        conf = min(abs(combined) * 5, 1.0)
         
         # Aggressive thresholds
         if prob > self.config.buy_threshold:
@@ -325,19 +323,63 @@ class AggressiveTrader:
         return pnl
     
     def get_portfolio_value(self) -> float:
-        """Calculate total portfolio value."""
+        """Calculate total portfolio value using CURRENT market prices (mark-to-market)."""
         total = self.cash
         for ticker, pos in self.positions.items():
-            total += pos['entry_price'] * pos['shares']
+            # Try to get current price; fall back to entry price if unavailable
+            current_price = pos['entry_price']  # default
+            if YFINANCE_AVAILABLE:
+                try:
+                    import yfinance as yf
+                    data = yf.download(ticker, period='1d', interval='1m', progress=False)
+                    if len(data) > 0:
+                        import pandas as pd
+                        if isinstance(data.columns, pd.MultiIndex):
+                            close = data['Close'][ticker] if ticker in data['Close'].columns else data['Close'].iloc[:, 0]
+                        else:
+                            close = data['Close']
+                        current_price = float(close.iloc[-1])
+                except Exception:
+                    pass  # Use entry price as fallback
+            total += current_price * pos['shares']
         return total
     
     def trading_cycle(self):
-        """Run one aggressive trading cycle."""
+        """Run one trading cycle with risk checks."""
         self.cycle_count += 1
         
         logger.info("=" * 60)
-        logger.info(f"🔥 CYCLE {self.cycle_count} | {datetime.now().strftime('%H:%M:%S')}")
+        logger.info(f"CYCLE {self.cycle_count} | {datetime.now().strftime('%H:%M:%S')}")
         logger.info("=" * 60)
+        
+        # CENTRALIZED CIRCUIT BREAKER CHECK
+        if HAS_TRADING_GATE:
+            allowed, reason = check_trading_allowed()
+            if not allowed:
+                logger.warning(f"⚠️ TRADING GATE: {reason} - skipping cycle")
+                return
+        
+        # LOCAL CIRCUIT BREAKER: Check daily drawdown before trading
+        today = datetime.now().strftime('%Y-%m-%d')
+        today_pnl = self.daily_pnl.get(today, 0)
+        portfolio = self.get_portfolio_value()
+        daily_dd = today_pnl / self.initial_capital if self.initial_capital > 0 else 0
+        total_dd = (portfolio - self.initial_capital) / self.initial_capital
+        
+        if daily_dd < -self.config.max_daily_drawdown_pct:
+            logger.warning(f"CIRCUIT BREAKER: Daily drawdown {daily_dd:.2%} exceeds limit {self.config.max_daily_drawdown_pct:.2%}")
+            logger.warning("Halting new trades for today. Only exit checks will run.")
+            # Only check exits, don't enter new trades
+            for ticker in list(self.positions.keys()):
+                price_data = self.fetch_price(ticker)
+                if price_data:
+                    self.check_exits(ticker, price_data['price'])
+            return 0
+        
+        if total_dd < -self.config.max_portfolio_drawdown_pct:
+            logger.warning(f"CIRCUIT BREAKER: Total drawdown {total_dd:.2%} exceeds limit {self.config.max_portfolio_drawdown_pct:.2%}")
+            logger.warning("HALTING ALL TRADING until drawdown recovers.")
+            return 0
         
         trades_executed = 0
         signals_generated = 0

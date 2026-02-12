@@ -381,7 +381,8 @@ class V25ProductionEngine:
             return can_trade, int(report.overall_score)
         except Exception as e:
             logger.warning(f"Quality check failed: {e}")
-            return True, 50
+            # FIXED: Don't silently pass on error — block trading with low score
+            return False, 0
     
     # =========================================================================
     # FEATURE GENERATION
@@ -498,14 +499,17 @@ class V25ProductionEngine:
             confirmed_count: Number of confirming indicators (out of 9)
         """
         if self.signal_validator is None:
-            return True, 9  # Assume valid if validator not available
+            # FIXED: Don't assume valid when validator unavailable — reject signal
+            logger.warning("Signal validator not available — rejecting signal for safety")
+            return False, 0
         
         try:
             result = self.signal_validator.validate(df, direction)
             return result.is_valid, result.confirmed_count
         except Exception as e:
             logger.debug(f"Signal validation failed: {e}")
-            return True, 5
+            # FIXED: Don't silently approve on exception — reject signal
+            return False, 0
     
     # =========================================================================
     # POSITION SIZING
@@ -659,11 +663,11 @@ class V25ProductionEngine:
             signal.combined_pred = combined_pred
             signal.confidence = combined_conf
             
-            # 6. Determine direction
-            if combined_pred > 0.001:
+            # 6. Determine direction — FIXED: threshold 0.005 (50bp) to exceed spread costs
+            if combined_pred > 0.005:
                 signal.direction = 'long'
                 signal.signal_strength = min(combined_pred / 0.01, 1.0)
-            elif combined_pred < -0.001:
+            elif combined_pred < -0.005:
                 signal.direction = 'short'
                 signal.signal_strength = min(abs(combined_pred) / 0.01, 1.0)
             else:

@@ -62,6 +62,7 @@ class Position:
     unrealized_pl: float
     unrealized_plpc: float
     side: str  # 'long' or 'short'
+    cost_basis: float = 0.0  # Total cost basis (qty * avg_entry_price)
 
 
 @dataclass
@@ -258,6 +259,7 @@ class AlpacaClient:
                 unrealized_pl=float(item.get("unrealized_pl", 0)),
                 unrealized_plpc=float(item.get("unrealized_plpc", 0)),
                 side=item.get("side", "long"),
+                cost_basis=float(item.get("cost_basis", 0)),
             ))
         
         return positions
@@ -275,6 +277,7 @@ class AlpacaClient:
                 unrealized_pl=float(data.get("unrealized_pl", 0)),
                 unrealized_plpc=float(data.get("unrealized_plpc", 0)),
                 side=data.get("side", "long"),
+                cost_basis=float(data.get("cost_basis", 0)),
             )
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:

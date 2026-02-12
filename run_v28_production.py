@@ -160,6 +160,7 @@ class EquityEngine:
         self.engine = None
         self.client = None  # reusable AlpacaClient (issue #14)
         self.logger = logging.getLogger("equity_engine")
+        self._high_water_marks: dict[str, float] = {}  # trailing stop state
 
     async def initialize(self):
         from src.enhanced_trading_engine import EnhancedTradingEngine, EngineConfig
@@ -167,10 +168,11 @@ class EquityEngine:
         # Override max_position_pct for paper trading to allow slightly larger positions
         config = EngineConfig()
         self.engine = EnhancedTradingEngine(config)
-        # Pre-create the AlpacaClient once instead of per-trade (issue #14)
-        if self.mode == "live":
-            from src.trading.alpaca_client import AlpacaClient
-            self.client = AlpacaClient()
+        # Create AlpacaClient for BOTH paper and live modes
+        # Paper mode uses Alpaca's paper trading API — real orders, simulated fills
+        # This also enables position monitoring (SL/TP enforcement) in paper mode
+        from src.trading.alpaca_client import AlpacaClient
+        self.client = AlpacaClient()
         self.logger.info(f"Equity engine initialized (mode={self.mode})")
         self.logger.info(f"  Thresholds: MTF≥{config.min_mtf_score}, combined≥{config.min_combined_score}, "
                         f"weights: MTF={config.mtf_weight}, sent={config.sentiment_weight}")
@@ -237,44 +239,67 @@ class EquityEngine:
                         f"(confidence={decision.confidence:.2f}, "
                         f"combined={decision.combined_score:.2f})"
                     )
-                    if self.mode == "live":
-                        await self._execute_equity_trade(decision, regime_scale)
-                    else:
-                        self.logger.info(f"[PAPER] Would trade {symbol}: {decision.signal.name}")
+                    # Execute in both paper and live — Alpaca paper API handles simulation
+                    await self._execute_equity_trade(decision, regime_scale)
             except Exception as exc:
                 self.logger.error(f"Equity cycle error for {symbol}: {exc}", exc_info=True)
 
     # ── Position monitoring thresholds ──
     EQUITY_STOP_LOSS_PCT = -0.05    # -5% unrealized P&L → close
     EQUITY_TAKE_PROFIT_PCT = 0.10   # +10% unrealized P&L → close
+    # Trailing stop activates once position reaches +4%, then trails at 40% of peak
+    TRAILING_STOP_ACTIVATE_PCT = 0.04
+    TRAILING_STOP_TRAIL_PCT = 0.40
 
     async def _monitor_equity_positions(self, equity: float):
-        """Monitor existing equity positions and close on SL/TP thresholds."""
+        """Monitor existing equity positions — SL, TP, and trailing stop."""
         try:
             positions = self.client.get_positions()
         except Exception as exc:
             self.logger.error(f"Failed to fetch positions for monitoring: {exc}")
             return
 
+        active_symbols = set()
         for pos in positions:
             # Skip option positions (handled by OptionsEngine)
             if len(pos.symbol) > 6 or any(ch.isdigit() for ch in pos.symbol[:4]):
                 continue
 
+            active_symbols.add(pos.symbol)
             try:
                 unrealized_pnl = float(pos.unrealized_pl)
                 cost_basis = abs(float(pos.cost_basis))
+                if cost_basis <= 0:
+                    # Fallback: compute from qty * avg_entry_price
+                    cost_basis = abs(float(pos.qty) * float(pos.avg_entry_price))
                 if cost_basis <= 0:
                     continue
 
                 pnl_pct = unrealized_pnl / cost_basis
 
+                # Update high-water mark for trailing stop
+                prev_hwm = self._high_water_marks.get(pos.symbol, 0.0)
+                if pnl_pct > prev_hwm:
+                    self._high_water_marks[pos.symbol] = pnl_pct
+                    prev_hwm = pnl_pct
+
+                # 1. Hard stop loss
                 if pnl_pct <= self.EQUITY_STOP_LOSS_PCT:
                     self.logger.warning(
                         f"🛑 EQUITY STOP-LOSS: {pos.symbol} "
                         f"P&L ${unrealized_pnl:+,.2f} ({pnl_pct:+.1%}) — closing"
                     )
                     self.client.close_position(pos.symbol)
+                # 2. Trailing stop: if we reached +4% and now gave back 40% of peak
+                elif (prev_hwm >= self.TRAILING_STOP_ACTIVATE_PCT and
+                      pnl_pct < prev_hwm * (1 - self.TRAILING_STOP_TRAIL_PCT)):
+                    trail_floor = prev_hwm * (1 - self.TRAILING_STOP_TRAIL_PCT)
+                    self.logger.info(
+                        f"📉 TRAILING STOP: {pos.symbol} peak={prev_hwm:+.1%}, "
+                        f"now={pnl_pct:+.1%}, floor={trail_floor:+.1%} — closing"
+                    )
+                    self.client.close_position(pos.symbol)
+                # 3. Hard take profit
                 elif pnl_pct >= self.EQUITY_TAKE_PROFIT_PCT:
                     self.logger.info(
                         f"🎯 EQUITY TAKE-PROFIT: {pos.symbol} "
@@ -284,10 +309,16 @@ class EquityEngine:
                 else:
                     self.logger.debug(
                         f"  Equity holding {pos.symbol}: {float(pos.qty):.0f} sh, "
-                        f"P&L ${unrealized_pnl:+,.2f} ({pnl_pct:+.1%})"
+                        f"P&L ${unrealized_pnl:+,.2f} ({pnl_pct:+.1%}), "
+                        f"HWM={prev_hwm:+.1%}"
                     )
             except Exception as exc:
                 self.logger.error(f"Error monitoring {pos.symbol}: {exc}")
+
+        # Clean up high-water marks for closed positions
+        for sym in list(self._high_water_marks):
+            if sym not in active_symbols:
+                del self._high_water_marks[sym]
 
     async def _execute_equity_trade(self, decision, regime_scale: float = 1.0):
         """Place equity order via Alpaca REST — limit order with bracket stop/TP."""

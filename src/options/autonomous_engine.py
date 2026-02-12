@@ -56,14 +56,10 @@ except ImportError:
     MANIFOLD_AVAILABLE = False
 
 try:
-    from src.ml.stacked_ensemble import StackedEnsemble
-    from src.ml.transformer_predictor import TransformerPredictor
-    from src.ml.gradient_boost_ensemble import GradientBoostEnsemble
+    from src.ml.adaptive_ensemble import AdaptiveEnsemble
     ML_AVAILABLE = True
 except ImportError:
-    StackedEnsemble = None
-    TransformerPredictor = None
-    GradientBoostEnsemble = None
+    AdaptiveEnsemble = None
     ML_AVAILABLE = False
 
 try:
@@ -232,19 +228,13 @@ class AutonomousTradingEngine:
             except Exception as e:
                 self.logger.warning(f"ManifoldRegimeDetector init failed: {e}")
 
-        self.ml_ensemble = None
-        self.ml_transformer = None
+        self.adaptive_ml = None
         if ML_AVAILABLE:
             try:
-                self.ml_ensemble = StackedEnsemble()
-                self.logger.info("✓ ML StackedEnsemble loaded")
+                self.adaptive_ml = AdaptiveEnsemble()
+                self.logger.info("✓ AdaptiveEnsemble (self-training ML) loaded for options")
             except Exception as e:
-                self.logger.warning(f"StackedEnsemble init failed: {e}")
-            try:
-                self.ml_transformer = TransformerPredictor()
-                self.logger.info("✓ ML TransformerPredictor loaded")
-            except Exception as e:
-                self.logger.warning(f"TransformerPredictor init failed: {e}")
+                self.logger.warning(f"AdaptiveEnsemble init failed: {e}")
 
         self.continuous_learner = None
         if CONTINUOUS_LEARNER_AVAILABLE:
@@ -313,7 +303,7 @@ class AutonomousTradingEngine:
         self.logger.info(f"Initialized autonomous engine (paper={paper}, portfolio=${portfolio_value:,.0f})")
         self.logger.info("✓ Enhanced modules loaded: RegimeDetector, CorrelationManager, WeightOptimizer, VolSurface, Cointegration")
         self.logger.info(f"✓ Phase4 modules: Manifold={self.manifold_detector is not None}, "
-                        f"ML={self.ml_ensemble is not None}, GARCH={self.garch_model is not None}, "
+                        f"ML={self.adaptive_ml is not None}, GARCH={self.garch_model is not None}, "
                         f"Heston={self.heston_model is not None}, Aggregator={self.signal_aggregator is not None}")
 
     def request_shutdown(self) -> None:
@@ -597,8 +587,29 @@ class AutonomousTradingEngine:
         """
         executions: List[ExecutionResult] = []
 
+        # Pre-check buying power to avoid wasting API calls on orders that will fail
+        available_bp = 0.0
+        try:
+            acct = self.trade_executor.trading_client.get_account()
+            available_bp = float(getattr(acct, 'options_buying_power', 0) or
+                                getattr(acct, 'buying_power', 0) or 0)
+            self.logger.info(f"Options buying power: ${available_bp:,.2f}")
+        except Exception as e:
+            self.logger.warning(f"Could not check buying power: {e}")
+            available_bp = float('inf')  # Proceed if check fails
+
         for signal, position_size in sized_signals:
             try:
+                # Skip if estimated cost exceeds buying power (avoid 40310000 errors)
+                estimated_cost = getattr(position_size, 'max_risk', 0) or 500.0
+                if estimated_cost > available_bp:
+                    self.logger.warning(
+                        f"⚠️ Skipping {signal.symbol} {signal.strategy}: "
+                        f"estimated cost ${estimated_cost:,.0f} > BP ${available_bp:,.0f}"
+                    )
+                    self.stats["trades_failed"] += 1
+                    continue
+
                 result = await self._resolve_and_execute(signal, position_size)
                 if result is not None:
                     executions.append(result)

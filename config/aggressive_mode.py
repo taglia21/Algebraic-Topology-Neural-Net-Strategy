@@ -81,15 +81,16 @@ class AggressiveConfig:
     max_portfolio_drawdown_pct: float = 0.10  # 10% max total loss
     
     # =========================================================================
-    # UNIVERSE - FULL
+    # UNIVERSE — DIVERSIFIED across sectors (was 70%+ tech)
     # =========================================================================
     
-    # Trade everything available
     universe: list = field(default_factory=lambda: [
-        'SPY', 'QQQ', 'IWM', 'XLK', 'XLF',  # ETFs
-        'AAPL', 'MSFT', 'GOOGL', 'NVDA', 'META',  # Big tech
-        'JPM', 'GS', 'BAC',  # Financials
-        'AMZN', 'TSLA'  # High beta
+        'SPY', 'QQQ',                      # Broad market ETFs
+        'AAPL', 'MSFT', 'NVDA',            # Tech (3)
+        'AMZN', 'TSLA',                     # Consumer Discretionary (2)
+        'JPM', 'GS', 'V',                   # Financials (3)
+        'XOM', 'CVX',                        # Energy (2)
+        'HD', 'KO',                          # Industrials + Staples (2)
     ])
     
     # Don't exclude anything

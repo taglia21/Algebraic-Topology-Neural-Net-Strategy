@@ -278,7 +278,7 @@ class EnhancedMLRetrainer:
         self._load_state()
     
     def _load_state(self):
-        """Load saved state from disk."""
+        """Load saved state from disk, and attempt to load Keras model if available."""
         state_file = self.state_dir / "ml_retraining_state.json"
         try:
             if state_file.exists():
@@ -290,6 +290,22 @@ class EnhancedMLRetrainer:
                     logger.info(f"Loaded ML state: thresholds={self.thresholds.buy_threshold}/{self.thresholds.sell_threshold}")
         except Exception as e:
             logger.warning(f"Could not load ML state: {e}")
+        
+        # Attempt to load a trained Keras model if one exists
+        if self.tf_available:
+            for ext in ('best_model.keras', 'best_model.h5'):
+                model_path = self.model_dir / ext
+                if model_path.exists():
+                    try:
+                        import tensorflow as tf
+                        self.model = tf.keras.models.load_model(str(model_path))
+                        logger.info(f"✅ Loaded trained Keras model from {model_path}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Could not load Keras model {model_path}: {e}")
+        
+        if self.model is None:
+            logger.info("No trained Keras model found — using multi-factor fallback signals")
         
         # Load trade outcomes
         outcomes_file = self.state_dir / "trade_outcomes.pkl"
@@ -749,12 +765,52 @@ class EnhancedMLRetrainer:
                 logger.warning(f"Model prediction failed: {e}")
                 prob, conf = 0.5, 0.0
         else:
-            # Fallback: momentum-based
-            close = price_data['Close'].values
-            if len(close) >= 20:
+            # Fallback: multi-factor signal (no trained model available)
+            # Combines momentum, RSI, mean-reversion, and trend to
+            # produce a probability and confidence estimate.
+            close = price_data['Close'].values.astype(float)
+            if len(close) >= 50:
+                # --- 1. Momentum (20-day) ---
+                mom_20 = close[-1] / close[-20] - 1
+
+                # --- 2. RSI (14-day Wilder) ---
+                deltas = np.diff(close[-15:])
+                gains = np.where(deltas > 0, deltas, 0).mean()
+                losses = np.where(deltas < 0, -deltas, 0).mean()
+                rs = gains / (losses + 1e-10)
+                rsi = 100 - 100 / (1 + rs)
+
+                # --- 3. Mean reversion (z-score vs 50-day SMA) ---
+                sma50 = close[-50:].mean()
+                std50 = close[-50:].std() + 1e-10
+                z_score = (close[-1] - sma50) / std50
+
+                # --- 4. Trend filter (SMA20 > SMA50 → uptrend) ---
+                sma20 = close[-20:].mean()
+                trend = 1.0 if sma20 > sma50 else -1.0
+
+                # Composite: weight towards regime-aware factors
+                #  - Momentum component: sigmoid(mom * 5) → 0..1
+                #  - RSI component: 1 when RSI < 30 (oversold buy), 0 when > 70
+                #  - Mean-rev component: favour buys when z < -1
+                mom_score = 1 / (1 + np.exp(-mom_20 * 5))          # 0..1
+                rsi_score = 1 / (1 + np.exp((rsi - 50) * 0.1))      # 0..1
+                mr_score  = 1 / (1 + np.exp(z_score * 2))           # 0..1
+
+                # Trend multiplier shifts composite towards current direction
+                raw = 0.40 * mom_score + 0.30 * rsi_score + 0.30 * mr_score
+                if trend < 0:
+                    raw = raw * 0.8          # discount buys in downtrend
+                prob = np.clip(raw, 0.01, 0.99)
+
+                # Confidence: agreement among factors (all say same thing → high)
+                factor_signs = [mom_score - 0.5, rsi_score - 0.5, mr_score - 0.5]
+                agree = sum(1 for f in factor_signs if f * (prob - 0.5) > 0) / 3.0
+                conf = np.clip(agree * abs(prob - 0.5) * 4, 0, 1.0)
+            elif len(close) >= 20:
                 mom = close[-1] / close[-20] - 1
-                prob = 1 / (1 + np.exp(-mom * 10))
-                conf = min(abs(mom) * 5, 1.0)
+                prob = 1 / (1 + np.exp(-mom * 5))
+                conf = min(abs(mom) * 3, 0.5)   # low confidence with limited data
             else:
                 prob, conf = 0.5, 0.0
         

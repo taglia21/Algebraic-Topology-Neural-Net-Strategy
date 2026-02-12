@@ -163,13 +163,15 @@ class PaperTradingBot:
         self.position_size = 10000  # $10k per position
         self.max_positions = 5
         
-        # Initialize Alpaca if available
+        # Initialize Alpaca if available — support both env var naming conventions
         self.alpaca = None
-        if ALPACA_AVAILABLE and os.environ.get('ALPACA_API_KEY'):
+        api_key = os.environ.get('ALPACA_API_KEY') or os.environ.get('APCA_API_KEY_ID')
+        api_secret = os.environ.get('ALPACA_SECRET_KEY') or os.environ.get('APCA_API_SECRET_KEY')
+        if ALPACA_AVAILABLE and api_key:
             try:
                 self.alpaca = tradeapi.REST(
-                    os.environ.get('ALPACA_API_KEY'),
-                    os.environ.get('ALPACA_SECRET_KEY'),
+                    api_key,
+                    api_secret,
                     'https://paper-api.alpaca.markets',  # Paper trading endpoint
                     api_version='v2'
                 )

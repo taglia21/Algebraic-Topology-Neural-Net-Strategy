@@ -36,13 +36,24 @@ try:
 except ImportError:
     HAS_PROCESS_LOCK = False
 
+# Import sector caps to prevent portfolio concentration
+try:
+    from src.risk.sector_caps import sector_allows_trade, get_sector
+    HAS_SECTOR_CAPS = True
+except ImportError:
+    HAS_SECTOR_CAPS = False
+
 class AggressiveAutoTrader:
     """Aggressive automated trading system"""
     
-    # High-momentum stocks to trade
+    # Momentum stocks — DIVERSIFIED across sectors (was 100% tech/fintech)
     MOMENTUM_UNIVERSE = [
-        'NVDA', 'TSLA', 'AMD', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META',
-        'NFLX', 'CRM', 'SHOP', 'SQ', 'PYPL', 'COIN', 'MSTR', 'PLTR'
+        'NVDA', 'AAPL', 'MSFT', 'AMD',        # Tech (4)
+        'AMZN', 'TSLA', 'NFLX',                # Consumer Discretionary (3)
+        'JPM', 'GS', 'V',                       # Financials (3)
+        'XOM', 'CVX',                            # Energy (2)
+        'HD', 'LOW',                             # Industrials (2)
+        'KO', 'PEP',                             # Consumer Staples (2)
     ]
     
     # Leveraged ETFs DISABLED - daily decay makes them unsuitable for swing trading
@@ -274,7 +285,15 @@ class AggressiveAutoTrader:
             if symbol in positions:
                 continue
             if signal > 0.3:
-                self.execute_trade(symbol, 'buy', per_stock * confidence)
+                trade_cost = per_stock * confidence
+                # Sector cap check: don't overload any one sector
+                if HAS_SECTOR_CAPS:
+                    pos_values = {s: abs(float(p.get('market_value', 0))) for s, p in positions.items()}
+                    allowed, cap_reason = sector_allows_trade(symbol, trade_cost, pos_values, account['equity'])
+                    if not allowed:
+                        logger.info(f'🚫 Sector cap: {cap_reason}')
+                        continue
+                self.execute_trade(symbol, 'buy', trade_cost)
             elif signal < -0.3 and symbol in positions:
                 self.close_position(symbol)
                 

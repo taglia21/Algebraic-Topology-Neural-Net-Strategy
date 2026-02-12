@@ -47,6 +47,13 @@ try:
 except ImportError:
     HAS_PROCESS_LOCK = False
 
+# Import sector caps to prevent portfolio concentration
+try:
+    from src.risk.sector_caps import sector_allows_trade, get_sector
+    HAS_SECTOR_CAPS = True
+except ImportError:
+    HAS_SECTOR_CAPS = False
+
 # Try yfinance
 try:
     import yfinance as yf
@@ -83,13 +90,15 @@ class AggressiveTrader:
         # Price cache for momentum
         self.price_cache: Dict[str, List[float]] = {}
         
-        # Alpaca connection
+        # Alpaca connection — support both env var naming conventions
         self.alpaca = None
-        if ALPACA_AVAILABLE and os.environ.get('ALPACA_API_KEY'):
+        api_key = os.environ.get('ALPACA_API_KEY') or os.environ.get('APCA_API_KEY_ID')
+        api_secret = os.environ.get('ALPACA_SECRET_KEY') or os.environ.get('APCA_API_SECRET_KEY')
+        if ALPACA_AVAILABLE and api_key:
             try:
                 self.alpaca = tradeapi.REST(
-                    os.environ.get('ALPACA_API_KEY'),
-                    os.environ.get('ALPACA_SECRET_KEY'),
+                    api_key,
+                    api_secret,
                     'https://paper-api.alpaca.markets',
                     api_version='v2'
                 )
@@ -435,6 +444,15 @@ class AggressiveTrader:
             # Execute trade
             if signal in ['long', 'short']:
                 shares = self.calculate_position_size(current_price, conf)
+                trade_cost = shares * current_price
+                # Sector cap check: don't overload any one sector
+                if HAS_SECTOR_CAPS:
+                    pos_values = {t: abs(p.get('shares', 0) * p.get('entry_price', 0)) for t, p in self.positions.items()}
+                    portfolio = self.get_portfolio_value()
+                    allowed, cap_reason = sector_allows_trade(ticker, trade_cost, pos_values, portfolio)
+                    if not allowed:
+                        logger.info(f"🚫 Sector cap: {cap_reason}")
+                        continue
                 if self.execute_trade(ticker, signal, current_price, shares):
                     trades_executed += 1
         

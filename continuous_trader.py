@@ -30,6 +30,13 @@ try:
 except ImportError:
     HAS_REGIME_FILTER = False
 
+# Import sector caps to prevent portfolio concentration
+try:
+    from src.risk.sector_caps import sector_allows_trade, get_sector
+    HAS_SECTOR_CAPS = True
+except ImportError:
+    HAS_SECTOR_CAPS = False
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -46,8 +53,14 @@ alpaca_headers = {
     'APCA-API-SECRET-KEY': ALPACA_SECRET
 }
 
-# Trading symbols
-SYMBOLS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'SPY', 'QQQ', 'IWM']
+# Trading symbols — DIVERSIFIED across sectors (was 70% tech)
+SYMBOLS = [
+    'AAPL', 'MSFT', 'NVDA',          # Tech (3)
+    'AMZN', 'TSLA',                    # Consumer Discretionary (2)
+    'JPM', 'V',                         # Financials (2)
+    'XOM',                              # Energy (1)
+    'SPY', 'QQQ',                       # Broad market (2)
+]
 TRADE_INTERVAL = 120  # Trade every 2 minutes (reduced from 60s to avoid overtrading)
 MAX_POSITIONS = 6
 POSITION_SIZE_PCT = 0.05  # 5% of equity per position
@@ -284,6 +297,14 @@ try:
                         if bars:
                             price = float(bars[-1]['c'])
                             dollar_amount = equity * POSITION_SIZE_PCT * regime_scale
+                            # Sector cap check: don't overload any one sector
+                            if HAS_SECTOR_CAPS:
+                                pos_values = {p['symbol']: abs(float(p['market_value'])) for p in positions}
+                                allowed, cap_reason = sector_allows_trade(best_symbol, dollar_amount, pos_values, equity)
+                                if not allowed:
+                                    logger.info(f'🚫 Sector cap: {cap_reason}')
+                                    time.sleep(2)
+                                    continue
                             qty = max(1, int(dollar_amount / price))
                             logger.info(f'BUY: {best_symbol} ({qty} shares, conf={best_conf:.2f})')
                             result = place_order(best_symbol, qty, 'buy')

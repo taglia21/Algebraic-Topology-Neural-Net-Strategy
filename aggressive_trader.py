@@ -40,6 +40,13 @@ try:
 except ImportError:
     HAS_TRADING_GATE = False
 
+# Import process lock to prevent multiple bots
+try:
+    from src.risk.process_lock import acquire_trading_lock, release_trading_lock
+    HAS_PROCESS_LOCK = True
+except ImportError:
+    HAS_PROCESS_LOCK = False
+
 # Try yfinance
 try:
     import yfinance as yf
@@ -524,19 +531,31 @@ def main():
     print("       Paper Trading - Fast Profit Demo")
     print("🔥" * 30 + "\n")
     
-    config = get_aggressive_config()
-    print("Configuration:")
-    print(f"  Buy threshold: {config.buy_threshold}")
-    print(f"  Sell threshold: {config.sell_threshold}")
-    print(f"  Min confidence: {config.min_confidence}")
-    print(f"  Position size: {config.position_size_pct:.0%}")
-    print(f"  Kelly fraction: {config.kelly_fraction}")
-    print(f"  Cycle: {config.cycle_seconds}s")
-    print(f"  Universe: {config.universe}")
-    print()
+    # Acquire exclusive trading lock
+    _trading_lock = None
+    if HAS_PROCESS_LOCK:
+        _trading_lock = acquire_trading_lock('aggressive_trader')
+        if _trading_lock is None:
+            logger.error('Another trading bot is already running! Exiting.')
+            return
     
-    trader = AggressiveTrader()
-    trader.run()
+    try:
+        config = get_aggressive_config()
+        print("Configuration:")
+        print(f"  Buy threshold: {config.buy_threshold}")
+        print(f"  Sell threshold: {config.sell_threshold}")
+        print(f"  Min confidence: {config.min_confidence}")
+        print(f"  Position size: {config.position_size_pct:.0%}")
+        print(f"  Kelly fraction: {config.kelly_fraction}")
+        print(f"  Cycle: {config.cycle_seconds}s")
+        print(f"  Universe: {config.universe}")
+        print()
+        
+        trader = AggressiveTrader()
+        trader.run()
+    finally:
+        if _trading_lock:
+            release_trading_lock(_trading_lock)
 
 
 if __name__ == "__main__":

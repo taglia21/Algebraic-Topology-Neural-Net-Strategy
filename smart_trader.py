@@ -16,6 +16,20 @@ try:
 except ImportError:
     HAS_TRADING_GATE = False
 
+# Import process lock to prevent multiple bots
+try:
+    from src.risk.process_lock import acquire_trading_lock, release_trading_lock
+    HAS_PROCESS_LOCK = True
+except ImportError:
+    HAS_PROCESS_LOCK = False
+
+# Import regime filter to avoid buying in downtrends
+try:
+    from src.risk.regime_filter import is_bullish_regime, get_position_scale
+    HAS_REGIME_FILTER = True
+except ImportError:
+    HAS_REGIME_FILTER = False
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,6 +39,7 @@ logger = logging.getLogger(__name__)
 ALPACA_KEY = os.getenv('APCA_API_KEY_ID')
 ALPACA_SECRET = os.getenv('APCA_API_SECRET_KEY')
 ALPACA_BASE = 'https://paper-api.alpaca.markets/v2'
+ALPACA_DATA_BASE = 'https://data.alpaca.markets/v2'
 
 alpaca_headers = {
     'APCA-API-KEY-ID': ALPACA_KEY,
@@ -48,9 +63,9 @@ def get_positions():
     return r.json() if r.status_code == 200 else []
 
 def get_bars(symbol, timeframe='5Min', limit=50):
-    """Get recent price bars for technical analysis - FIXED: increased limit for reliable RSI"""
+    """Get recent price bars - FIXED: use data API (trading API doesn't serve bars)"""
     r = requests.get(
-        f'{ALPACA_BASE}/stocks/{symbol}/bars',
+        f'{ALPACA_DATA_BASE}/stocks/{symbol}/bars',
         headers=alpaca_headers,
         params={'timeframe': timeframe, 'limit': limit}
     )
@@ -128,14 +143,46 @@ def analyze_symbol(symbol):
     
     return signal
 
+def get_last_price(symbol):
+    """Get the latest trade price for limit order pricing."""
+    try:
+        r = requests.get(
+            f'{ALPACA_DATA_BASE}/stocks/{symbol}/trades/latest',
+            headers=alpaca_headers
+        )
+        if r.status_code == 200:
+            return float(r.json().get('trade', {}).get('p', 0))
+    except Exception:
+        pass
+    return None
+
 def place_order(symbol, qty, side):
-    order_data = {
-        'symbol': symbol,
-        'qty': qty,
-        'side': side,
-        'type': 'market',
-        'time_in_force': 'day'
-    }
+    """Place limit order at latest price (avoid market order slippage)."""
+    price = get_last_price(symbol)
+    if price and price > 0:
+        # Limit order: buy slightly above / sell slightly below last trade
+        if side == 'buy':
+            limit_price = round(price * 1.001, 2)  # 0.1% above
+        else:
+            limit_price = round(price * 0.999, 2)  # 0.1% below
+        order_data = {
+            'symbol': symbol,
+            'qty': qty,
+            'side': side,
+            'type': 'limit',
+            'limit_price': str(limit_price),
+            'time_in_force': 'day'
+        }
+    else:
+        # Fallback to market only if we can't get a price
+        logger.warning(f"Could not get price for {symbol}, using market order")
+        order_data = {
+            'symbol': symbol,
+            'qty': qty,
+            'side': side,
+            'type': 'market',
+            'time_in_force': 'day'
+        }
     r = requests.post(
         f'{ALPACA_BASE}/orders',
         headers={**alpaca_headers, 'Content-Type': 'application/json'},
@@ -151,6 +198,14 @@ logger.info(f'Universe: {len(UNIVERSE)} stocks')
 logger.info(f'Max Positions: {MAX_POSITIONS}')
 logger.info(f'Profit Target: {PROFIT_TARGET*100:.1f}% | Stop Loss: {STOP_LOSS*100:.1f}%')
 logger.info('='*80)
+
+# Acquire exclusive trading lock
+_trading_lock = None
+if HAS_PROCESS_LOCK:
+    _trading_lock = acquire_trading_lock('smart_trader')
+    if _trading_lock is None:
+        logger.error('Another trading bot is already running! Exiting.')
+        exit(1)
 
 account = get_account()
 if account:
@@ -202,37 +257,42 @@ try:
         
         # Look for new opportunities if we have room
         if len(positions) < MAX_POSITIONS:
-            signals = []
-            for symbol in UNIVERSE:
-                if symbol not in position_dict:
-                    signal = analyze_symbol(symbol)
-                    if signal and signal['action'] == 'BUY':
-                        signals.append(signal)
-            
-            # Sort by score and take best opportunity
-            signals.sort(key=lambda x: x['score'], reverse=True)
-            
-            if signals:
-                best = signals[0]
-                logger.info(f"\n🟢 BUY SIGNAL: {best['symbol']}")
-                logger.info(f"   Price: ${best['price']:.2f}")
-                logger.info(f"   RSI: {best['rsi']:.1f}")
-                logger.info(f"   Momentum: {best['momentum']*100:.2f}%")
-                logger.info(f"   Score: {best['score']}/5")
+            # Regime filter: don't buy in bear markets
+            if HAS_REGIME_FILTER and not is_bullish_regime():
+                logger.info('📉 Bear regime detected — skipping new long entries')
+            else:
+                regime_scale = get_position_scale() if HAS_REGIME_FILTER else 1.0
+                signals = []
+                for symbol in UNIVERSE:
+                    if symbol not in position_dict:
+                        signal = analyze_symbol(symbol)
+                        if signal and signal['action'] == 'BUY':
+                            signals.append(signal)
                 
-                # FIXED: Position size based on equity %, not fixed 2 shares
-                acct = get_account()
-                if acct:
-                    equity = float(acct['equity'])
-                    dollar_size = equity * POSITION_SIZE_PCT
-                    qty = max(1, int(dollar_size / best['price']))
-                else:
-                    qty = 1
+                # Sort by score and take best opportunity
+                signals.sort(key=lambda x: x['score'], reverse=True)
                 
-                result = place_order(best['symbol'], qty, 'buy')
-                if result:
-                    trade_count += 1
-                    logger.info(f"\u2705 Order {trade_count}: BOUGHT {qty} {best['symbol']}")
+                if signals:
+                    best = signals[0]
+                    logger.info(f"\n🟢 BUY SIGNAL: {best['symbol']}")
+                    logger.info(f"   Price: ${best['price']:.2f}")
+                    logger.info(f"   RSI: {best['rsi']:.1f}")
+                    logger.info(f"   Momentum: {best['momentum']*100:.2f}%")
+                    logger.info(f"   Score: {best['score']}/5")
+                    
+                    # Position size based on equity %, scaled by market regime
+                    acct = get_account()
+                    if acct:
+                        equity = float(acct['equity'])
+                        dollar_size = equity * POSITION_SIZE_PCT * regime_scale
+                        qty = max(1, int(dollar_size / best['price']))
+                    else:
+                        qty = 1
+                    
+                    result = place_order(best['symbol'], qty, 'buy')
+                    if result:
+                        trade_count += 1
+                        logger.info(f"✅ Order {trade_count}: BOUGHT {qty} {best['symbol']}")
         
         account = get_account()
         if account:

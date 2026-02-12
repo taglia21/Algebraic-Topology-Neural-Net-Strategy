@@ -29,6 +29,13 @@ try:
 except ImportError:
     HAS_TRADING_GATE = False
 
+# Import process lock to prevent multiple bots
+try:
+    from src.risk.process_lock import acquire_trading_lock, release_trading_lock
+    HAS_PROCESS_LOCK = True
+except ImportError:
+    HAS_PROCESS_LOCK = False
+
 class AggressiveAutoTrader:
     """Aggressive automated trading system"""
     
@@ -38,10 +45,9 @@ class AggressiveAutoTrader:
         'NFLX', 'CRM', 'SHOP', 'SQ', 'PYPL', 'COIN', 'MSTR', 'PLTR'
     ]
     
-    # Leveraged ETFs for max gains
-    LEVERAGED_ETFS = [
-        'TQQQ', 'SOXL', 'FNGU', 'TECL', 'SPXL', 'UPRO', 'UDOW', 'TNA'
-    ]
+    # Leveraged ETFs DISABLED - daily decay makes them unsuitable for swing trading
+    # Holding 3x ETFs overnight bleeds capital via volatility drag
+    LEVERAGED_ETFS = []
     
     # Pairs for stat arb
     PAIRS = [
@@ -50,8 +56,9 @@ class AggressiveAutoTrader:
     ]
     
     def __init__(self, paper=True):
-        self.api_key = os.getenv('ALPACA_API_KEY')
-        self.api_secret = os.getenv('ALPACA_SECRET_KEY')
+        # Support both env var naming conventions
+        self.api_key = os.getenv('ALPACA_API_KEY') or os.getenv('APCA_API_KEY_ID')
+        self.api_secret = os.getenv('ALPACA_SECRET_KEY') or os.getenv('APCA_API_SECRET_KEY')
         base_url = 'https://paper-api.alpaca.markets' if paper else 'https://api.alpaca.markets'
         self.api = tradeapi.REST(self.api_key, self.api_secret, base_url, api_version='v2')
         self.paper = paper
@@ -179,15 +186,38 @@ class AggressiveAutoTrader:
 
 
     def execute_trade(self, symbol, side, notional):
-        """Execute a trade"""
+        """Execute a trade using limit order at latest price."""
         try:
-            order = self.api.submit_order(
-                symbol=symbol,
-                notional=notional,
-                side=side,
-                type='market',
-                time_in_force='day'
-            )
+            # Get latest quote for limit pricing
+            quote = self.api.get_latest_trade(symbol)
+            last_price = float(quote.price) if quote else None
+            
+            if last_price and last_price > 0:
+                # Calculate qty from notional and use limit order
+                qty = max(1, int(notional / last_price))
+                if side == 'buy':
+                    limit_price = round(last_price * 1.001, 2)  # 0.1% above
+                else:
+                    limit_price = round(last_price * 0.999, 2)  # 0.1% below
+                
+                order = self.api.submit_order(
+                    symbol=symbol,
+                    qty=qty,
+                    side=side,
+                    type='limit',
+                    limit_price=limit_price,
+                    time_in_force='day'
+                )
+            else:
+                # Fallback: use notional market order only if no price available
+                logger.warning(f"No price for {symbol}, using market order")
+                order = self.api.submit_order(
+                    symbol=symbol,
+                    notional=notional,
+                    side=side,
+                    type='market',
+                    time_in_force='day'
+                )
             logger.info(f"ORDER EXECUTED: {side.upper()} ${notional:.2f} of {symbol}")
             return order
         except Exception as e:
@@ -307,9 +337,9 @@ class AggressiveAutoTrader:
         logger.info("\n--- Running Momentum Strategy ---")
         self.run_momentum_strategy()
         
-        # 3. Run leveraged ETF strategy
-        logger.info("\n--- Running Leveraged ETF Strategy ---")
-        self.run_leveraged_etf_strategy()
+        # 3. Leveraged ETF strategy DISABLED (daily decay makes them unsuitable)
+        # logger.info("\n--- Running Leveraged ETF Strategy ---")
+        # self.run_leveraged_etf_strategy()
         
         # Report final state
         final_positions = self.get_positions()
@@ -326,20 +356,30 @@ def main():
     parser.add_argument('--live', action='store_true', help='Use live trading (default: paper)')
     args = parser.parse_args()
     
-    trader = AggressiveAutoTrader(paper=not args.live)
+    # Acquire exclusive trading lock (skip for status-only)
+    _trading_lock = None
+    if not args.status and HAS_PROCESS_LOCK:
+        _trading_lock = acquire_trading_lock('auto_trader')
+        if _trading_lock is None:
+            logger.error('Another trading bot is already running! Exiting.')
+            return
     
-    if args.status:
-        account = trader.get_account()
-        positions = trader.get_positions()
-        print(f"\nAccount Equity: ${account['equity']:,.2f}")
-        print(f"Buying Power: ${account['buying_power']:,.2f}")
-        print(f"Positions: {len(positions)}")
-        for sym, pos in positions.items():
-            print(f"  {sym}: ${pos['market_value']:,.2f} ({pos['pct']:.2%})")
-    elif args.run:
-        trader.run()
-    else:
-        trader.run()
+    try:
+        trader = AggressiveAutoTrader(paper=not args.live)
+        
+        if args.status:
+            account = trader.get_account()
+            positions = trader.get_positions()
+            print(f"\nAccount Equity: ${account['equity']:,.2f}")
+            print(f"Buying Power: ${account['buying_power']:,.2f}")
+            print(f"Positions: {len(positions)}")
+            for sym, pos in positions.items():
+                print(f"  {sym}: ${pos['market_value']:,.2f} ({pos['pct']:.2%})")
+        else:
+            trader.run()
+    finally:
+        if _trading_lock:
+            release_trading_lock(_trading_lock)
 
 if __name__ == '__main__':
     main()

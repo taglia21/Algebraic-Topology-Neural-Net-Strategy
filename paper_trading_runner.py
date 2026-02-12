@@ -209,16 +209,9 @@ class PaperTradingBot:
                         'current_price': float(close_col.iloc[-1])
                     }
             
-            # Mock data if yfinance not available
-            np.random.seed(hash(ticker) % 2**32)
-            prices = 100 * np.exp(np.cumsum(np.random.normal(0.001, 0.02, 60)))
-            return {
-                'close': prices.tolist(),
-                'high': (prices * 1.01).tolist(),
-                'low': (prices * 0.99).tolist(),
-                'volume': np.random.randint(1000000, 10000000, 60).tolist(),
-                'current_price': float(prices[-1])
-            }
+            # FIXED: Do NOT fall back to mock data — trading on fake prices loses real money
+            logger.error(f"Cannot fetch real price data for {ticker} — refusing to generate mock data")
+            return None
         except Exception as e:
             logger.error(f"Error fetching prices for {ticker}: {e}")
             return None

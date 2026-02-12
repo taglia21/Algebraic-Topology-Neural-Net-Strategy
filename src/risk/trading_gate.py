@@ -59,8 +59,9 @@ def _get_portfolio_value() -> Optional[float]:
     """Fetch current portfolio equity from Alpaca."""
     try:
         from alpaca.trading.client import TradingClient
-        api_key = os.getenv('ALPACA_API_KEY')
-        api_secret = os.getenv('ALPACA_SECRET_KEY')
+        # Support both env var naming conventions
+        api_key = os.getenv('ALPACA_API_KEY') or os.getenv('APCA_API_KEY_ID')
+        api_secret = os.getenv('ALPACA_SECRET_KEY') or os.getenv('APCA_API_SECRET_KEY')
         paper = os.getenv('ALPACA_PAPER', 'true').lower() == 'true'
         
         if not api_key or not api_secret:

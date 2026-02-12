@@ -16,6 +16,20 @@ try:
 except ImportError:
     HAS_TRADING_GATE = False
 
+# Import process lock to prevent multiple bots
+try:
+    from src.risk.process_lock import acquire_trading_lock, release_trading_lock
+    HAS_PROCESS_LOCK = True
+except ImportError:
+    HAS_PROCESS_LOCK = False
+
+# Import regime filter to avoid buying in downtrends
+try:
+    from src.risk.regime_filter import is_bullish_regime, get_position_scale
+    HAS_REGIME_FILTER = True
+except ImportError:
+    HAS_REGIME_FILTER = False
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -119,15 +133,46 @@ def analyze_symbol(symbol):
     
     return 'HOLD', 0.0
 
+def get_last_price(symbol):
+    """Get the latest trade price for limit order pricing."""
+    try:
+        r = requests.get(
+            f'{ALPACA_DATA_BASE}/stocks/{symbol}/trades/latest',
+            headers=alpaca_headers
+        )
+        if r.status_code == 200:
+            return float(r.json().get('trade', {}).get('p', 0))
+    except Exception:
+        pass
+    return None
+
 def place_order(symbol, qty, side):
-    """Place limit order (avoid market orders for better fills)"""
-    order_data = {
-        'symbol': symbol,
-        'qty': qty,
-        'side': side,
-        'type': 'market',
-        'time_in_force': 'day'
-    }
+    """Place limit order at latest price (avoid market order slippage)."""
+    price = get_last_price(symbol)
+    if price and price > 0:
+        # Limit order: buy slightly above / sell slightly below last trade
+        if side == 'buy':
+            limit_price = round(price * 1.001, 2)  # 0.1% above
+        else:
+            limit_price = round(price * 0.999, 2)  # 0.1% below
+        order_data = {
+            'symbol': symbol,
+            'qty': qty,
+            'side': side,
+            'type': 'limit',
+            'limit_price': str(limit_price),
+            'time_in_force': 'day'
+        }
+    else:
+        # Fallback to market only if we can't get a price
+        logger.warning(f"Could not get price for {symbol}, using market order")
+        order_data = {
+            'symbol': symbol,
+            'qty': qty,
+            'side': side,
+            'type': 'market',
+            'time_in_force': 'day'
+        }
     r = requests.post(
         f'{ALPACA_BASE}/orders',
         headers={**alpaca_headers, 'Content-Type': 'application/json'},
@@ -158,6 +203,14 @@ logger.info('CONTINUOUS TRADING BOT - SIGNAL-BASED (FIXED)')
 logger.info(f'Risk params: TP={TAKE_PROFIT_PCT*100}% / SL={STOP_LOSS_PCT*100}% (2:1 R:R)')
 logger.info(f'Position size: {POSITION_SIZE_PCT*100}% of equity')
 logger.info('='*70)
+
+# Acquire exclusive trading lock
+_trading_lock = None
+if HAS_PROCESS_LOCK:
+    _trading_lock = acquire_trading_lock('continuous_trader')
+    if _trading_lock is None:
+        logger.error('Another trading bot is already running! Exiting.')
+        exit(1)
 
 account = get_account()
 if account:
@@ -204,33 +257,38 @@ try:
         
         # Look for buy opportunities using REAL signals (not random)
         if len(positions) < MAX_POSITIONS:
-            best_signal = None
-            best_conf = 0.0
-            best_symbol = None
-            
-            for symbol in SYMBOLS:
-                if symbol in position_symbols:
-                    continue
-                signal, confidence = analyze_symbol(symbol)
-                if signal == 'BUY' and confidence > best_conf:
-                    best_signal = signal
-                    best_conf = confidence
-                    best_symbol = symbol
-            
-            if best_symbol and best_conf >= 0.5:
-                # Position size based on equity percentage
-                account = get_account()
-                if account:
-                    equity = float(account['equity'])
-                    bars = get_bars(best_symbol, '1Day', 1)
-                    if bars:
-                        price = float(bars[-1]['c'])
-                        dollar_amount = equity * POSITION_SIZE_PCT
-                        qty = max(1, int(dollar_amount / price))
-                        logger.info(f'BUY: {best_symbol} ({qty} shares, conf={best_conf:.2f})')
-                        result = place_order(best_symbol, qty, 'buy')
-                        if result:
-                            trade_count += 1
+            # Regime filter: don't buy in bear markets
+            if HAS_REGIME_FILTER and not is_bullish_regime():
+                logger.info('📉 Bear regime detected — skipping new long entries')
+            else:
+                regime_scale = get_position_scale() if HAS_REGIME_FILTER else 1.0
+                best_signal = None
+                best_conf = 0.0
+                best_symbol = None
+                
+                for symbol in SYMBOLS:
+                    if symbol in position_symbols:
+                        continue
+                    signal, confidence = analyze_symbol(symbol)
+                    if signal == 'BUY' and confidence > best_conf:
+                        best_signal = signal
+                        best_conf = confidence
+                        best_symbol = symbol
+                
+                if best_symbol and best_conf >= 0.5:
+                    # Position size based on equity percentage, scaled by regime
+                    account = get_account()
+                    if account:
+                        equity = float(account['equity'])
+                        bars = get_bars(best_symbol, '1Day', 1)
+                        if bars:
+                            price = float(bars[-1]['c'])
+                            dollar_amount = equity * POSITION_SIZE_PCT * regime_scale
+                            qty = max(1, int(dollar_amount / price))
+                            logger.info(f'BUY: {best_symbol} ({qty} shares, conf={best_conf:.2f})')
+                            result = place_order(best_symbol, qty, 'buy')
+                            if result:
+                                trade_count += 1
                 time.sleep(2)
         
         # Refresh account

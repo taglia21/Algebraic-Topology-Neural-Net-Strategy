@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-AGGRESSIVE MODE CONFIGURATION
-=============================
-Maximum profit extraction for demonstrating results.
+AGGRESSIVE MODE CONFIGURATION  (REFERENCE ONLY — NOT USED IN PRODUCTION)
+=========================================================================
+This file defines an alternative config dataclass that was used during early
+demos.  The production system (run_v28_production.py) reads its own thresholds
+from src/enhanced_trading_engine.py + src/options/config.py.
 
-WARNING: This is for PAPER TRADING DEMO ONLY!
-Real money trading should use conservative settings.
+If you want to experiment with aggressive settings, import
+``get_aggressive_config`` and override attributes before the trading loop
+starts.  This file is *not* automatically loaded by any production code path.
 
-Created: 2026-02-02
+Created : 2025-02-02
+Updated : 2025-06-15  — marked as reference-only
 """
 
 from dataclasses import dataclass, field

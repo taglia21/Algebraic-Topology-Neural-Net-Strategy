@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ⚠️  DEPRECATED — use run_v28_production.py --mode=paper instead.
 import os
 import requests
 from dotenv import load_dotenv

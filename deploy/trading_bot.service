@@ -1,5 +1,5 @@
 [Unit]
-Description=TDA Trading Bot V2.1 Production Service
+Description=V28 Production Trading Bot (legacy filename — use v28_trading_bot.service)
 Documentation=https://github.com/taglia21/Algebraic-Topology-Neural-Net-Strategy
 After=network.target network-online.target
 Wants=network-online.target
@@ -13,10 +13,12 @@ Group=tradingbot
 WorkingDirectory=/opt/trading-bot
 Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONDONTWRITEBYTECODE=1"
+Environment="V28_ENV=production"
+Environment="V28_VERSION=28.0.0"
 EnvironmentFile=/opt/trading-bot/.env
 
-# Main execution command
-ExecStart=/opt/trading-bot/.venv/bin/python production_launcher.py --mode=live
+# Main execution command — points to the V28 runner (NOT legacy production_launcher)
+ExecStart=/opt/trading-bot/.venv/bin/python run_v28_production.py --mode=paper
 
 # Graceful shutdown handling
 ExecStop=/bin/kill -SIGTERM $MAINPID

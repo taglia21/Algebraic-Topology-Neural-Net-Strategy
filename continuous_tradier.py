@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Continuous Tradier Trading Bot - Actively trades on Tradier Sandbox"""
+"""⚠️  DEPRECATED — use run_v28_production.py --mode=paper instead.
+
+Continuous Tradier Trading Bot - Actively trades on Tradier Sandbox"""
 import os
 import requests
 from dotenv import load_dotenv

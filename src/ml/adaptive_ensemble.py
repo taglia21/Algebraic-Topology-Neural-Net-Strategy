@@ -23,6 +23,7 @@ Design principles:
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -249,6 +250,10 @@ class AdaptiveEnsemble:
         self._spy_cache: Optional[pd.DataFrame] = None
         self._spy_cache_time: Optional[datetime] = None
 
+        # Background training support – avoids blocking the equity cycle
+        self._training_lock = threading.Lock()
+        self._training_in_progress = False
+
         # Try to load saved models
         self._load_models()
         if self._is_fitted:
@@ -268,9 +273,10 @@ class AdaptiveEnsemble:
         Returns:
             (signal, confidence) where signal ∈ [-1, 1] and confidence ∈ [0, 1]
         """
-        # Auto-retrain if stale
+        # Auto-retrain if stale — launch in background thread so the
+        # equity cycle is not blocked for 60-120 s while training runs.
         if self._should_retrain():
-            self._auto_train([symbol])
+            self._launch_background_train([symbol])
 
         features = self._get_live_features(symbol)
         if features is None:
@@ -317,7 +323,7 @@ class AdaptiveEnsemble:
     def predict_batch(self, symbols: List[str]) -> Dict[str, Tuple[float, float]]:
         """Predict signals for multiple symbols."""
         if self._should_retrain():
-            self._auto_train(symbols)
+            self._launch_background_train(symbols)
         return {sym: self.predict(sym) for sym in symbols}
 
     def record_outcome(self, symbol: str, signal: float, pnl: float, holding_days: int = 5):
@@ -334,8 +340,31 @@ class AdaptiveEnsemble:
             self._update_weights_from_outcomes()
 
     def force_retrain(self, symbols: Optional[List[str]] = None):
-        """Force a full retrain cycle."""
+        """Force a full retrain cycle (blocking)."""
         self._auto_train(symbols or [])
+
+    # ── Background training helper ─────────────────────────────────
+
+    def _launch_background_train(self, symbols: List[str]):
+        """Kick off _auto_train in a daemon thread if not already running."""
+        with self._training_lock:
+            if self._training_in_progress:
+                logger.debug("Background training already in progress — skipping")
+                return
+            self._training_in_progress = True
+
+        def _train_wrapper():
+            try:
+                self._auto_train(symbols)
+            except Exception as e:
+                logger.error(f"Background training failed: {e}")
+            finally:
+                with self._training_lock:
+                    self._training_in_progress = False
+
+        t = threading.Thread(target=_train_wrapper, daemon=True, name="ml-auto-train")
+        t.start()
+        logger.info("AdaptiveEnsemble: background training launched (equity cycle continues)")
 
     # ── Training ───────────────────────────────────────────────────
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-AGGRESSIVE PAPER TRADER
-=======================
+⚠️  DEPRECATED — use run_v28_production.py --mode=paper instead.
+
+AGGRESSIVE PAPER TRADER  (legacy — not used by V28 production system)
+====================================================================
 Maximum profit extraction for demo purposes.
 Uses full Kelly, momentum chasing, and loose thresholds.
 """

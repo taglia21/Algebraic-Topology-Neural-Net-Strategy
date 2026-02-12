@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Paper Trading Runner with Enhanced ML
-======================================
+⚠️  DEPRECATED — use run_v28_production.py --mode=paper instead.
+
+Paper Trading Runner with Enhanced ML  (legacy — not used by V28)
+=================================================================
 Runs paper trading with the enhanced ML system.
 """
 

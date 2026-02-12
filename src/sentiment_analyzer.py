@@ -71,38 +71,6 @@ def retry_yfinance(max_retries=3, backoff=2.0):
     return decorator
 
 
-def retry_yfinance(max_retries=3, backoff=2.0):
-    """
-    CRITICAL FIX: Decorator for yfinance calls with exponential backoff retry logic.
-    
-    Args:
-        max_retries: Maximum number of retry attempts
-        backoff: Backoff multiplier for exponential wait
-        
-    Returns:
-        Decorated function with retry logic
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_retries):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        logger.error(f"yfinance call failed after {max_retries} attempts: {e}")
-                        raise
-                    
-                    wait_time = backoff ** attempt
-                    logger.warning(f"yfinance call failed (attempt {attempt+1}/{max_retries}), "
-                                 f"retrying in {wait_time}s: {e}")
-                    time.sleep(wait_time)
-            
-            return None
-        return wrapper
-    return decorator
-    logging.warning("VADER not available. Install with: pip install vaderSentiment")
-
 logger = logging.getLogger(__name__)
 
 

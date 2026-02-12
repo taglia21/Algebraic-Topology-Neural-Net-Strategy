@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-V2.5 Production Launcher - Adaptive Trading System Orchestrator
-================================================================
+⚠️  DEPRECATED — use run_v28_production.py --mode=paper instead.
+
+V2.5 Production Launcher - Adaptive Trading System Orchestrator  (legacy)
+=================================================================================
 
 Production-ready launcher that orchestrates the full trading pipeline:
 1. Data Validation - Verify data quality and freshness

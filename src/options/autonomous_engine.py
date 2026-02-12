@@ -804,8 +804,14 @@ class AutonomousTradingEngine:
         
         positions_to_close = []
         target_profit = RISK_CONFIG.get("target_profit_pct", 0.50)
-        stop_loss = RISK_CONFIG.get("stop_loss_pct", 0.25)
+        stop_loss = RISK_CONFIG.get("stop_loss_pct", 0.75)
+        trailing_stop_activate = 0.20  # Activate trailing stop at +20% gain
+        trailing_stop_trail = 0.40     # Give back at most 40% of peak
         dte_threshold = 21
+
+        # Initialize high-water marks dict if not present
+        if not hasattr(self, '_options_hwm'):
+            self._options_hwm: dict[str, float] = {}
         
         # Get real positions from Alpaca
         try:
@@ -874,6 +880,12 @@ class AutonomousTradingEngine:
                 # which means stops won't trigger — this is intentionally safe
                 
                 close_reason = None
+
+                # Update high-water mark for trailing stop
+                prev_hwm = self._options_hwm.get(symbol, 0.0)
+                if unrealized_pnl_pct > prev_hwm:
+                    self._options_hwm[symbol] = unrealized_pnl_pct
+                    prev_hwm = unrealized_pnl_pct
                 
                 # Stop-loss check: loss exceeds threshold
                 if unrealized_pnl < 0 and abs(unrealized_pnl_pct) > stop_loss:
@@ -881,6 +893,17 @@ class AutonomousTradingEngine:
                     self.logger.warning(
                         f"STOP LOSS triggered for {symbol}: "
                         f"P&L: ${unrealized_pnl:+,.2f} ({unrealized_pnl_pct:+.1%})"
+                    )
+                
+                # Trailing stop: activated after gaining trailing_stop_activate,
+                # triggers if we give back trailing_stop_trail fraction of peak
+                elif (prev_hwm >= trailing_stop_activate and
+                      unrealized_pnl_pct < prev_hwm * (1 - trailing_stop_trail)):
+                    trail_floor = prev_hwm * (1 - trailing_stop_trail)
+                    close_reason = "TRAILING_STOP"
+                    self.logger.info(
+                        f"TRAILING STOP for {symbol}: peak={prev_hwm:+.1%}, "
+                        f"now={unrealized_pnl_pct:+.1%}, floor={trail_floor:+.1%}"
                     )
                 
                 # Take-profit check: profit exceeds target
@@ -893,9 +916,12 @@ class AutonomousTradingEngine:
                 
                 if close_reason:
                     positions_to_close.append((position, close_reason, unrealized_pnl))
+                    # Clean up HWM on close
+                    self._options_hwm.pop(symbol, None)
                 else:
                     self.logger.info(
-                        f"  Position {symbol}: P&L ${unrealized_pnl:+,.2f} ({unrealized_pnl_pct:+.1%})"
+                        f"  Position {symbol}: P&L ${unrealized_pnl:+,.2f} ({unrealized_pnl_pct:+.1%}), "
+                        f"HWM={prev_hwm:+.1%}"
                     )
             except Exception as e:
                 self.logger.warning(f"Error checking position: {e}")

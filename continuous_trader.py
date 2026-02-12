@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Continuous Trading Bot - Signal-based trading during market hours"""
+"""⚠️  DEPRECATED — use run_v28_production.py --mode=paper instead.
+
+Continuous Trading Bot - Signal-based trading during market hours"""
 import os
 import requests
 from dotenv import load_dotenv

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""AGGRESSIVE AUTO TRADER - Runs every hour during market hours
+"""⚠️  DEPRECATED — use run_v28_production.py --mode=paper instead.
+
+AGGRESSIVE AUTO TRADER - Runs every hour during market hours
 Executes high-conviction trades based on momentum and mean reversion signals
 """
 

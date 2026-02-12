@@ -168,13 +168,13 @@ class EngineConfig:
     sentiment_config: Optional[SentimentConfig] = None
     
     # Decision thresholds
-    min_mtf_score: float = 60.0  # Minimum multi-timeframe alignment
-    min_sentiment_score: float = -0.3  # Minimum sentiment (-1 to 1)
-    min_combined_score: float = 0.6  # Minimum combined score for trading
+    min_mtf_score: float = 40.0  # Minimum multi-timeframe alignment (was 60 — unreachable)
+    min_sentiment_score: float = -0.8  # Minimum sentiment (-1 to 1)
+    min_combined_score: float = 0.45  # Minimum combined score for trading (was 0.6 — impossible with broken sentiment)
     
-    # Scoring weights
-    mtf_weight: float = 0.6
-    sentiment_weight: float = 0.4
+    # Scoring weights — technical-first bot, sentiment is supplementary
+    mtf_weight: float = 0.80
+    sentiment_weight: float = 0.20
     
     # ATR calculation
     atr_period: int = 14
@@ -384,14 +384,16 @@ class EnhancedTradingEngine:
         Returns:
             TradeSignal enum
         """
-        # Strong signals require high alignment and sentiment
-        if combined_score > 0.8 and mtf_score > 80 and sentiment_score > 0.5:
+        # Signal thresholds calibrated for mtf_weight=0.80, sentiment_weight=0.20
+        # With neutral sentiment (0.5 normalized), combined ≈ MTF_norm * 0.8 + 0.1
+        # MTF=55 → combined=0.54, MTF=65 → combined=0.62, MTF=40 → combined=0.42
+        if combined_score > 0.70 and mtf_score > 70:
             return TradeSignal.STRONG_BUY
-        elif combined_score > 0.7:
+        elif combined_score > 0.55:
             return TradeSignal.BUY
-        elif combined_score < 0.3 and mtf_score < 30 and sentiment_score < -0.5:
+        elif combined_score < 0.25:
             return TradeSignal.STRONG_SELL
-        elif combined_score < 0.4:
+        elif combined_score < 0.40:
             return TradeSignal.SELL
         else:
             return TradeSignal.HOLD
@@ -446,9 +448,24 @@ class EnhancedTradingEngine:
         logger.info("Step 3: Sentiment analysis...")
         sentiment_result = self.sentiment_analyzer.get_sentiment(symbol)
         
-        # HIGH-SEVERITY FIX: Check sentiment validity
+        # Sentiment is OPTIONAL — unavailable data should NOT block trades
+        # It's an additive signal, not a veto gate
         if not sentiment_result.is_valid:
-            rejection_reasons.append("Sentiment data unavailable")
+            logger.info("  ⚠ Sentiment data unavailable — using neutral (not blocking trade)")
+            from src.sentiment_analyzer import SentimentResult, SentimentLevel
+            sentiment_result = SentimentResult(
+                symbol=symbol,
+                timestamp=datetime.now(),
+                score=0.0,
+                level=SentimentLevel.NEUTRAL,
+                article_count=0,
+                positive_count=0,
+                negative_count=0,
+                neutral_count=0,
+                articles=[],
+                data_source='NEUTRAL_FALLBACK',
+                is_valid=True,
+            )
         
         sentiment_score = sentiment_result.score
         
@@ -556,7 +573,9 @@ class EnhancedTradingEngine:
 
         combined_score = self._calculate_combined_score(mtf_score, sentiment_score)
         combined_score = max(0.0, min(1.0, combined_score + aggregator_boost))
-        confidence = (combined_score + sentiment_result.confidence) / 2
+        # Confidence: weight toward combined_score so broken sentiment doesn't poison it
+        # When sentiment is real, it boosts; when neutral fallback, combined_score dominates
+        confidence = combined_score * 0.70 + sentiment_result.confidence * 0.30
         
         logger.info(f"  Combined Score: {combined_score:.2f}")
         logger.info(f"  Confidence: {confidence:.2%}")

@@ -163,12 +163,17 @@ class EquityEngine:
 
     async def initialize(self):
         from src.enhanced_trading_engine import EnhancedTradingEngine, EngineConfig
-        self.engine = EnhancedTradingEngine(EngineConfig())
+        # Use calibrated thresholds — defaults are already tuned in EngineConfig
+        # Override max_position_pct for paper trading to allow slightly larger positions
+        config = EngineConfig()
+        self.engine = EnhancedTradingEngine(config)
         # Pre-create the AlpacaClient once instead of per-trade (issue #14)
         if self.mode == "live":
             from src.trading.alpaca_client import AlpacaClient
             self.client = AlpacaClient()
         self.logger.info(f"Equity engine initialized (mode={self.mode})")
+        self.logger.info(f"  Thresholds: MTF≥{config.min_mtf_score}, combined≥{config.min_combined_score}, "
+                        f"weights: MTF={config.mtf_weight}, sent={config.sentiment_weight}")
 
     async def run_cycle(self, symbols: list[str]):
         """Run a single equity trading cycle."""

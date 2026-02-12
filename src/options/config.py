@@ -32,10 +32,10 @@ RISK_CONFIG: Dict[str, Any] = {
     "optimal_dte_min": 21,  # Optimal DTE range start
     "optimal_dte_max": 45,  # Optimal DTE range end
     
-    # Profit/loss targets
+    # Profit/loss targets — options need wider stops due to gamma/IV swings
     "target_profit_pct": 0.50,  # Take profit at 50% of max gain
-    "stop_loss_pct": 0.25,  # Stop loss at 25% loss
-    "trailing_stop_pct": 0.35,  # Trailing stop at 35%
+    "stop_loss_pct": 0.75,  # Stop loss at 75% loss (was 25% — fired on normal IV movement)
+    "trailing_stop_pct": 0.50,  # Trailing stop at 50% (was 35%)
     
     # IV-based thresholds
     "iv_rank_sell_threshold": 65.0,  # Sell premium above this IV rank (was 50 - too aggressive)

@@ -138,8 +138,8 @@ class SizingConfig:
     vol_scale_factor: float = 0.5  # How much to scale by volatility
     
     # Confidence integration
-    min_confidence: float = 0.3  # Minimum confidence to size position
-    confidence_power: float = 1.5  # Exponent for confidence scaling
+    min_confidence: float = 0.15  # Minimum confidence to size position (was 0.3 — too strict)
+    confidence_power: float = 1.0  # Linear scaling (was 1.5 — crushed mid-range values)
     
     # Heat adjustment (reduce size during drawdowns)
     use_heat_adjustment: bool = True

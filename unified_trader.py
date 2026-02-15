@@ -861,6 +861,31 @@ except Exception as e:
     logger.warning(f"⚠️ Profitability modules import failed: {e}")
 
 
+# ── Tier 1: ML Regime, Alt Data, Portfolio Optimizer, Extended Hours ─────────
+_ml_regime_detector_inst = None
+_alt_data_provider = None
+_portfolio_optimizer = None
+_extended_hours_scanner = None
+TIER1_AVAILABLE = False
+try:
+    from src.regime_detector import MLRegimeDetector as _MLRegimeDetectorCls
+    from src.regime_detector import MLRegime as _MLRegimeCls
+    from src.alternative_data import AlternativeDataProvider as _AltDataCls
+    from src.portfolio_optimizer import PortfolioOptimizer as _PortOptCls
+    from src.extended_hours import ExtendedHoursScanner as _ExtHoursCls
+    _ml_regime_detector_inst = _MLRegimeDetectorCls()
+    _alt_data_provider = _AltDataCls()
+    _portfolio_optimizer = _PortOptCls()
+    _extended_hours_scanner = _ExtHoursCls()
+    TIER1_AVAILABLE = True
+    logger.info(
+        "✅ Tier 1 loaded (ML regime detector, alt data, "
+        "portfolio optimizer, extended hours scanner)"
+    )
+except Exception as e:
+    logger.warning(f"⚠️ Tier 1 import failed: {e}")
+
+
 # ============================================================================
 # SECTOR ENFORCEMENT — always active, never falls back to False
 # ============================================================================
@@ -1635,6 +1660,13 @@ class UnifiedTrader:
             if _smart_executor_cls else None
         )
 
+        # Tier 1 modules
+        self.ml_regime = _ml_regime_detector_inst
+        self.alt_data = _alt_data_provider
+        self.portfolio_optimizer = _portfolio_optimizer
+        self.extended_hours = _extended_hours_scanner
+        self._ml_regime_result = None  # Cached per scan cycle
+
         # Load persisted state
         self.positions, self.trade_history = load_state()
 
@@ -1744,12 +1776,72 @@ class UnifiedTrader:
         self._last_regime = regime.regime  # Store for ML retrainer feedback
         logger.info(f"Market regime: {regime.regime} (confidence={regime.confidence:.0%})")
 
+        # 5b. ML Regime Detection (Tier 1) — enriches position sizing
+        ml_regime_scale = 1.0
+        if self.ml_regime is not None:
+            try:
+                spy_bars = get_bars("SPY", limit=250)
+                # Collect universe bars for breadth computation
+                univ_bars_sample: Dict[str, List[dict]] = {}
+                sample_syms = UNIVERSE[:20]  # Sample 20 stocks for breadth
+                for _sym in sample_syms:
+                    _bars = get_bars(_sym, limit=60)
+                    if _bars and len(_bars) >= 50:
+                        univ_bars_sample[_sym] = _bars
+                self._ml_regime_result = self.ml_regime.get_current_regime(
+                    spy_bars=spy_bars,
+                    universe_bars=univ_bars_sample if univ_bars_sample else None,
+                )
+                ml_regime_scale = self._ml_regime_result.position_scale
+                logger.info(
+                    f"ML Regime: {self._ml_regime_result.regime.value} "
+                    f"(conf={self._ml_regime_result.confidence:.0%}, "
+                    f"pos_scale={ml_regime_scale:.2f})"
+                )
+            except Exception as e:
+                logger.warning(f"ML regime detection error: {e}")
+
+        # 5c. Extended Hours Scanner (Tier 1) — pre-market gap detection
+        if self.extended_hours is not None:
+            try:
+                eh_bars: Dict[str, List[dict]] = {}
+                for _sym in UNIVERSE[:15]:
+                    _bars = get_bars(_sym, limit=5)
+                    if _bars and len(_bars) >= 2:
+                        eh_bars[_sym] = _bars
+                if eh_bars:
+                    gaps = self.extended_hours.detect_gaps(eh_bars)
+                    eh_signals = self.extended_hours.get_extended_hours_signals(
+                        list(eh_bars.keys()), current_bars=eh_bars,
+                    )
+                    if gaps:
+                        logger.info(
+                            f"📊 Extended hours: {len(gaps)} gaps detected, "
+                            f"{len(eh_signals)} signals"
+                        )
+                        for g in gaps[:3]:
+                            logger.info(
+                                f"  GAP {g.symbol}: {g.gap_pct:+.2%} "
+                                f"({g.gap_type.value}) vol_ratio={g.volume_ratio:.1f}x"
+                            )
+            except Exception as e:
+                logger.debug(f"Extended hours scan error: {e}")
+
         # 6. If bear/crisis regime: tighten stops, skip new longs
         skip_new_longs = False
         if regime.is_bearish:
             logger.warning(f"⚠️ BEARISH regime ({regime.regime}) — skipping new longs, tightening stops")
             skip_new_longs = True
             self._tighten_stops()
+
+        # 6b. ML regime BEAR override — also skip longs if ML detector says BEAR
+        if self._ml_regime_result is not None:
+            try:
+                if self._ml_regime_result.regime.value == "BEAR":
+                    logger.warning("⚠️ ML regime=BEAR — skipping new longs")
+                    skip_new_longs = True
+            except Exception:
+                pass
 
         # 7. Manage existing equity positions (stops, targets, trailing)
         self._manage_positions(equity)
@@ -1788,7 +1880,11 @@ class UnifiedTrader:
 
         # 10. Scan for new equity entries (if regime allows)
         if not skip_new_longs and len(self.positions) < self.cfg.max_open_positions:
-            self._scan_for_entries(equity, cash, regime, econ_size_mult=econ_size_mult)
+            self._scan_for_entries(
+                equity, cash, regime,
+                econ_size_mult=econ_size_mult,
+                ml_regime_scale=ml_regime_scale,
+            )
         elif skip_new_longs:
             logger.info("Skipping new entries — bearish regime")
         else:
@@ -2139,6 +2235,41 @@ class UnifiedTrader:
         # Get TDA score (uses multiple symbols)
         tda_score = get_tda_score(all_bars, "market")
 
+        # Tier 1: compute portfolio optimizer weights from bar data
+        if self.portfolio_optimizer is not None and len(candidates_bars) >= 3:
+            try:
+                opt_syms = list(candidates_bars.keys())[:30]  # Cap at 30 for speed
+                # Build returns matrix
+                returns_cols = []
+                valid_syms = []
+                for _sym in opt_syms:
+                    _bars = candidates_bars[_sym]
+                    closes = np.array([float(b["c"]) for b in _bars])
+                    if len(closes) >= 30:
+                        rets = np.diff(closes) / closes[:-1]
+                        returns_cols.append(rets[-60:])  # Last 60 days
+                        valid_syms.append(_sym)
+                if len(valid_syms) >= 3:
+                    min_len = min(len(r) for r in returns_cols)
+                    ret_matrix = np.column_stack([r[-min_len:] for r in returns_cols])
+                    opt_result = self.portfolio_optimizer.optimize_weights(
+                        valid_syms, ret_matrix, method="max_sharpe",
+                    )
+                    self._portfolio_weights = opt_result.weights
+                    logger.info(
+                        f"Portfolio optimizer: SR={opt_result.sharpe_ratio:.2f} "
+                        f"E[R]={opt_result.expected_return:.1%} "
+                        f"σ={opt_result.volatility:.1%} "
+                        f"({len(valid_syms)} assets)"
+                    )
+                else:
+                    self._portfolio_weights = {}
+            except Exception as e:
+                logger.debug(f"Portfolio optimization skipped: {e}")
+                self._portfolio_weights = {}
+        else:
+            self._portfolio_weights = {}
+
         # Score all candidates
         signals: List[CompositeSignal] = []
         for sym, bars in candidates_bars.items():
@@ -2181,6 +2312,19 @@ class UnifiedTrader:
                         logger.info(f"Skipping {sym}: sector exposure limit reached")
                         continue
 
+                # Tier 1: Alternative data sentiment filter
+                if self.alt_data is not None:
+                    try:
+                        alt_score = self.alt_data.get_combined_score(sym)
+                        if alt_score < -0.5:
+                            logger.info(f"Skipping {sym}: negative alt data score ({alt_score:.2f})")
+                            continue
+                        # Boost confidence logging for strongly positive alt data
+                        if alt_score > 0.3:
+                            logger.debug(f"  {sym}: alt data bullish ({alt_score:+.2f})")
+                    except Exception as e:
+                        logger.debug(f"Alt data check failed for {sym}: {e}")
+
                 signals.append(sig)
 
         if not signals:
@@ -2214,6 +2358,19 @@ class UnifiedTrader:
 
             # Phase 3-9: apply economic calendar position size reduction
             proposed_cost *= econ_size_mult
+
+            # Tier 1: apply ML regime position scale (BULL=1.2x, BEAR=0.25x)
+            proposed_cost *= ml_regime_scale
+
+            # Tier 1: apply portfolio optimizer weight (if available)
+            if self.portfolio_optimizer is not None and hasattr(self, '_portfolio_weights'):
+                opt_weight = self._portfolio_weights.get(sig.symbol, 1.0)
+                if opt_weight < 0.01:
+                    logger.debug(f"Skipping {sig.symbol}: portfolio optimizer weight ≈ 0")
+                    continue
+                # Blend: 50% optimizer weight + 50% original sizing
+                weight_scale = 0.5 + 0.5 * min(opt_weight * len(self._portfolio_weights), 2.0)
+                proposed_cost *= max(0.3, min(weight_scale, 1.5))
 
             # Check we have enough buying power
             if proposed_cost > cash * 0.95:

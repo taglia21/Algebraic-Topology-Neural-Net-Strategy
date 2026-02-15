@@ -911,6 +911,27 @@ except Exception as e:
     logger.warning(f"⚠️ Tier 2 import failed: {e}")
 
 
+# ── Tier 4: ML Ensemble Stacker, Order Book Imbalance, Sentiment Alpha,
+#            Execution Optimizer ─────────────────────────────────────────
+_ml_stacker_cls = None
+_micro_cls = None
+_sentiment_alpha_cls = None
+_exec_optimizer_cls = None
+TIER4_AVAILABLE = False
+try:
+    from src.ml_ensemble_stacker import MLEnsembleStacker as _ml_stacker_cls
+    from src.order_book_imbalance import OrderBookImbalance as _micro_cls
+    from src.sentiment_alpha import SentimentAlpha as _sentiment_alpha_cls
+    from src.execution_optimizer import ExecutionOptimizer as _exec_optimizer_cls
+    TIER4_AVAILABLE = True
+    logger.info(
+        "✅ Tier 4 loaded (ML ensemble stacker, order-book imbalance, "
+        "sentiment alpha, execution optimizer)"
+    )
+except Exception as e:
+    logger.warning(f"⚠️ Tier 4 import failed: {e}")
+
+
 # ============================================================================
 # SECTOR ENFORCEMENT — always active, never falls back to False
 # ============================================================================
@@ -1628,13 +1649,16 @@ class UnifiedTrader:
          b. Compute technical score
          c. Get TDA topology score
          d. Get ML confidence
-         e. Aggregate into composite signal
-         f. If BUY: check sector caps, compute Kelly size, submit limit order
-         g. If positions exist: check stops, targets, trailing
-      5. Options scan (every 5 min in appropriate regime)
-      6. Options exit management (every cycle)
-      7. Save state
-      8. Wait for next scan
+         e. Tier 4: ML Ensemble stacker alpha prediction
+         f. Tier 4: Sentiment alpha filter / boost
+         g. Aggregate into composite signal
+         h. If BUY: check sector caps, compute Kelly size, submit limit order
+         i. If positions exist: check stops, targets, trailing
+      5. Tier 4: ExecutionOptimizer for smart order routing
+      6. Options scan (every 5 min in appropriate regime)
+      7. Options exit management (every cycle)
+      8. Save state
+      9. Wait for next scan
     """
 
     def __init__(self, cfg: UnifiedConfig = None, dry_run: bool = False,
@@ -1700,6 +1724,14 @@ class UnifiedTrader:
         self._adaptive_adj = None       # Cached ParameterAdjustments per scan
         self._adaptive_cooldown = 0     # Signals to skip
         self._portfolio_weights = {}    # Portfolio optimizer weights
+
+        # Tier 4 modules (alpha maximisation)
+        self.ml_stacker = _ml_stacker_cls() if _ml_stacker_cls else None
+        self.micro_signals = _micro_cls() if _micro_cls else None
+        self.sentiment_alpha = _sentiment_alpha_cls() if _sentiment_alpha_cls else None
+        self.exec_optimizer = (
+            _exec_optimizer_cls() if _exec_optimizer_cls else None
+        )
 
         # Load persisted state
         self.positions, self.trade_history = load_state()
@@ -2447,6 +2479,22 @@ class UnifiedTrader:
                     except Exception as e:
                         logger.debug(f"MTF check failed for {sym}: {e}")
 
+                # Tier 4: Sentiment alpha filter — block buys with strong negative sentiment
+                if self.sentiment_alpha is not None:
+                    try:
+                        sent_score = self.sentiment_alpha.get_sentiment_score(sym)
+                        if sent_score < -0.4:
+                            logger.info(
+                                f"Skipping {sym}: TIER4 sentiment bearish "
+                                f"(score={sent_score:+.2f})"
+                            )
+                            continue
+                        if sent_score > 0.2:
+                            sig.composite_score += 0.02  # small boost
+                            logger.debug(f"  {sym}: sentiment boost ({sent_score:+.2f})")
+                    except Exception as e:
+                        logger.debug(f"Tier 4 sentiment check failed for {sym}: {e}")
+
                 # Tier 2: Adaptive cooldown check
                 if self._adaptive_cooldown > 0:
                     self._adaptive_cooldown -= 1
@@ -2532,6 +2580,28 @@ class UnifiedTrader:
                     f"[DRY RUN] Would BUY {qty} {sig.symbol} @ ${limit_price:.2f} "
                     f"(stop=${sig.stop_price:.2f}, target=${sig.price * (1 + self.cfg.profit_target_pct):.2f})"
                 )
+            elif self.exec_optimizer is not None and qty >= 20:
+                # Tier 4: use ExecutionOptimizer for intelligent order routing
+                try:
+                    exec_result = self.exec_optimizer.execute_optimal(
+                        symbol=sig.symbol, qty=qty, side="buy",
+                        ref_price=sig.price, urgency=0.5,
+                    )
+                    if exec_result.filled_qty <= 0:
+                        logger.error(f"Tier 4 exec failed for {sig.symbol}")
+                        continue
+                    logger.info(
+                        f"BUY via T4 {exec_result.strategy}: "
+                        f"{exec_result.filled_qty} {sig.symbol} "
+                        f"avg=${exec_result.avg_fill_price:.2f} "
+                        f"slip={exec_result.realised_slippage_bps:+.1f}bps"
+                    )
+                except Exception as e:
+                    logger.warning(f"Tier 4 exec fallback for {sig.symbol}: {e}")
+                    result = submit_limit_order(sig.symbol, qty, "buy", limit_price)
+                    if result is None:
+                        logger.error(f"Failed to submit order for {sig.symbol}")
+                        continue
             elif self.smart_executor is not None and qty >= 30:
                 # Use TWAP for larger orders
                 plan = self.smart_executor.plan_execution(

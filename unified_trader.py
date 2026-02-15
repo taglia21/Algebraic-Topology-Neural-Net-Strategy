@@ -821,6 +821,21 @@ except Exception as e:
     logger.warning(f"⚠️ Enhanced ML retrainer import failed: {e} — continuous learning disabled")
 
 
+# ── Phase 3-9: News Sentiment, Economic Calendar, Correlation ───────────
+PHASE3_9_AVAILABLE = False
+_news_sentiment_cls = None
+_economic_calendar_cls = None
+_correlation_manager_cls = None
+try:
+    from src.news_sentiment import NewsSentimentAnalyzer as _news_sentiment_cls
+    from src.economic_calendar import EconomicCalendar as _economic_calendar_cls
+    from src.correlation_manager import CorrelationManager as _correlation_manager_cls
+    PHASE3_9_AVAILABLE = True
+    logger.info("✅ Phase 3-9 loaded (news sentiment, economic calendar, correlation manager)")
+except Exception as e:
+    logger.warning(f"⚠️ Phase 3-9 import failed: {e} — sentiment/calendar/correlation disabled")
+
+
 # ============================================================================
 # SECTOR ENFORCEMENT — always active, never falls back to False
 # ============================================================================
@@ -1581,6 +1596,11 @@ class UnifiedTrader:
         self._last_retrain_date: Optional[date] = None
         self._retrain_thread: Optional[threading.Thread] = None
 
+        # Phase 3-9 components
+        self.news_sentiment = _news_sentiment_cls() if _news_sentiment_cls else None
+        self.economic_calendar = _economic_calendar_cls() if _economic_calendar_cls else None
+        self.correlation_manager = _correlation_manager_cls() if _correlation_manager_cls else None
+
         # Load persisted state
         self.positions, self.trade_history = load_state()
 
@@ -1714,9 +1734,22 @@ class UnifiedTrader:
         if self.cfg.options_enabled and self.cfg.enable_delta_hedging:
             self._check_portfolio_greeks(equity)
 
+        # 9c. Phase 3-9: News sentiment & economic calendar checks
+        econ_size_mult = 1.0
+        if self.economic_calendar is not None:
+            econ_size_mult = self.economic_calendar.get_position_size_multiplier()
+            if econ_size_mult < 1.0:
+                logger.info(f"📅 High-impact economic day — position size ×{econ_size_mult:.0%}")
+
+        if self.news_sentiment is not None:
+            mkt_sent = self.news_sentiment.get_market_sentiment()
+            if mkt_sent < -0.5:
+                logger.warning(f"📰 Extremely negative market sentiment ({mkt_sent:.2f}) — skipping new entries")
+                skip_new_longs = True
+
         # 10. Scan for new equity entries (if regime allows)
         if not skip_new_longs and len(self.positions) < self.cfg.max_open_positions:
-            self._scan_for_entries(equity, cash, regime)
+            self._scan_for_entries(equity, cash, regime, econ_size_mult=econ_size_mult)
         elif skip_new_longs:
             logger.info("Skipping new entries — bearish regime")
         else:
@@ -1902,7 +1935,7 @@ class UnifiedTrader:
         logger.info(f"Position closed: {symbol} P&L={pnl_pct:+.2%} ({reason})")
 
     # ── Scan for new entries ────────────────────────────────────────
-    def _scan_for_entries(self, equity: float, cash: float, regime: AlpacaRegimeResult):
+    def _scan_for_entries(self, equity: float, cash: float, regime: AlpacaRegimeResult, econ_size_mult: float = 1.0):
         """Scan universe for new entry signals."""
         # Get current position values for sector check
         current_pos_values = {}
@@ -1966,6 +1999,18 @@ class UnifiedTrader:
                         )
                         continue
 
+                # Phase 3-9: per-symbol news sentiment filter
+                if self.news_sentiment is not None:
+                    if self.news_sentiment.should_skip_trade(sym):
+                        logger.info(f"Skipping {sym}: negative news sentiment")
+                        continue
+
+                # Phase 3-9: correlation/sector exposure check
+                if self.correlation_manager is not None:
+                    if not self.correlation_manager.can_add_position(sym, sig.position_size_pct):
+                        logger.info(f"Skipping {sym}: sector exposure limit reached")
+                        continue
+
                 signals.append(sig)
 
         if not signals:
@@ -1996,6 +2041,9 @@ class UnifiedTrader:
             )
             if not allowed:
                 continue
+
+            # Phase 3-9: apply economic calendar position size reduction
+            proposed_cost *= econ_size_mult
 
             # Check we have enough buying power
             if proposed_cost > cash * 0.95:
@@ -2039,6 +2087,8 @@ class UnifiedTrader:
 
             # Update sector exposure tracking
             current_pos_values[sig.symbol] = proposed_cost
+            if self.correlation_manager is not None:
+                self.correlation_manager.update_position(sig.symbol, sig.position_size_pct * econ_size_mult)
             cash -= proposed_cost
             self.daily_trades += 1
 

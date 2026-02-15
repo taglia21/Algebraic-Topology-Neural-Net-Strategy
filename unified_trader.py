@@ -836,6 +836,31 @@ except Exception as e:
     logger.warning(f"⚠️ Phase 3-9 import failed: {e} — sentiment/calendar/correlation disabled")
 
 
+# ── Profitability Modules: Universe, Mean Reversion, Pairs, SmartExec ────
+_universe_manager = None
+_mean_reversion = None
+_pairs_trader = None
+_smart_executor_cls = None
+PROFIT_MODULES_AVAILABLE = False
+try:
+    from src.universe_manager import UniverseManager as _UniverseManagerCls
+    from src.mean_reversion_strategy import MeanReversionStrategy as _MeanRevCls
+    from src.pairs_trading import PairsTrader as _PairsTraderCls
+    from src.smart_execution import SmartExecutor as _SmartExecutorCls
+    _universe_manager = _UniverseManagerCls()
+    _mean_reversion = _MeanRevCls()
+    _pairs_trader = _PairsTraderCls()
+    _smart_executor_cls = _SmartExecutorCls
+    PROFIT_MODULES_AVAILABLE = True
+    logger.info(
+        "✅ Profitability modules loaded "
+        f"(universe={len(_universe_manager.get_active_universe())} symbols, "
+        "mean-reversion, pairs-trading, smart-execution)"
+    )
+except Exception as e:
+    logger.warning(f"⚠️ Profitability modules import failed: {e}")
+
+
 # ============================================================================
 # SECTOR ENFORCEMENT — always active, never falls back to False
 # ============================================================================
@@ -1601,6 +1626,15 @@ class UnifiedTrader:
         self.economic_calendar = _economic_calendar_cls() if _economic_calendar_cls else None
         self.correlation_manager = _correlation_manager_cls() if _correlation_manager_cls else None
 
+        # Profitability modules
+        self.universe_manager = _universe_manager
+        self.mean_reversion = _mean_reversion
+        self.pairs_trader = _pairs_trader
+        self.smart_executor = (
+            _smart_executor_cls(submit_fn=submit_limit_order)
+            if _smart_executor_cls else None
+        )
+
         # Load persisted state
         self.positions, self.trade_history = load_state()
 
@@ -1747,6 +1781,11 @@ class UnifiedTrader:
                 logger.warning(f"📰 Extremely negative market sentiment ({mkt_sent:.2f}) — skipping new entries")
                 skip_new_longs = True
 
+        # 9d. Mean-reversion & pairs-trading scans
+        if not skip_new_longs and len(self.positions) < self.cfg.max_open_positions:
+            self._scan_mean_reversion(equity, cash, regime, econ_size_mult)
+            self._scan_pairs(equity, cash, regime, econ_size_mult)
+
         # 10. Scan for new equity entries (if regime allows)
         if not skip_new_longs and len(self.positions) < self.cfg.max_open_positions:
             self._scan_for_entries(equity, cash, regime, econ_size_mult=econ_size_mult)
@@ -1810,6 +1849,126 @@ class UnifiedTrader:
                         sector=get_sector(sym),
                     )
                     logger.info(f"Adopted position: {sym} {qty} @ ${entry_price:.2f}")
+
+    # ── Mean-reversion scan ─────────────────────────────────────────
+    def _scan_mean_reversion(self, equity: float, cash: float,
+                              regime, econ_size_mult: float = 1.0):
+        """Scan for mean-reversion entries in range-bound regimes."""
+        if self.mean_reversion is None:
+            return
+        # Only fire in mean-reverting or neutral regimes
+        if regime.regime not in ("mean_reverting", "neutral"):
+            return
+
+        # Collect bars for universe
+        bars_map: Dict[str, List[dict]] = {}
+        active = (
+            self.universe_manager.get_active_universe()
+            if self.universe_manager else UNIVERSE
+        )
+        for sym in active[:30]:  # Limit to top-30 for speed
+            if sym in self.positions:
+                continue
+            bars = get_bars(sym, limit=100)
+            if bars and len(bars) >= 50:
+                bars_map[sym] = bars
+            time.sleep(0.1)
+
+        signals = self.mean_reversion.scan_universe(bars_map)
+        for sig in signals[:3]:  # Max 3 MR entries per scan
+            if sig.direction != "LONG" or len(self.positions) >= self.cfg.max_open_positions:
+                continue
+            price = float(bars_map[sig.symbol][-1]["c"])
+            size_pct = self.cfg.default_position_pct * econ_size_mult
+            proposed_cost = equity * size_pct
+            if proposed_cost > cash * 0.95:
+                continue
+            qty = int(proposed_cost / price)
+            if qty <= 0:
+                continue
+
+            limit_price = round(price * (1 + self.cfg.limit_buffer_pct), 2)
+            if not self.dry_run:
+                result = submit_limit_order(sig.symbol, qty, "buy", limit_price)
+                if result is None:
+                    continue
+            else:
+                logger.info(f"[DRY RUN] MR BUY {qty} {sig.symbol} @ ${limit_price:.2f}")
+
+            target = round(price * 1.04, 2)   # 4% target for MR
+            stop = round(price * 0.97, 2)     # 3% stop for MR
+            self.positions[sig.symbol] = TrackedPosition(
+                symbol=sig.symbol, entry_price=price,
+                entry_time=datetime.now(), qty=qty,
+                stop_price=stop, target_price=target,
+                trailing_stop=0, highest_price=price,
+                sector=get_sector(sig.symbol),
+            )
+            cash -= proposed_cost
+            self.daily_trades += 1
+            logger.info(
+                f"✅ MR ENTRY {sig.symbol}: z={sig.z_score:+.2f} "
+                f"RSI={sig.rsi:.0f} BB={sig.bb_position:.2f} "
+                f"conf={sig.confidence:.2f} | {', '.join(sig.reasons)}"
+            )
+
+    # ── Pairs trading scan ──────────────────────────────────────────
+    def _scan_pairs(self, equity: float, cash: float,
+                     regime, econ_size_mult: float = 1.0):
+        """Scan cointegrated pairs for stat-arb entries/exits."""
+        if self.pairs_trader is None:
+            return
+
+        # Collect bars for pair symbols
+        bars_map: Dict[str, List[dict]] = {}
+        pair_syms = set()
+        for p in self.pairs_trader.cfg.pairs:
+            pair_syms.add(p.sym_a)
+            pair_syms.add(p.sym_b)
+        for sym in pair_syms:
+            bars = get_bars(sym, limit=100)
+            if bars and len(bars) >= 60:
+                bars_map[sym] = bars
+            time.sleep(0.1)
+
+        signals = self.pairs_trader.score_all_pairs(bars_map)
+        for sig in signals:
+            logger.info(
+                f"📊 PAIR {sig.sym_a}/{sig.sym_b}: {sig.action} "
+                f"z={sig.z_score:+.2f} β={sig.hedge_ratio:.3f} "
+                f"HL={sig.half_life:.1f}d | {', '.join(sig.reasons)}"
+            )
+            # For now, log pair signals — full execution requires
+            # short-selling support which depends on account type.
+            # Long-leg entry is supported:
+            if sig.action == "LONG_A_SHORT_B" and sig.sym_a not in self.positions:
+                if len(self.positions) >= self.cfg.max_open_positions:
+                    continue
+                price = float(bars_map[sig.sym_a][-1]["c"])
+                size_pct = self.cfg.default_position_pct * econ_size_mult * 0.5  # half-size for pair leg
+                proposed_cost = equity * size_pct
+                if proposed_cost > cash * 0.95:
+                    continue
+                qty = int(proposed_cost / price)
+                if qty <= 0:
+                    continue
+                limit_price = round(price * (1 + self.cfg.limit_buffer_pct), 2)
+                if not self.dry_run:
+                    result = submit_limit_order(sig.sym_a, qty, "buy", limit_price)
+                    if result is None:
+                        continue
+                target = round(price * 1.03, 2)
+                stop = round(price * 0.97, 2)
+                self.positions[sig.sym_a] = TrackedPosition(
+                    symbol=sig.sym_a, entry_price=price,
+                    entry_time=datetime.now(), qty=qty,
+                    stop_price=stop, target_price=target,
+                    trailing_stop=0, highest_price=price,
+                    sector=get_sector(sig.sym_a),
+                )
+                cash -= proposed_cost
+                self.daily_trades += 1
+                logger.info(f"✅ PAIR LONG {sig.sym_a} (vs {sig.sym_b}) {qty} @ ${price:.2f}")
 
     # ── Manage existing positions ───────────────────────────────────
     def _manage_positions(self, equity: float):
@@ -1950,10 +2109,17 @@ class UnifiedTrader:
             thompson_weights = self.thompson.sample_weights()
             logger.debug(f"Thompson weights: {thompson_weights}")
 
+        # Determine active universe (dynamic if manager available)
+        active_universe = (
+            self.universe_manager.get_active_universe()
+            if self.universe_manager is not None
+            else UNIVERSE
+        )
+
         # Fetch bars for TDA (need multiple symbols)
         all_bars: Dict[str, List[dict]] = {}
         candidates_bars: Dict[str, List[dict]] = {}
-        for sym in UNIVERSE:
+        for sym in active_universe:
             if sym in self.positions:
                 continue  # Skip if already holding
             bars = get_bars(sym, limit=self.cfg.bars_lookback)
@@ -1965,6 +2131,10 @@ class UnifiedTrader:
         if not candidates_bars:
             logger.info("No candidates with sufficient bar data")
             return
+
+        # Refresh universe filters if due (uses bar data just fetched)
+        if self.universe_manager is not None and self.universe_manager.needs_refresh():
+            self.universe_manager.update_filters(all_bars)
 
         # Get TDA score (uses multiple symbols)
         tda_score = get_tda_score(all_bars, "market")
@@ -2062,6 +2232,19 @@ class UnifiedTrader:
                 logger.info(
                     f"[DRY RUN] Would BUY {qty} {sig.symbol} @ ${limit_price:.2f} "
                     f"(stop=${sig.stop_price:.2f}, target=${sig.price * (1 + self.cfg.profit_target_pct):.2f})"
+                )
+            elif self.smart_executor is not None and qty >= 30:
+                # Use TWAP for larger orders
+                plan = self.smart_executor.plan_execution(
+                    sig.symbol, qty, "buy", sig.price, strategy="twap",
+                )
+                report = self.smart_executor.execute_all_slices(plan, current_price=sig.price)
+                if report.filled_qty <= 0:
+                    logger.error(f"Smart exec failed for {sig.symbol}")
+                    continue
+                logger.info(
+                    f"BUY via TWAP: {report.filled_qty} {sig.symbol} "
+                    f"avg=${report.avg_fill_price:.2f} slip={report.slippage_bps:+.1f}bps"
                 )
             else:
                 result = submit_limit_order(sig.symbol, qty, "buy", limit_price)
@@ -2980,7 +3163,12 @@ class UnifiedTrader:
 
             # Collect price data for universe using Alpaca bars
             price_data: Dict[str, Any] = {}
-            for sym in UNIVERSE[:10]:  # Retrain on top-10 symbols for speed
+            retrain_syms = (
+                self.universe_manager.get_retraining_symbols(10)
+                if self.universe_manager is not None
+                else UNIVERSE[:10]
+            )
+            for sym in retrain_syms:  # Top-10 most liquid symbols
                 bars = get_bars(sym, limit=300)
                 if bars and len(bars) >= 100:
                     df = pd.DataFrame([{

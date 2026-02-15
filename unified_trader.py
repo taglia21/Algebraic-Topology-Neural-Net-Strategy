@@ -203,7 +203,7 @@ class UnifiedConfig:
     options_iv_rank_sell_threshold: float = 50.0  # SELL premium when IV rank > 50%
     options_iv_rank_buy_threshold: float = 30.0   # BUY options when IV rank < 30%
     options_iv_rank_threshold: float = 50.0    # Legacy alias for sell threshold
-    options_scan_interval_min: int = 30        # Scan options every 30 min
+    options_scan_interval_min: int = 5        # Scan options every 5 min
     options_regimes_allowed: List[str] = field(
         default_factory=lambda: ["mean_reverting", "neutral", "trending_bull"]
     )
@@ -1489,7 +1489,7 @@ class UnifiedTrader:
          e. Aggregate into composite signal
          f. If BUY: check sector caps, compute Kelly size, submit limit order
          g. If positions exist: check stops, targets, trailing
-      5. Options scan (every 30 min in low-vol regime)
+      5. Options scan (every 5 min in appropriate regime)
       6. Options exit management (every cycle)
       7. Save state
       8. Wait for next scan

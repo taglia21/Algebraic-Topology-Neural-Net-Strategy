@@ -886,6 +886,31 @@ except Exception as e:
     logger.warning(f"⚠️ Tier 1 import failed: {e}")
 
 
+# ── Tier 2: Vol Surface, Order Flow, Adaptive Params, Multi-Timeframe ────────
+_vol_surface = None
+_order_flow_analyzer = None
+_adaptive_tuner = None
+_mtf_analyzer = None
+TIER2_AVAILABLE = False
+try:
+    from src.volatility_surface import VolatilitySurface as _VolSurfaceCls
+    from src.order_flow_analyzer import OrderFlowAnalyzer as _OrderFlowCls
+    from src.adaptive_parameters import AdaptiveParameterTuner as _AdaptiveTunerCls
+    from src.adaptive_parameters import TradeRecord as _TradeRecordCls
+    from src.multi_timeframe import MultiTimeframeAnalyzer as _MTFAnalyzerCls
+    _vol_surface = _VolSurfaceCls()
+    _order_flow_analyzer = _OrderFlowCls()
+    _adaptive_tuner = _AdaptiveTunerCls()
+    _mtf_analyzer = _MTFAnalyzerCls(min_confirming=3)
+    TIER2_AVAILABLE = True
+    logger.info(
+        "✅ Tier 2 loaded (volatility surface, order flow, "
+        "adaptive parameters, multi-timeframe confluence)"
+    )
+except Exception as e:
+    logger.warning(f"⚠️ Tier 2 import failed: {e}")
+
+
 # ============================================================================
 # SECTOR ENFORCEMENT — always active, never falls back to False
 # ============================================================================
@@ -1667,6 +1692,15 @@ class UnifiedTrader:
         self.extended_hours = _extended_hours_scanner
         self._ml_regime_result = None  # Cached per scan cycle
 
+        # Tier 2 modules
+        self.vol_surface = _vol_surface
+        self.order_flow = _order_flow_analyzer
+        self.adaptive_tuner = _adaptive_tuner
+        self.mtf_analyzer = _mtf_analyzer
+        self._adaptive_adj = None       # Cached ParameterAdjustments per scan
+        self._adaptive_cooldown = 0     # Signals to skip
+        self._portfolio_weights = {}    # Portfolio optimizer weights
+
         # Load persisted state
         self.positions, self.trade_history = load_state()
 
@@ -1872,6 +1906,38 @@ class UnifiedTrader:
             if mkt_sent < -0.5:
                 logger.warning(f"📰 Extremely negative market sentiment ({mkt_sent:.2f}) — skipping new entries")
                 skip_new_longs = True
+
+        # 9e. Tier 2: Adaptive parameter tuning (pre-scan)
+        if self.adaptive_tuner is not None:
+            try:
+                self._adaptive_adj = self.adaptive_tuner.get_adjustments(
+                    current_regime=regime.regime,
+                )
+                if self._adaptive_adj.adaptation_reason != "parameters stable":
+                    logger.info(
+                        f"🔧 Adaptive: {self._adaptive_adj.describe()} "
+                        f"— {self._adaptive_adj.adaptation_reason}"
+                    )
+                self._adaptive_cooldown = self._adaptive_adj.skip_next_n_signals
+            except Exception as e:
+                logger.debug(f"Adaptive tuner error: {e}")
+                self._adaptive_adj = None
+
+        # 9f. Tier 2: Volatility surface analysis (SPY proxy)
+        if self.vol_surface is not None:
+            try:
+                spy_bars = bar_windows_cache.get("SPY") if hasattr(self, '_bar_cache') else get_bars("SPY", limit=100)
+                if spy_bars and len(spy_bars) >= 60:
+                    vol_signal = self.vol_surface.get_vol_signal("SPY", spy_bars)
+                    logger.info(
+                        f"📈 Vol surface: {vol_signal.vol_regime.value} "
+                        f"term={vol_signal.term_structure.value} "
+                        f"IV rank={vol_signal.iv_rank:.0f} "
+                        f"bias={vol_signal.trade_bias} "
+                        f"(conf={vol_signal.confidence:.2f})"
+                    )
+            except Exception as e:
+                logger.debug(f"Vol surface error: {e}")
 
         # 9d. Mean-reversion & pairs-trading scans
         if not skip_new_longs and len(self.positions) < self.cfg.max_open_positions:
@@ -2177,6 +2243,25 @@ class UnifiedTrader:
             for arm in self.thompson.arms:
                 self.thompson.update(arm, won)
 
+        # Tier 2: Feed trade result to adaptive parameter tuner
+        if self.adaptive_tuner is not None:
+            try:
+                self.adaptive_tuner.record_trade(_TradeRecordCls(
+                    symbol=symbol,
+                    entry_time=pos.entry_time,
+                    exit_time=datetime.now(),
+                    pnl_pct=pnl_pct,
+                    holding_bars=max(1, (datetime.now() - pos.entry_time).days),
+                    regime=getattr(self, "_last_regime", "unknown"),
+                    composite_score=0.5,
+                    ml_confidence=0.5,
+                    atr_pct=pos.atr_at_entry / max(pos.entry_price, 1) if pos.atr_at_entry else 0.02,
+                    stop_distance_pct=abs(pos.entry_price - pos.stop_price) / max(pos.entry_price, 1),
+                    exit_reason=reason,
+                ))
+            except Exception as e:
+                logger.debug(f"Adaptive tuner recording failed: {e}")
+
         trade_record = {
             "symbol": symbol, "side": "sell", "qty": pos.qty,
             "entry_price": pos.entry_price, "exit_price": price,
@@ -2190,7 +2275,8 @@ class UnifiedTrader:
         logger.info(f"Position closed: {symbol} P&L={pnl_pct:+.2%} ({reason})")
 
     # ── Scan for new entries ────────────────────────────────────────
-    def _scan_for_entries(self, equity: float, cash: float, regime: AlpacaRegimeResult, econ_size_mult: float = 1.0):
+    def _scan_for_entries(self, equity: float, cash: float, regime: AlpacaRegimeResult,
+                          econ_size_mult: float = 1.0, ml_regime_scale: float = 1.0):
         """Scan universe for new entry signals."""
         # Get current position values for sector check
         current_pos_values = {}
@@ -2325,6 +2411,48 @@ class UnifiedTrader:
                     except Exception as e:
                         logger.debug(f"Alt data check failed for {sym}: {e}")
 
+                # Tier 2: Order flow institutional bias filter
+                if self.order_flow is not None:
+                    try:
+                        flow = self.order_flow.analyze(sym, bars)
+                        if flow.trade_bias == "sell":
+                            logger.info(
+                                f"Skipping {sym}: institutional distribution "
+                                f"(smart_money={flow.smart_money_score:+.2f})"
+                            )
+                            continue
+                        if flow.trade_bias == "buy":
+                            logger.debug(
+                                f"  {sym}: order flow bullish "
+                                f"(smart_money={flow.smart_money_score:+.2f}, "
+                                f"blocks={len(flow.block_trades)})"
+                            )
+                    except Exception as e:
+                        logger.debug(f"Order flow check failed for {sym}: {e}")
+
+                # Tier 2: Multi-timeframe confluence check
+                if self.mtf_analyzer is not None:
+                    try:
+                        mtf_result = self.mtf_analyzer.analyze_from_daily(sym, bars)
+                        if not mtf_result.confirms_long:
+                            logger.info(
+                                f"Skipping {sym}: MTF no confluence "
+                                f"({mtf_result.describe()})"
+                            )
+                            continue
+                        if mtf_result.caution:
+                            logger.debug(f"  {sym}: MTF caution (daily vs intraday disagree)")
+                            # Reduce position size via confluence scale
+                            sig.position_size_pct *= mtf_result.confluence_scale
+                    except Exception as e:
+                        logger.debug(f"MTF check failed for {sym}: {e}")
+
+                # Tier 2: Adaptive cooldown check
+                if self._adaptive_cooldown > 0:
+                    self._adaptive_cooldown -= 1
+                    logger.info(f"Skipping {sym}: adaptive cooldown ({self._adaptive_cooldown} remaining)")
+                    continue
+
                 signals.append(sig)
 
         if not signals:
@@ -2361,6 +2489,20 @@ class UnifiedTrader:
 
             # Tier 1: apply ML regime position scale (BULL=1.2x, BEAR=0.25x)
             proposed_cost *= ml_regime_scale
+
+            # Tier 2: apply adaptive parameter adjustments
+            if self._adaptive_adj is not None:
+                proposed_cost *= self._adaptive_adj.position_size_mult
+
+            # Tier 2: apply vol surface position scale
+            if self.vol_surface is not None:
+                try:
+                    vol_sig = self.vol_surface.get_vol_signal(
+                        sig.symbol, candidates_bars.get(sig.symbol, []),
+                    )
+                    proposed_cost *= vol_sig.position_scale
+                except Exception:
+                    pass
 
             # Tier 1: apply portfolio optimizer weight (if available)
             if self.portfolio_optimizer is not None and hasattr(self, '_portfolio_weights'):

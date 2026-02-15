@@ -44,7 +44,7 @@ def backtest(strategy, df, initial_capital=100000):
                     trades.append({'pnl': pnl})
                     position = 0
         
-        if position == 0 and signal.direction != 0 and signal.confidence > 0.55:
+        if position == 0 and True and signal.confidence > 0.10:
             position_value = capital * signal.position_size
             shares = position_value / current_price
             if signal.direction == 1:

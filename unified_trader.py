@@ -137,8 +137,8 @@ SECTOR_MAP = {
     "SPY": "etf", "QQQ": "etf", "IWM": "etf",
     "XLF": "etf", "XLE": "etf", "XLV": "etf",
 }
-SECTOR_MAX_PCT = 0.25        # Max 25% equity per sector
-SECTOR_MAX_POSITIONS = 2     # Max 2 positions per sector
+SECTOR_MAX_PCT = 0.40        # Max 40% equity per sector
+SECTOR_MAX_POSITIONS = 4     # Max 4 positions per sector
 
 # ============================================================================
 # CONFIGURATION
@@ -154,11 +154,11 @@ class UnifiedConfig:
     market_close_hour: int = 15
     market_close_min: int = 50         # Stop 10 min before close
 
-    # Position sizing (Half-Kelly, capped)
-    max_position_pct: float = 0.05     # 5% max per position
+    # Position sizing (Full-Kelly, capped)
+    max_position_pct: float = 0.08     # 8% max per position
     min_position_pct: float = 0.01     # 1% min
-    kelly_fraction: float = 0.50       # Half-Kelly
-    default_position_pct: float = 0.03 # 3% default before Kelly history
+    kelly_fraction: float = 1.00       # Full-Kelly
+    default_position_pct: float = 0.04 # 4% default before Kelly history
 
     # ATR stops
     atr_period: int = 14
@@ -167,8 +167,8 @@ class UnifiedConfig:
     volatility_threshold: float = 0.02 # ATR% > 2% = volatile
 
     # Signal thresholds
-    min_composite_score: float = 0.55  # Minimum score to buy
-    min_tda_alignment: float = -0.2    # TDA must not be strongly negative
+    min_composite_score: float = 0.40  # Minimum score to buy (aggressive)
+    min_tda_alignment: float = -0.5    # TDA must not be strongly negative
 
     # Profit taking
     profit_target_pct: float = 0.06    # 6% take profit
@@ -204,8 +204,8 @@ class UnifiedConfig:
     )
 
     # ── ML Hard Filter ───────────────────────────────────────────────
-    ml_hard_filter: bool = True
-    ml_min_confidence: float = 0.40            # Skip trade if ML conf < 0.4
+    ml_hard_filter: bool = False
+    ml_min_confidence: float = 0.25            # Skip trade if ML conf < 0.25 (relaxed)
 
     # ── Retraining ───────────────────────────────────────────────────
     retraining_enabled: bool = True
@@ -214,7 +214,7 @@ class UnifiedConfig:
 
     # ── Thompson Sampling ────────────────────────────────────────────
     thompson_enabled: bool = True
-    thompson_prior_alpha: float = 1.0          # Beta prior alpha (successes)
+    thompson_prior_alpha: float = 2.0          # Beta prior alpha (more exploration)
     thompson_prior_beta: float = 1.0           # Beta prior beta (failures)
 
 
@@ -1064,10 +1064,15 @@ def compute_composite_signal(
     scores = [tech.score, regime_val, ml_conf, tda_normalized]
     confidence = float(1.0 - np.std(scores))  # Higher agreement = higher confidence
 
-    # Direction
-    if composite >= cfg.min_composite_score and regime.is_bullish:
-        direction = "BUY"
-    elif composite <= 0.35 or regime.is_bearish:
+    # Direction — aggressive: buy on weaker signals in bullish regime
+    if composite >= cfg.min_composite_score:
+        if regime.is_bullish:
+            direction = "BUY"
+        elif composite >= 0.55:  # still buy on strong signal even if not confirmed bullish
+            direction = "BUY"
+        else:
+            direction = "HOLD"
+    elif composite <= 0.30 or regime.is_bearish:
         direction = "SELL"
     else:
         direction = "HOLD"
@@ -1152,20 +1157,20 @@ def _compute_position_size(
     else:
         base_pct = cfg.default_position_pct
 
-    # Scale by composite signal strength
-    signal_scale = float(np.clip(composite, 0.5, 1.0))
+    # Scale by composite signal strength (aggressive: less penalty for weaker signals)
+    signal_scale = float(np.clip(composite, 0.6, 1.0))
     base_pct *= signal_scale
 
-    # Scale by inverse volatility (lower size for volatile stocks)
-    vol_scale = min(1.0, 0.02 / max(atr_pct, 0.005))
+    # Scale by inverse volatility (reduced penalty)
+    vol_scale = min(1.0, 0.03 / max(atr_pct, 0.005))
     base_pct *= vol_scale
 
-    # Scale by regime (reduce in bearish/volatile)
+    # Scale by regime (aggressive: higher allocation across regimes)
     regime_scales = {
-        "trending_bull": 1.0, "strong_bull": 1.0, "bull": 0.9,
-        "mean_reverting": 0.8, "neutral": 0.7,
-        "high_volatility": 0.5, "trending_bear": 0.3,
-        "bear": 0.3, "strong_bear": 0.1, "crisis": 0.0,
+        "trending_bull": 1.0, "strong_bull": 1.0, "bull": 1.0,
+        "mean_reverting": 0.9, "neutral": 0.8,
+        "high_volatility": 0.6, "trending_bear": 0.4,
+        "bear": 0.3, "strong_bear": 0.15, "crisis": 0.05,
     }
     regime_scale = regime_scales.get(regime.regime, 0.5)
     base_pct *= regime_scale

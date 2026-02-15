@@ -1,7 +1,0 @@
-{
-  "buy_threshold": 0.55,
-  "sell_threshold": 0.45,
-  "last_retrain": null,
-  "recent_buy_signals": 59,
-  "recent_sell_signals": 41
-}

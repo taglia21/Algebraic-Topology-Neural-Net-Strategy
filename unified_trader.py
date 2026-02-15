@@ -212,6 +212,24 @@ class UnifiedConfig:
     )
     options_use_contract_resolver: bool = True  # Use OptionContractResolver for better fills
 
+    # ── Earnings Calendar ─────────────────────────────────────────────
+    enable_earnings_strategies: bool = True
+    earnings_blackout_days: int = 2            # No new positions this close to earnings
+    earnings_iv_premium_threshold: float = 60.0  # IV rank needed for pre-earnings sell
+    earnings_pre_window_min: int = 3           # Start of pre-earnings window (days)
+    earnings_pre_window_max: int = 7           # End of pre-earnings window (days)
+    earnings_post_window: int = 3              # Days after earnings for IV crush plays
+
+    # ── Greeks & Delta Hedging ────────────────────────────────────────
+    enable_delta_hedging: bool = True
+    max_portfolio_delta: float = 0.50          # Max 50 delta exposure (per ~$100k)
+    delta_hedge_threshold: float = 0.30        # Hedge when |delta| > 30%
+    max_portfolio_gamma: float = 0.10          # Circuit breaker on gamma
+    max_portfolio_vega: float = 1000.0         # Circuit breaker on vega ($)
+    greeks_check_interval_min: int = 5         # Check Greeks every 5 min
+    hedge_with_shares: bool = True             # True = shares, False = options
+    hedge_min_delta_change: float = 5.0        # Don't hedge if delta change < 5
+
     # ── ML Hard Filter ───────────────────────────────────────────────
     ml_hard_filter: bool = False
     ml_min_confidence: float = 0.25            # Skip trade if ML conf < 0.25 (relaxed)
@@ -753,6 +771,40 @@ try:
         logger.warning("⚠️ Contract resolver skipped — options engine not available")
 except Exception as e:
     logger.warning(f"⚠️ Contract resolver import failed: {e} — using fallback chain logic")
+
+# ── Earnings Calendar & IV Strategy ─────────────────────────────────
+_earnings_calendar = None
+_earnings_iv_strategy = None
+try:
+    from src.earnings_calendar import EarningsCalendar
+    _earnings_calendar = EarningsCalendar()
+    logger.info("✅ Earnings calendar loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Earnings calendar import failed: {e} — earnings awareness disabled")
+
+try:
+    from src.earnings_iv_strategy import EarningsIVStrategy, EarningsOptionSignal, EarningsAction
+    if _earnings_calendar is not None:
+        _earnings_iv_strategy = EarningsIVStrategy(
+            earnings_calendar=_earnings_calendar,
+        )
+        logger.info("✅ Earnings IV strategy loaded")
+    else:
+        logger.warning("⚠️ Earnings IV strategy skipped — calendar not available")
+except Exception as e:
+    logger.warning(f"⚠️ Earnings IV strategy import failed: {e}")
+
+# ── Greeks Manager & Delta Hedger ───────────────────────────────────
+_greeks_manager = None
+_delta_hedger = None
+try:
+    from src.greeks_manager import GreeksManager, GreeksConfig
+    from src.delta_hedger import DeltaHedger, HedgeConfig
+    _greeks_manager = GreeksManager()
+    _delta_hedger = DeltaHedger()
+    logger.info("✅ Greeks manager & delta hedger loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Greeks/hedger import failed: {e} — delta hedging disabled")
 
 # ── Enhanced ML Retrainer ───────────────────────────────────────────
 _ml_retrainer = None
@@ -1658,6 +1710,10 @@ class UnifiedTrader:
             if regime.regime in all_options_regimes:
                 self._maybe_run_options_scan(equity, regime)
 
+        # 9b. Portfolio Greeks check & delta hedging
+        if self.cfg.options_enabled and self.cfg.enable_delta_hedging:
+            self._check_portfolio_greeks(equity)
+
         # 10. Scan for new equity entries (if regime allows)
         if not skip_new_longs and len(self.positions) < self.cfg.max_open_positions:
             self._scan_for_entries(equity, cash, regime)
@@ -1668,6 +1724,16 @@ class UnifiedTrader:
 
         # 11. Check if retraining is due (midnight EST)
         self._check_retraining()
+
+        # 11b. Log Greeks summary
+        if self.cfg.options_enabled and _greeks_manager is not None:
+            gs = _greeks_manager.get_portfolio_summary()
+            if gs.get("positions", 0) > 0:
+                logger.info(
+                    f"Greeks: Δ={gs['delta']:+.1f} Γ={gs['gamma']:+.4f} "
+                    f"Θ=${gs['theta_daily']:+.1f}/day V=${gs['vega']:+.1f} "
+                    f"hedge={'YES' if gs['needs_hedge'] else 'no'}"
+                )
 
         # 12. Save state
         save_state(self.positions, self.trade_history)
@@ -1890,6 +1956,16 @@ class UnifiedTrader:
                 if sig.tda_score < self.cfg.min_tda_alignment:
                     logger.debug(f"Skipping {sym}: TDA misaligned ({sig.tda_score:.2f})")
                     continue
+
+                # Earnings blackout check
+                if self.cfg.enable_earnings_strategies and _earnings_iv_strategy is not None:
+                    if _earnings_iv_strategy.should_skip_equity_trade(sym):
+                        logger.info(
+                            f"Skipping {sym}: earnings blackout "
+                            f"({_earnings_calendar.get_days_to_earnings(sym)}d to earnings)"
+                        )
+                        continue
+
                 signals.append(sig)
 
         if not signals:
@@ -2112,6 +2188,69 @@ class UnifiedTrader:
                     f"neutral zone ({self.cfg.options_iv_rank_buy_threshold}-"
                     f"{self.cfg.options_iv_rank_sell_threshold}%) — no action"
                 )
+
+        # ── Earnings-based options signals ──
+        if self.cfg.enable_earnings_strategies and _earnings_iv_strategy is not None:
+            self._scan_earnings_options(equity, regime)
+
+    def _scan_earnings_options(self, equity: float, regime: AlpacaRegimeResult):
+        """
+        Generate and execute earnings-based options signals.
+
+        Uses EarningsIVStrategy to find:
+          - Pre-earnings premium selling (5-7d before, IV>60%)
+          - Post-earnings IV crush buying (0-3d after, IV crushed)
+          - Blackout warnings
+        """
+        # Combine options underlyings + their components for earnings scanning
+        symbols_to_check = list(self.cfg.options_underlyings)
+
+        # Also check earnings of major ETF components (affects ETF IV)
+        for etf in self.cfg.options_underlyings:
+            risk = _earnings_iv_strategy.get_etf_earnings_risk(etf)
+            if risk["risk_level"] in ("medium", "high"):
+                logger.info(
+                    f"  📅 {etf}: {risk['components_reporting']} components "
+                    f"reporting this week (risk={risk['risk_level']})"
+                )
+
+        signals = _earnings_iv_strategy.generate_earnings_signals(
+            symbols=symbols_to_check,
+            iv_rank_fn=self._get_iv_rank,
+        )
+
+        for sig in signals:
+            if sig.action == EarningsAction.BLACKOUT:
+                logger.info(f"  ⛔ {sig.symbol}: {sig.reason}")
+                continue
+
+            if not sig.is_actionable:
+                continue
+
+            # Check if we already have a position on this underlying
+            if any(
+                otr.underlying == sig.symbol and not otr.closed
+                for otr in self.options_positions
+            ):
+                continue
+
+            per_pos_cap = equity * sig.max_risk_pct
+            logger.info(
+                f"  📅 Earnings signal: {sig.symbol} {sig.action.value} "
+                f"{sig.strategy} | conf={sig.confidence:.0%} | {sig.reason}"
+            )
+
+            try:
+                self._place_options_trade(
+                    underlying=sig.symbol,
+                    strategy=sig.strategy,
+                    max_risk=per_pos_cap,
+                    iv_rank=sig.iv_rank or 0.0,
+                    confidence=sig.confidence,
+                    direction=sig.direction,
+                )
+            except Exception as e:
+                logger.error(f"Earnings options trade failed for {sig.symbol}: {e}")
 
     def _get_iv_rank(self, symbol: str) -> Optional[float]:
         """
@@ -2485,6 +2624,163 @@ class UnifiedTrader:
         except Exception as e:
             logger.warning(f"Resolver failed for {underlying} {strategy}: {e} — falling back")
             return False
+
+    # ── Portfolio Greeks & Delta Hedging ─────────────────────────────
+    def _check_portfolio_greeks(self, equity: float):
+        """
+        Calculate portfolio-level Greeks and execute delta hedge if needed.
+
+        Called every scan cycle when options are enabled and delta hedging is on.
+        Builds position list from self.options_positions, computes Greeks via
+        GreeksManager, then checks thresholds and hedges if required.
+        """
+        if _greeks_manager is None:
+            return
+
+        # Build positions list for Greeks calculation
+        positions_for_greeks = []
+        for otr in self.options_positions:
+            if otr.closed:
+                continue
+            for leg in otr.legs:
+                # Parse leg info to extract option details
+                leg_sym = leg.get("symbol", "")
+                leg_side = leg.get("side", "buy").lower()
+                leg_qty = int(leg.get("qty", 1))
+
+                # Determine sign: buy = +qty, sell = -qty
+                qty_signed = leg_qty if leg_side == "buy" else -leg_qty
+
+                # Try to parse option symbol for strike / type / expiration
+                opt_info = self._parse_option_symbol(leg_sym, otr)
+                if opt_info is None:
+                    continue
+
+                # Fetch underlying price
+                spot = 0.0
+                try:
+                    bars = get_bars(otr.underlying, limit=1)
+                    if bars:
+                        spot = float(bars[-1].get("c", 0))
+                except Exception:
+                    pass
+
+                if spot <= 0:
+                    continue
+
+                positions_for_greeks.append({
+                    "symbol": leg_sym,
+                    "underlying": otr.underlying,
+                    "option_type": opt_info["option_type"],
+                    "strike": opt_info["strike"],
+                    "expiration": opt_info["expiration"],
+                    "quantity": qty_signed,
+                    "spot_price": spot,
+                    "iv": opt_info.get("iv"),
+                })
+
+        if not positions_for_greeks:
+            return
+
+        # Calculate portfolio Greeks
+        snapshot = _greeks_manager.calculate_portfolio_greeks(positions_for_greeks)
+
+        # Circuit breaker check
+        cb_triggered, cb_reason = _greeks_manager.is_circuit_breaker_triggered()
+        if cb_triggered:
+            logger.warning(f"⚠️ GREEKS CIRCUIT BREAKER: {cb_reason}")
+            # Could halt new options trades here
+
+        # Gamma scalp opportunity
+        if _greeks_manager.has_gamma_scalp_opportunity():
+            logger.info("💡 Gamma scalp opportunity detected (high long gamma)")
+
+        # Delta hedge check
+        needs, reason = _greeks_manager.needs_hedge()
+        if needs:
+            logger.info(f"🔄 Delta hedge needed: {reason}")
+            self._execute_delta_hedge(snapshot, equity)
+
+    def _execute_delta_hedge(self, snapshot, equity: float):
+        """Execute a delta hedge based on Greeks snapshot."""
+        if _delta_hedger is None:
+            return
+
+        # Get primary underlying price for hedging (SPY default)
+        hedge_underlying = "SPY"
+        spot = 0.0
+        try:
+            bars = get_bars(hedge_underlying, limit=1)
+            if bars:
+                spot = float(bars[-1].get("c", 0))
+        except Exception:
+            pass
+
+        if spot <= 0:
+            logger.warning("Cannot hedge — no spot price for SPY")
+            return
+
+        rec = _delta_hedger.get_hedge_recommendation(
+            portfolio_delta=snapshot.net_delta,
+            underlying=hedge_underlying,
+            spot_price=spot,
+            equity=equity,
+            portfolio_gamma=snapshot.net_gamma,
+            portfolio_vega=snapshot.net_vega,
+        )
+
+        if rec.should_hedge:
+            is_dry = self.dry_run
+            execution = _delta_hedger.execute_delta_hedge(rec, dry_run=is_dry)
+            if execution.executed:
+                logger.info(
+                    f"✅ DELTA HEDGE: {rec.direction.upper()} {rec.quantity} "
+                    f"{rec.instrument.value} {rec.underlying} — "
+                    f"delta {rec.current_delta:+.1f} → {rec.target_delta:+.1f}"
+                )
+            else:
+                logger.warning(f"Delta hedge failed: {execution.error}")
+
+    @staticmethod
+    def _parse_option_symbol(symbol: str, otr) -> Optional[dict]:
+        """
+        Parse an OCC option symbol into components.
+
+        OCC format: UNDERLYING  YYMMDD C/P STRIKE (padded)
+        Example:    SPY250321C00500000
+        """
+        import re
+
+        # Try OCC format: ROOT + 6-digit date + C/P + 8-digit strike
+        m = re.match(r'^([A-Z]{1,6})(\d{6})([CP])(\d{8})$', symbol)
+        if m:
+            root, date_str, cp, strike_str = m.groups()
+            try:
+                exp = f"20{date_str[:2]}-{date_str[2:4]}-{date_str[4:6]}"
+                strike = int(strike_str) / 1000.0
+                option_type = "call" if cp == "C" else "put"
+                return {
+                    "option_type": option_type,
+                    "strike": strike,
+                    "expiration": exp,
+                    "iv": None,  # Will use default
+                }
+            except (ValueError, IndexError):
+                pass
+
+        # Fallback: use OptionsTradeRecord data
+        if otr:
+            # Deduce type from strategy name
+            strat = otr.strategy.lower()
+            option_type = "put" if "put" in strat else "call"
+            return {
+                "option_type": option_type,
+                "strike": 0.0,  # Unknown — Greeks will be approximate
+                "expiration": otr.expiration,
+                "iv": None,
+            }
+
+        return None
 
     # ── Options exit management ─────────────────────────────────────
     def _check_options_exits(self, equity: float):

@@ -194,14 +194,23 @@ class UnifiedConfig:
     options_max_portfolio_pct: float = 0.20   # Max 20% of equity in options
     options_max_per_position_pct: float = 0.05  # Max 5% per options position
     options_target_dte: int = 45               # Target 45 DTE for premium selling
+    options_target_dte_buy: int = 21           # Target 21 DTE for vol buying
     options_min_dte_close: int = 7             # Close at 7 DTE
     options_take_profit_pct: float = 0.50      # Close at 50% of max profit
+    options_take_profit_pct_buy: float = 1.00  # Close at 100% gain for long options
     options_stop_loss_mult: float = 2.0        # Stop at 2x credit received
-    options_iv_rank_threshold: float = 50.0    # Only sell when IV rank > 50%
+    options_stop_loss_pct_buy: float = 0.50    # Stop at 50% loss for long options
+    options_iv_rank_sell_threshold: float = 50.0  # SELL premium when IV rank > 50%
+    options_iv_rank_buy_threshold: float = 30.0   # BUY options when IV rank < 30%
+    options_iv_rank_threshold: float = 50.0    # Legacy alias for sell threshold
     options_scan_interval_min: int = 30        # Scan options every 30 min
     options_regimes_allowed: List[str] = field(
         default_factory=lambda: ["mean_reverting", "neutral", "trending_bull"]
     )
+    options_buy_regimes: List[str] = field(
+        default_factory=lambda: ["high_volatility", "trending_bear", "crisis"]
+    )
+    options_use_contract_resolver: bool = True  # Use OptionContractResolver for better fills
 
     # ── ML Hard Filter ───────────────────────────────────────────────
     ml_hard_filter: bool = False
@@ -718,6 +727,32 @@ try:
     logger.info("✅ Alpaca options engine loaded")
 except Exception as e:
     logger.warning(f"⚠️ Options engine import failed: {e} — options trading disabled")
+
+# ── Options Signal Generator (IVRankStrategy) ──────────────────────
+_iv_rank_strategy = None
+try:
+    from src.options.signal_generator import IVRankStrategy, Signal, SignalType, SignalSource
+    _iv_rank_strategy = IVRankStrategy()
+    logger.info("✅ IVRankStrategy signal generator loaded")
+except Exception as e:
+    logger.warning(f"⚠️ IVRankStrategy import failed: {e} — using fallback IV logic")
+
+# ── Options Contract Resolver ──────────────────────────────────────
+_contract_resolver = None
+try:
+    from src.options.contract_resolver import (
+        OptionContractResolver, ResolvedContract, ResolvedSpread, ResolvedIronCondor
+    )
+    if _options_engine is not None:
+        _contract_resolver = OptionContractResolver(
+            trading_client=_options_engine.trading_client,
+            data_client=_options_engine.data_client,
+        )
+        logger.info("✅ Contract resolver loaded (spread + iron condor resolution)")
+    else:
+        logger.warning("⚠️ Contract resolver skipped — options engine not available")
+except Exception as e:
+    logger.warning(f"⚠️ Contract resolver import failed: {e} — using fallback chain logic")
 
 # ── Enhanced ML Retrainer ───────────────────────────────────────────
 _ml_retrainer = None
@@ -1617,9 +1652,11 @@ class UnifiedTrader:
         if self.cfg.options_enabled:
             self._check_options_exits(equity)
 
-        # 9. Options scan (every N minutes, only in allowed regimes)
-        if self.cfg.options_enabled and regime.regime in self.cfg.options_regimes_allowed:
-            self._maybe_run_options_scan(equity, regime)
+        # 9. Options scan (every N minutes — sell in allowed regimes, buy in vol regimes)
+        if self.cfg.options_enabled:
+            all_options_regimes = set(self.cfg.options_regimes_allowed) | set(self.cfg.options_buy_regimes)
+            if regime.regime in all_options_regimes:
+                self._maybe_run_options_scan(equity, regime)
 
         # 10. Scan for new equity entries (if regime allows)
         if not skip_new_longs and len(self.positions) < self.cfg.max_open_positions:
@@ -1946,7 +1983,7 @@ class UnifiedTrader:
                 f"| {', '.join(sig.reasons)}"
             )
 
-    # ── Options scan (iron condors / credit spreads) ────────────────
+    # ── Options scan (iron condors / credit spreads / straddles) ──────
     def _maybe_run_options_scan(self, equity: float, regime: AlpacaRegimeResult):
         """Run options scan if enough time has elapsed since last scan."""
         now = datetime.now()
@@ -1959,16 +1996,20 @@ class UnifiedTrader:
 
     def _run_options_scan(self, equity: float, regime: AlpacaRegimeResult):
         """
-        Scan for premium-selling opportunities.
+        Scan for options opportunities using IV Rank strategy.
 
-        Strategy selection:
-          - MEAN_REVERTING / NEUTRAL → iron condors (delta-neutral)
-          - TRENDING_BULL → put credit spreads (bullish)
-        
+        Strategy selection based on IV rank:
+          HIGH IV (>50%):
+            - MEAN_REVERTING / NEUTRAL → iron condors (delta-neutral)
+            - TRENDING_BULL → put credit spreads (bullish)
+          LOW IV (<30%):
+            - HIGH_VOLATILITY / TRENDING_BEAR → straddles/strangles (long vol)
+
         Guards:
-          - IV rank must be > threshold (default 50%)
+          - IV rank thresholds enforced
           - Total options exposure < 20% of equity
           - Per-position max 5% of equity
+          - Regime must be in allowed list
         """
         if _options_engine is None:
             logger.debug("Options engine unavailable — skipping scan")
@@ -1986,7 +2027,11 @@ class UnifiedTrader:
             )
             return
 
-        logger.info(f"🔍 Options scan — regime={regime.regime}, IV threshold={self.cfg.options_iv_rank_threshold}")
+        logger.info(
+            f"🔍 Options scan — regime={regime.regime}, "
+            f"sell_threshold={self.cfg.options_iv_rank_sell_threshold}%, "
+            f"buy_threshold={self.cfg.options_iv_rank_buy_threshold}%"
+        )
 
         for underlying in self.cfg.options_underlyings:
             # Already have an options position on this underlying?
@@ -1996,56 +2041,148 @@ class UnifiedTrader:
             ):
                 continue
 
-            # IV rank check via IVAnalysisEngine
-            if _iv_engine is not None:
-                try:
-                    iv_rank = _iv_engine.get_iv_rank(underlying)
-                    if iv_rank is None:
-                        logger.debug(f"IV rank unavailable for {underlying} — skipping")
-                        continue
-                    if iv_rank < self.cfg.options_iv_rank_threshold:
-                        logger.info(
-                            f"  {underlying}: IV rank {iv_rank:.1f}% < "
-                            f"{self.cfg.options_iv_rank_threshold}% — skipping"
-                        )
-                        continue
-                    logger.info(f"  {underlying}: IV rank {iv_rank:.1f}% ✅ premium selling candidate")
-                except Exception as e:
-                    logger.warning(f"IV check failed for {underlying}: {e}")
-                    continue
-            else:
-                logger.debug("IV engine unavailable — proceeding without IV check")
+            # ── Get IV rank (prefer IVRankStrategy, fall back to IVEngine) ──
+            iv_rank = self._get_iv_rank(underlying)
+            if iv_rank is None:
+                logger.debug(f"IV rank unavailable for {underlying} — skipping")
+                continue
 
             # Per-position size cap
             per_pos_cap = equity * self.cfg.options_max_per_position_pct
 
-            # Choose strategy based on regime
-            if regime.regime in ("mean_reverting", "neutral"):
-                strategy = "iron_condor"
+            # ── HIGH IV: Sell premium (credit strategies) ──
+            if iv_rank >= self.cfg.options_iv_rank_sell_threshold:
+                if regime.regime not in self.cfg.options_regimes_allowed:
+                    logger.info(
+                        f"  {underlying}: IV rank {iv_rank:.1f}% HIGH but "
+                        f"regime {regime.regime} not allowed for selling — skip"
+                    )
+                    continue
+
+                logger.info(
+                    f"  {underlying}: IV rank {iv_rank:.1f}% ✅ "
+                    f"SELL premium candidate (regime={regime.regime})"
+                )
+
+                # Choose strategy based on regime
+                if regime.regime in ("mean_reverting", "neutral"):
+                    strategy = "iron_condor"
+                else:
+                    strategy = "put_credit_spread"
+
+                confidence = min((iv_rank - 50) / 50.0, 1.0)
+                try:
+                    self._place_options_trade(
+                        underlying, strategy, per_pos_cap,
+                        iv_rank=iv_rank, confidence=confidence,
+                        direction="sell",
+                    )
+                except Exception as e:
+                    logger.error(f"Options SELL trade failed for {underlying}: {e}")
+
+            # ── LOW IV: Buy volatility (debit strategies) ──
+            elif iv_rank <= self.cfg.options_iv_rank_buy_threshold:
+                if regime.regime not in self.cfg.options_buy_regimes:
+                    logger.info(
+                        f"  {underlying}: IV rank {iv_rank:.1f}% LOW but "
+                        f"regime {regime.regime} not in buy regimes — skip"
+                    )
+                    continue
+
+                logger.info(
+                    f"  {underlying}: IV rank {iv_rank:.1f}% ✅ "
+                    f"BUY volatility candidate (regime={regime.regime})"
+                )
+
+                strategy = "straddle"
+                confidence = min((30 - iv_rank) / 30.0, 1.0)
+                try:
+                    self._place_options_trade(
+                        underlying, strategy, per_pos_cap,
+                        iv_rank=iv_rank, confidence=confidence,
+                        direction="buy",
+                    )
+                except Exception as e:
+                    logger.error(f"Options BUY trade failed for {underlying}: {e}")
+
+            # ── NORMAL IV: No action ──
             else:
-                strategy = "put_credit_spread"
+                logger.info(
+                    f"  {underlying}: IV rank {iv_rank:.1f}% — "
+                    f"neutral zone ({self.cfg.options_iv_rank_buy_threshold}-"
+                    f"{self.cfg.options_iv_rank_sell_threshold}%) — no action"
+                )
 
-            # Attempt to find and place the trade
+    def _get_iv_rank(self, symbol: str) -> Optional[float]:
+        """
+        Get IV rank for a symbol using multiple sources.
+
+        Priority:
+          1. IVRankStrategy (from src.options.signal_generator) via IVDataManager
+          2. IVAnalysisEngine (5-level fallback with Alpaca snapshots)
+          3. None if all sources fail
+        """
+        # Try IVRankStrategy's data manager first (uses SQLite cache)
+        if _iv_rank_strategy is not None:
             try:
-                self._place_options_trade(underlying, strategy, per_pos_cap)
+                iv_rank = _iv_rank_strategy.iv_data_manager.get_iv_rank(symbol)
+                if iv_rank is not None:
+                    return iv_rank
             except Exception as e:
-                logger.error(f"Options trade placement failed for {underlying}: {e}")
-                continue
+                logger.debug(f"IVRankStrategy IV rank failed for {symbol}: {e}")
 
-    def _place_options_trade(self, underlying: str, strategy: str, max_risk: float):
+        # Fall back to IVAnalysisEngine (Alpaca snapshots + heuristics)
+        if _iv_engine is not None:
+            try:
+                iv_rank = _iv_engine.get_iv_rank(symbol)
+                if iv_rank is not None:
+                    return iv_rank
+            except Exception as e:
+                logger.debug(f"IVEngine IV rank failed for {symbol}: {e}")
+
+        return None
+
+    def _place_options_trade(self, underlying: str, strategy: str, max_risk: float,
+                             iv_rank: float = 0.0, confidence: float = 0.5,
+                             direction: str = "sell"):
         """
         Find suitable contracts and place an options trade.
 
-        For now this logs the opportunity (dry or live).  Full MLEG order
-        construction uses AlpacaOptionsEngine.get_options_chain() to find
-        strikes and submit the spread.
+        Supports both SELL (credit) and BUY (debit) strategies:
+          - SELL: iron_condor, put_credit_spread, call_credit_spread
+          - BUY:  straddle, strangle
+
+        Uses OptionContractResolver when available for better fills,
+        falls back to AlpacaOptionsEngine.get_options_chain() direct.
+
+        Args:
+            underlying: Ticker symbol (e.g., "SPY")
+            strategy: Strategy name
+            max_risk: Maximum dollar risk for this position
+            iv_rank: Current IV rank (for logging)
+            confidence: Signal confidence (0-1)
+            direction: "sell" for credit, "buy" for debit
         """
         if _options_engine is None:
             return
 
         try:
-            # Calculate target expiration
-            target_exp = (date.today() + timedelta(days=self.cfg.options_target_dte)).isoformat()
+            # Determine target DTE based on direction
+            if direction == "sell":
+                target_dte = self.cfg.options_target_dte
+            else:
+                target_dte = self.cfg.options_target_dte_buy
+
+            # ── Try ContractResolver first (better strike selection) ──
+            if (self.cfg.options_use_contract_resolver and _contract_resolver is not None
+                    and strategy in ("iron_condor", "put_credit_spread", "call_credit_spread")):
+                placed = self._place_via_resolver(underlying, strategy, max_risk,
+                                                   target_dte, iv_rank, confidence)
+                if placed:
+                    return
+
+            # ── Fallback / BUY strategies: use direct chain ──
+            target_exp = (date.today() + timedelta(days=target_dte)).isoformat()
 
             # Fetch chain near target expiration
             chain = _options_engine.get_options_chain(underlying, expiration_date=target_exp)
@@ -2058,7 +2195,7 @@ class UnifiedTrader:
             if price is None:
                 return
 
-            # Filter for ATM options (within 5% of price)
+            # Filter for near-ATM options (within 5% of price)
             atm_puts = [c for c in chain if c.option_type == "put"
                         and abs(c.strike - price) / price < 0.05 and c.mid > 0.10]
             atm_calls = [c for c in chain if c.option_type == "call"
@@ -2072,26 +2209,47 @@ class UnifiedTrader:
             atm_puts.sort(key=lambda c: c.strike)
             atm_calls.sort(key=lambda c: c.strike)
 
+            legs = []
+            credit = 0.0
+            debit = 0.0
+            max_loss_per_contract = 0.0
+            exp_str = target_exp
+
             if strategy == "put_credit_spread":
-                # Sell higher-strike put, buy lower-strike put
                 if len(atm_puts) < 2:
                     return
-                short_put = atm_puts[-1]  # Higher strike (closer to ATM)
-                long_put = atm_puts[0]    # Lower strike (further OTM)
+                short_put = atm_puts[-1]
+                long_put = atm_puts[0]
                 credit = short_put.mid - long_put.mid
                 spread_width = short_put.strike - long_put.strike
                 if spread_width <= 0 or credit <= 0:
                     return
                 max_loss_per_contract = (spread_width - credit) * 100
                 contracts = max(1, int(max_risk / max_loss_per_contract))
-
                 legs = [
                     {"symbol": short_put.symbol, "side": "sell", "qty": contracts},
                     {"symbol": long_put.symbol, "side": "buy", "qty": contracts},
                 ]
+                exp_str = short_put.expiration
+
+            elif strategy == "call_credit_spread":
+                if len(atm_calls) < 2:
+                    return
+                short_call = atm_calls[0]
+                long_call = atm_calls[-1]
+                credit = short_call.mid - long_call.mid
+                spread_width = long_call.strike - short_call.strike
+                if spread_width <= 0 or credit <= 0:
+                    return
+                max_loss_per_contract = (spread_width - credit) * 100
+                contracts = max(1, int(max_risk / max_loss_per_contract))
+                legs = [
+                    {"symbol": short_call.symbol, "side": "sell", "qty": contracts},
+                    {"symbol": long_call.symbol, "side": "buy", "qty": contracts},
+                ]
+                exp_str = short_call.expiration
 
             elif strategy == "iron_condor":
-                # Sell put spread + sell call spread
                 if len(atm_puts) < 2 or len(atm_calls) < 2:
                     return
                 short_put = atm_puts[-1]
@@ -2108,26 +2266,79 @@ class UnifiedTrader:
                     return
                 max_loss_per_contract = (max_spread - credit) * 100
                 contracts = max(1, int(max_risk / max_loss_per_contract))
-
                 legs = [
                     {"symbol": short_put.symbol, "side": "sell", "qty": contracts},
                     {"symbol": long_put.symbol, "side": "buy", "qty": contracts},
                     {"symbol": short_call.symbol, "side": "sell", "qty": contracts},
                     {"symbol": long_call.symbol, "side": "buy", "qty": contracts},
                 ]
+                exp_str = short_put.expiration
+
+            elif strategy == "straddle":
+                # BUY ATM put + ATM call (long volatility)
+                # Find the closest-to-ATM put and call
+                best_put = min(atm_puts, key=lambda c: abs(c.strike - price))
+                best_call = min(atm_calls, key=lambda c: abs(c.strike - price))
+                debit = best_put.mid + best_call.mid
+                if debit <= 0:
+                    return
+                max_loss_per_contract = debit * 100  # Max loss = total debit
+                contracts = max(1, int(max_risk / max_loss_per_contract))
+                legs = [
+                    {"symbol": best_put.symbol, "side": "buy", "qty": contracts},
+                    {"symbol": best_call.symbol, "side": "buy", "qty": contracts},
+                ]
+                exp_str = best_put.expiration
+
+            elif strategy == "strangle":
+                # BUY OTM put + OTM call (cheaper vol bet)
+                otm_puts = [c for c in atm_puts if c.strike < price * 0.97]
+                otm_calls = [c for c in atm_calls if c.strike > price * 1.03]
+                if not otm_puts or not otm_calls:
+                    # Fall back to widest available
+                    otm_puts = atm_puts[:1]
+                    otm_calls = atm_calls[-1:]
+                if not otm_puts or not otm_calls:
+                    return
+                buy_put = otm_puts[-1]   # Highest OTM put
+                buy_call = otm_calls[0]  # Lowest OTM call
+                debit = buy_put.mid + buy_call.mid
+                if debit <= 0:
+                    return
+                max_loss_per_contract = debit * 100
+                contracts = max(1, int(max_risk / max_loss_per_contract))
+                legs = [
+                    {"symbol": buy_put.symbol, "side": "buy", "qty": contracts},
+                    {"symbol": buy_call.symbol, "side": "buy", "qty": contracts},
+                ]
+                exp_str = buy_put.expiration
+
             else:
+                logger.warning(f"Unknown options strategy: {strategy}")
                 return
 
-            total_credit = credit * contracts * 100
+            if not legs:
+                return
+
+            total_credit = credit * contracts * 100 if direction == "sell" else 0.0
+            total_debit = debit * contracts * 100 if direction == "buy" else 0.0
             total_max_loss = max_loss_per_contract * contracts
 
             if self.dry_run:
-                logger.info(
-                    f"[DRY RUN] OPTIONS: {strategy.upper()} {underlying} "
-                    f"x{contracts} — credit=${total_credit:,.0f} max_loss=${total_max_loss:,.0f}"
-                )
+                if direction == "sell":
+                    logger.info(
+                        f"[DRY RUN] OPTIONS SELL: {strategy.upper()} {underlying} "
+                        f"x{contracts} — credit=${total_credit:,.0f} "
+                        f"max_loss=${total_max_loss:,.0f} IV={iv_rank:.1f}%"
+                    )
+                else:
+                    logger.info(
+                        f"[DRY RUN] OPTIONS BUY: {strategy.upper()} {underlying} "
+                        f"x{contracts} — debit=${total_debit:,.0f} "
+                        f"max_loss=${total_max_loss:,.0f} IV={iv_rank:.1f}%"
+                    )
             else:
-                # Place individual leg orders (Alpaca paper may not support MLEG)
+                # Place individual leg orders
                 for leg in legs:
                     try:
                         _options_engine.place_option_order(
@@ -2138,13 +2349,127 @@ class UnifiedTrader:
                     except Exception as e:
                         logger.error(f"Options leg order failed: {leg} — {e}")
                         return
+                action = "SELL" if direction == "sell" else "BUY"
+                amount = total_credit if direction == "sell" else total_debit
                 logger.info(
-                    f"✅ OPTIONS: {strategy.upper()} {underlying} "
-                    f"x{contracts} — credit=${total_credit:,.0f}"
+                    f"✅ OPTIONS {action}: {strategy.upper()} {underlying} "
+                    f"x{contracts} — {'credit' if direction == 'sell' else 'debit'}"
+                    f"=${amount:,.0f} IV={iv_rank:.1f}%"
                 )
 
             # Track the position
-            exp_str = atm_puts[0].expiration if atm_puts else target_exp
+            self.options_positions.append(OptionsTradeRecord(
+                underlying=underlying,
+                strategy=strategy,
+                entry_time=datetime.now(),
+                expiration=exp_str,
+                credit_received=total_credit if direction == "sell" else -total_debit,
+                max_loss=total_max_loss,
+                contracts=contracts,
+                legs=legs,
+            ))
+
+        except Exception as e:
+            logger.error(f"Options trade construction failed for {underlying}: {e}")
+
+    def _place_via_resolver(self, underlying: str, strategy: str, max_risk: float,
+                             target_dte: int, iv_rank: float, confidence: float) -> bool:
+        """
+        Use OptionContractResolver for better strike selection.
+
+        Returns True if trade was placed, False to fall back to direct chain.
+        """
+        import asyncio
+
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            if strategy == "iron_condor":
+                result = loop.run_until_complete(
+                    _contract_resolver.resolve_iron_condor(
+                        symbol=underlying,
+                        target_dte=target_dte,
+                        target_delta=0.20,
+                    )
+                )
+                if result is None:
+                    logger.debug(f"Resolver: no iron condor for {underlying}")
+                    return False
+
+                credit = result.total_credit
+                max_loss_per = result.max_loss
+                if max_loss_per <= 0 or credit <= 0:
+                    return False
+
+                contracts = max(1, int(max_risk / max_loss_per))
+                total_credit = credit * contracts * 100
+                total_max_loss = max_loss_per * contracts
+
+                legs = [
+                    {"symbol": result.put_spread.short_leg.occ_symbol, "side": "sell", "qty": contracts},
+                    {"symbol": result.put_spread.long_leg.occ_symbol, "side": "buy", "qty": contracts},
+                    {"symbol": result.call_spread.short_leg.occ_symbol, "side": "sell", "qty": contracts},
+                    {"symbol": result.call_spread.long_leg.occ_symbol, "side": "buy", "qty": contracts},
+                ]
+                exp_str = str(result.put_spread.short_leg.expiration)
+
+            elif strategy in ("put_credit_spread", "call_credit_spread"):
+                spread_type = "put_spread" if strategy == "put_credit_spread" else "call_spread"
+                result = loop.run_until_complete(
+                    _contract_resolver.resolve_spread(
+                        symbol=underlying,
+                        spread_type=spread_type,
+                        target_dte=target_dte,
+                        target_delta=0.30,
+                    )
+                )
+                if result is None:
+                    logger.debug(f"Resolver: no {spread_type} for {underlying}")
+                    return False
+
+                credit = result.net_credit
+                max_loss_per = result.max_loss
+                if max_loss_per <= 0 or credit <= 0:
+                    return False
+
+                contracts = max(1, int(max_risk / max_loss_per))
+                total_credit = credit * contracts * 100
+                total_max_loss = max_loss_per * contracts
+
+                legs = [
+                    {"symbol": result.short_leg.occ_symbol, "side": "sell", "qty": contracts},
+                    {"symbol": result.long_leg.occ_symbol, "side": "buy", "qty": contracts},
+                ]
+                exp_str = str(result.short_leg.expiration)
+
+            else:
+                return False
+
+            loop.close()
+
+            if self.dry_run:
+                logger.info(
+                    f"[DRY RUN] OPTIONS (resolver): {strategy.upper()} {underlying} "
+                    f"x{contracts} — credit=${total_credit:,.0f} "
+                    f"max_loss=${total_max_loss:,.0f} IV={iv_rank:.1f}%"
+                )
+            else:
+                for leg in legs:
+                    try:
+                        _options_engine.place_option_order(
+                            symbol=leg["symbol"],
+                            qty=leg["qty"],
+                            side=leg["side"],
+                        )
+                    except Exception as e:
+                        logger.error(f"Options resolver leg failed: {leg} — {e}")
+                        return False
+                logger.info(
+                    f"✅ OPTIONS (resolver): {strategy.upper()} {underlying} "
+                    f"x{contracts} — credit=${total_credit:,.0f} IV={iv_rank:.1f}%"
+                )
+
             self.options_positions.append(OptionsTradeRecord(
                 underlying=underlying,
                 strategy=strategy,
@@ -2155,18 +2480,25 @@ class UnifiedTrader:
                 contracts=contracts,
                 legs=legs,
             ))
+            return True
 
         except Exception as e:
-            logger.error(f"Options trade construction failed for {underlying}: {e}")
+            logger.warning(f"Resolver failed for {underlying} {strategy}: {e} — falling back")
+            return False
 
     # ── Options exit management ─────────────────────────────────────
     def _check_options_exits(self, equity: float):
         """
         Manage open options positions: take profit, stop loss, DTE close.
 
-        Exit rules:
+        Exit rules for CREDIT trades (iron condors, credit spreads):
           - 50% of max profit → close (take profit)
           - Loss > 2x credit received → close (stop loss)
+          - DTE <= 7 → close (time-based)
+
+        Exit rules for DEBIT trades (straddles, strangles):
+          - Value doubled (100% gain) → close (take profit)
+          - Value dropped 50% → close (stop loss)
           - DTE <= 7 → close (time-based)
         """
         if _options_engine is None:
@@ -2179,7 +2511,6 @@ class UnifiedTrader:
             # Update current value from positions
             try:
                 positions = _options_engine.get_positions()
-                # Sum value of matching legs
                 total_val = 0.0
                 matched = 0
                 for leg in otr.legs:
@@ -2197,18 +2528,37 @@ class UnifiedTrader:
             should_close = False
             reason = ""
 
-            # Rule 1: Take profit at 50% of credit
-            if otr.pnl_pct_of_credit >= self.cfg.options_take_profit_pct:
-                should_close = True
-                reason = f"TAKE PROFIT ({otr.pnl_pct_of_credit:.0%} of credit)"
+            is_debit_trade = otr.credit_received < 0  # Negative = debit paid
 
-            # Rule 2: Stop loss at 2x credit
-            elif otr.pnl < 0 and abs(otr.pnl) >= otr.credit_received * self.cfg.options_stop_loss_mult:
-                should_close = True
-                reason = f"STOP LOSS (loss ${abs(otr.pnl):,.0f} >= {self.cfg.options_stop_loss_mult}x credit)"
+            if is_debit_trade:
+                # DEBIT trade (straddle/strangle): profit when value rises
+                entry_cost = abs(otr.credit_received)
+                if entry_cost > 0:
+                    gain_pct = (otr.current_value - entry_cost) / entry_cost
 
-            # Rule 3: Close at 7 DTE
-            elif otr.dte <= self.cfg.options_min_dte_close:
+                    # Take profit: value increased by 100%
+                    if gain_pct >= self.cfg.options_take_profit_pct_buy:
+                        should_close = True
+                        reason = f"TAKE PROFIT (long options +{gain_pct:.0%})"
+
+                    # Stop loss: value dropped by 50%
+                    elif gain_pct <= -self.cfg.options_stop_loss_pct_buy:
+                        should_close = True
+                        reason = f"STOP LOSS (long options {gain_pct:.0%})"
+            else:
+                # CREDIT trade: profit when current value decays to zero
+                # Rule 1: Take profit at 50% of credit
+                if otr.pnl_pct_of_credit >= self.cfg.options_take_profit_pct:
+                    should_close = True
+                    reason = f"TAKE PROFIT ({otr.pnl_pct_of_credit:.0%} of credit)"
+
+                # Rule 2: Stop loss at 2x credit
+                elif otr.pnl < 0 and abs(otr.pnl) >= otr.credit_received * self.cfg.options_stop_loss_mult:
+                    should_close = True
+                    reason = f"STOP LOSS (loss ${abs(otr.pnl):,.0f} >= {self.cfg.options_stop_loss_mult}x credit)"
+
+            # Rule 3: Close at 7 DTE (applies to both credit and debit)
+            if not should_close and otr.dte <= self.cfg.options_min_dte_close:
                 should_close = True
                 reason = f"DTE close ({otr.dte} DTE remaining)"
 

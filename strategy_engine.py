@@ -54,6 +54,39 @@ from pair_finder import (
     ALL_SYMBOLS,
 )
 
+# ---------------------------------------------------------------------------
+# Optional advanced modules (graceful fallback if unavailable)
+# ---------------------------------------------------------------------------
+try:
+    from src.regime_detector import HMMRegimeDetector, Regime
+    _HMM_AVAILABLE = True
+except ImportError:
+    _HMM_AVAILABLE = False
+
+try:
+    from src.quant_models.garch import GARCHModel
+    _GARCH_AVAILABLE = True
+except ImportError:
+    _GARCH_AVAILABLE = False
+
+try:
+    from src.ml_ensemble_stacker import MLEnsembleStacker
+    _STACKER_AVAILABLE = True
+except ImportError:
+    _STACKER_AVAILABLE = False
+
+try:
+    from src.order_flow_analyzer import OrderFlowAnalyzer
+    _FLOW_AVAILABLE = True
+except ImportError:
+    _FLOW_AVAILABLE = False
+
+try:
+    from src.adaptive_parameters import AdaptiveParameterTuner, TradeRecord
+    _ADAPTIVE_AVAILABLE = True
+except ImportError:
+    _ADAPTIVE_AVAILABLE = False
+
 logger = logging.getLogger("strategy_engine")
 
 
@@ -104,6 +137,13 @@ class TradeSignal:
     atr: float = 0.0                # ATR at signal time
     rsi: float = 0.0                # RSI at signal time
     adx: float = 0.0                # ADX at signal time
+
+    # Advanced module enrichment
+    regime: str = ""                # HMM regime (e.g. "trending_bull")
+    regime_confidence: float = 0.0  # HMM posterior probability for current regime
+    garch_vol: float = 0.0         # GARCH 1-day annualized vol forecast
+    flow_score: float = 0.0        # Institutional smart money score [-1, 1]
+    ml_alpha: float = 0.0          # ML ensemble stacker alpha score [0, 1]
 
     # Tracking
     timestamp: str = ""
@@ -337,6 +377,15 @@ class EngineConfig:
     # --- Data ---
     min_bars_required: int = 250        # Need at least 250 bars for 200-SMA
 
+    # --- Advanced modules (graceful fallback when unavailable) ---
+    use_hmm_regime: bool = True         # Use HMM regime instead of 200-SMA
+    use_garch_stops: bool = True        # Use GARCH vol for dynamic stops
+    use_ml_stacker: bool = True         # Score signals through ML ensemble
+    use_order_flow: bool = True         # Confirm signals with institutional flow
+    use_adaptive_params: bool = True    # Self-tune thresholds from P&L
+    hmm_high_vol_scale: float = 0.5     # Scale confidence by this in HIGH_VOL regime
+    flow_reject_threshold: float = -0.3 # Reject signals with flow score below this
+
 
 # ============================================================================
 # STRATEGY ENGINE
@@ -375,6 +424,205 @@ class StrategyEngine:
             "mean_reversion": {"wins": 0, "losses": 0, "total_pnl": 0.0},
             "momentum_regime": {"wins": 0, "losses": 0, "total_pnl": 0.0},
         }
+
+        # --- Advanced module instances (None when unavailable) ---
+        self._hmm: Optional[Any] = None
+        self._garch: Optional[Any] = None
+        self._stacker: Optional[Any] = None
+        self._flow_analyzer: Optional[Any] = None
+        self._adaptive_tuner: Optional[Any] = None
+        self._current_regime: str = "unknown"
+        self._regime_probs: Optional[np.ndarray] = None
+
+        if self.cfg.use_hmm_regime and _HMM_AVAILABLE:
+            try:
+                self._hmm = HMMRegimeDetector(n_states=4)
+                logger.info("HMM regime detector initialized")
+            except Exception as e:
+                logger.warning(f"HMM init failed: {e}")
+
+        if self.cfg.use_garch_stops and _GARCH_AVAILABLE:
+            try:
+                self._garch = GARCHModel(lookback_days=504)
+                logger.info("GARCH volatility model initialized")
+            except Exception as e:
+                logger.warning(f"GARCH init failed: {e}")
+
+        if self.cfg.use_ml_stacker and _STACKER_AVAILABLE:
+            try:
+                self._stacker = MLEnsembleStacker()
+                logger.info("ML ensemble stacker initialized")
+            except Exception as e:
+                logger.warning(f"ML stacker init failed: {e}")
+
+        if self.cfg.use_order_flow and _FLOW_AVAILABLE:
+            try:
+                self._flow_analyzer = OrderFlowAnalyzer()
+                logger.info("Order flow analyzer initialized")
+            except Exception as e:
+                logger.warning(f"Order flow init failed: {e}")
+
+        if self.cfg.use_adaptive_params and _ADAPTIVE_AVAILABLE:
+            try:
+                self._adaptive_tuner = AdaptiveParameterTuner()
+                logger.info("Adaptive parameter tuner initialized")
+            except Exception as e:
+                logger.warning(f"Adaptive tuner init failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Advanced module helpers
+    # ------------------------------------------------------------------
+
+    def _detect_regime(self, price_data: pd.DataFrame) -> Tuple[str, float]:
+        """
+        Detect market regime via HMM (or 200-SMA fallback).
+
+        Returns (regime_name, confidence) e.g. ("trending_bull", 0.72).
+        """
+        if self._hmm is None:
+            return "unknown", 0.0
+
+        try:
+            # Build feature matrix from a representative symbol (SPY or first col)
+            ref_sym = "SPY" if "SPY" in price_data.columns else price_data.columns[0]
+            prices = price_data[ref_sym].dropna().values.astype(float)
+            if len(prices) < 60:
+                return "unknown", 0.0
+
+            # Daily log returns
+            returns = np.diff(np.log(prices))
+
+            # 20-day realised vol (annualized)
+            vol_window = 20
+            volatility = np.array([
+                np.std(returns[max(0, i - vol_window):i]) * np.sqrt(252)
+                if i >= vol_window else np.std(returns[:max(1, i)]) * np.sqrt(252)
+                for i in range(1, len(returns) + 1)
+            ])
+
+            # Momentum sign (10-day cumulative return)
+            mom = np.array([
+                np.sign(np.sum(returns[max(0, i - 10):i]))
+                for i in range(1, len(returns) + 1)
+            ])
+
+            # Fit if not yet fitted
+            if not self._hmm.is_fitted:
+                self._hmm.fit(returns, volatility, mom)
+
+            state_idx, probs = self._hmm.predict(returns, volatility, mom)
+            regime = self._hmm.state_to_regime(state_idx)
+            confidence = float(probs[state_idx])
+
+            regime_name = regime.value if hasattr(regime, 'value') else str(regime)
+            self._current_regime = regime_name
+            self._regime_probs = probs
+
+            logger.info(f"HMM regime: {regime_name} (conf={confidence:.2f})")
+            return regime_name, confidence
+
+        except Exception as e:
+            logger.warning(f"HMM regime detection failed: {e}")
+            return "unknown", 0.0
+
+    def _get_garch_vol(self, prices: np.ndarray) -> float:
+        """
+        Get GARCH 1-day ahead annualized vol forecast.
+        Returns 0.0 if unavailable (caller falls back to ATR).
+        """
+        if self._garch is None or len(prices) < 60:
+            return 0.0
+
+        try:
+            returns = np.diff(np.log(prices))
+            params, _, sigma2 = self._garch.fit(returns)
+            eps = returns - np.mean(returns)
+            forecasts = self._garch.forecast(params, eps[-1], sigma2[-1], horizon=1)
+            return forecasts[0] if forecasts else 0.0
+        except Exception as e:
+            logger.debug(f"GARCH forecast failed: {e}")
+            return 0.0
+
+    def _get_flow_signal(self, symbol: str, ohlcv_data: Optional[Dict[str, pd.DataFrame]]) -> Tuple[float, str]:
+        """
+        Get institutional flow score for a symbol.
+        Returns (smart_money_score, bias_string).
+        Score is in [-1, 1]: positive = accumulation, negative = distribution.
+        """
+        if self._flow_analyzer is None or ohlcv_data is None:
+            return 0.0, "neutral"
+
+        try:
+            if symbol not in ohlcv_data:
+                return 0.0, "neutral"
+            df = ohlcv_data[symbol]
+            # Convert DataFrame rows to list of dicts for OrderFlowAnalyzer
+            bars = []
+            for _, row in df.tail(60).iterrows():
+                bars.append({
+                    'open': float(row.get('open', row.get('Open', 0))),
+                    'high': float(row.get('high', row.get('High', 0))),
+                    'low': float(row.get('low', row.get('Low', 0))),
+                    'close': float(row.get('close', row.get('Close', 0))),
+                    'volume': float(row.get('volume', row.get('Volume', 0))),
+                })
+            if len(bars) < 20:
+                return 0.0, "neutral"
+
+            flow = self._flow_analyzer.analyze(symbol, bars)
+            return flow.smart_money_score, flow.trade_bias
+        except Exception as e:
+            logger.debug(f"Flow analysis failed for {symbol}: {e}")
+            return 0.0, "neutral"
+
+    def _apply_regime_scaling(self, signal: TradeSignal, regime: str, regime_conf: float) -> TradeSignal:
+        """
+        Scale signal confidence based on current regime.
+
+        - HIGH_VOLATILITY: reduce confidence (risky)
+        - MEAN_REVERTING regime + MR strategy: boost confidence
+        - TRENDING regime + MOMENTUM strategy: boost confidence
+        - Mismatch (e.g. momentum in mean-reverting): reduce
+        """
+        signal.regime = regime
+        signal.regime_confidence = regime_conf
+
+        if regime == "high_volatility":
+            signal.confidence *= self.cfg.hmm_high_vol_scale
+            signal.position_size_pct *= self.cfg.hmm_high_vol_scale
+        elif regime == "mean_reverting" and signal.strategy == StrategyType.MEAN_REVERSION:
+            signal.confidence = min(0.95, signal.confidence * 1.15)
+        elif regime in ("trending_bull", "trending_bear") and signal.strategy == StrategyType.MOMENTUM:
+            signal.confidence = min(0.95, signal.confidence * 1.10)
+        elif regime == "mean_reverting" and signal.strategy == StrategyType.MOMENTUM:
+            signal.confidence *= 0.7  # Momentum in ranging market = bad
+
+        return signal
+
+    def _enrich_with_flow(self, signal: TradeSignal, ohlcv_data: Optional[Dict[str, pd.DataFrame]]) -> Optional[TradeSignal]:
+        """
+        Enrich signal with order flow data. Returns None if flow rejects the signal.
+        """
+        flow_score, flow_bias = self._get_flow_signal(signal.symbol, ohlcv_data)
+        signal.flow_score = flow_score
+
+        # Reject if institutional flow strongly opposes the signal
+        if signal.direction == SignalDirection.LONG and flow_score < self.cfg.flow_reject_threshold:
+            logger.info(f"Flow REJECTS {signal.symbol} LONG (score={flow_score:.2f})")
+            return None
+        if signal.direction == SignalDirection.SHORT and flow_score > -self.cfg.flow_reject_threshold:
+            # For shorts, positive flow (accumulation) is opposing
+            if flow_score > abs(self.cfg.flow_reject_threshold):
+                logger.info(f"Flow REJECTS {signal.symbol} SHORT (score={flow_score:.2f})")
+                return None
+
+        # Boost confidence if flow agrees
+        if signal.direction == SignalDirection.LONG and flow_score > 0.3:
+            signal.confidence = min(0.95, signal.confidence * (1 + flow_score * 0.2))
+        elif signal.direction == SignalDirection.SHORT and flow_score < -0.3:
+            signal.confidence = min(0.95, signal.confidence * (1 + abs(flow_score) * 0.2))
+
+        return signal
 
     # ------------------------------------------------------------------
     # Main entry point — get all signals
@@ -416,6 +664,21 @@ class StrategyEngine:
         all_signals: List[TradeSignal] = []
         timestamp = datetime.now().isoformat()
 
+        # --- Detect regime via HMM (before scanning strategies) ---
+        regime, regime_conf = self._detect_regime(price_data)
+
+        # --- Get adaptive parameter adjustments ---
+        adjustments = None
+        if self._adaptive_tuner is not None:
+            try:
+                adjustments = self._adaptive_tuner.get_adjustments(regime)
+                if adjustments.skip_next_n_signals > 0:
+                    logger.info(f"Adaptive cooldown: skipping {adjustments.skip_next_n_signals} signals")
+                    return []
+                logger.debug(f"Adaptive adjustments: {adjustments.describe()}")
+            except Exception as e:
+                logger.debug(f"Adaptive params failed: {e}")
+
         # Refresh cointegrated pairs if needed
         self._refresh_pairs_if_needed(price_data, volume_data)
 
@@ -442,13 +705,70 @@ class StrategyEngine:
         else:
             logger.info("Momentum skipped — stat-arb strategies have signals")
 
+        # --- Post-processing: apply regime scaling ---
+        if regime != "unknown":
+            all_signals = [
+                self._apply_regime_scaling(s, regime, regime_conf)
+                for s in all_signals
+            ]
+
+        # --- Post-processing: order flow confirmation ---
+        if self._flow_analyzer is not None:
+            filtered = []
+            for sig in all_signals:
+                enriched = self._enrich_with_flow(sig, ohlcv_data)
+                if enriched is not None:
+                    filtered.append(enriched)
+                # CLOSE signals always pass
+                elif sig.direction == SignalDirection.CLOSE:
+                    filtered.append(sig)
+            rejected = len(all_signals) - len(filtered)
+            if rejected > 0:
+                logger.info(f"Order flow rejected {rejected} signals")
+            all_signals = filtered
+
+        # --- Post-processing: adaptive parameter adjustments ---
+        if adjustments is not None:
+            for sig in all_signals:
+                sig.position_size_pct *= adjustments.position_size_mult
+                # Clamp to max
+                sig.position_size_pct = min(sig.position_size_pct, self.cfg.max_position_pct)
+                # Adjust stops via ATR multiplier
+                if sig.stop_price > 0 and sig.atr > 0:
+                    if sig.direction == SignalDirection.LONG:
+                        sig.stop_price = sig.entry_price - sig.atr * self.cfg.mr_atr_stop_mult * adjustments.atr_stop_mult
+                    elif sig.direction == SignalDirection.SHORT:
+                        sig.stop_price = sig.entry_price + sig.atr * self.cfg.mr_atr_stop_mult * adjustments.atr_stop_mult
+                    sig.stop_price = round(sig.stop_price, 2)
+
+        # --- Post-processing: ML ensemble scoring (if fitted) ---
+        if self._stacker is not None:
+            try:
+                if hasattr(self._stacker, '_is_fitted') and self._stacker._is_fitted:
+                    for sig in all_signals:
+                        features = np.array([[
+                            sig.confidence, sig.z_score, sig.rsi, sig.adx,
+                            sig.atr, sig.flow_score, sig.regime_confidence,
+                        ]])
+                        result = self._stacker.predict_single(features)
+                        sig.ml_alpha = result.alpha_score
+                        # Blend: 60% original confidence + 40% ML alpha
+                        sig.confidence = 0.6 * sig.confidence + 0.4 * result.alpha_score
+            except Exception as e:
+                logger.debug(f"ML stacker scoring failed: {e}")
+
+        # Filter below minimum confidence
+        all_signals = [s for s in all_signals if s.confidence >= self.cfg.min_confidence
+                       or s.direction == SignalDirection.CLOSE]
+
         # Sort by confidence (highest first)
         all_signals.sort(key=lambda s: s.confidence, reverse=True)
 
         logger.info(
             f"Strategy engine: {len(all_signals)} total signals "
             f"(pairs={len(pairs_signals)}, mr={len(mr_signals)}, "
-            f"mom={len(all_signals) - len(pairs_signals) - len(mr_signals)})"
+            f"mom={len(all_signals) - len(pairs_signals) - len(mr_signals)}) "
+            f"regime={regime}"
         )
 
         return all_signals
@@ -775,8 +1095,15 @@ class StrategyEngine:
                     rsi < self.cfg.mr_rsi_oversold and
                     vol_ratio >= self.cfg.mr_volume_spike):
 
-                # Stop: 1.5x ATR below entry
-                stop_price = round(current_price - self.cfg.mr_atr_stop_mult * atr, 2)
+                # GARCH-enhanced stop: use max of ATR-based and GARCH-based
+                atr_stop_dist = self.cfg.mr_atr_stop_mult * atr
+                garch_vol = self._get_garch_vol(prices)
+                if garch_vol > 0:
+                    garch_stop_dist = current_price * garch_vol / np.sqrt(252) * 2.0
+                    stop_dist = max(atr_stop_dist, garch_stop_dist)
+                else:
+                    stop_dist = atr_stop_dist
+                stop_price = round(current_price - stop_dist, 2)
                 # Target: 20-day SMA (the mean we're reverting to)
                 target_price = round(middle_bb, 2)
 
@@ -825,7 +1152,15 @@ class StrategyEngine:
                     rsi > self.cfg.mr_rsi_overbought and
                     vol_ratio >= self.cfg.mr_volume_spike):
 
-                stop_price = round(current_price + self.cfg.mr_atr_stop_mult * atr, 2)
+                # GARCH-enhanced stop for SHORT
+                atr_stop_dist = self.cfg.mr_atr_stop_mult * atr
+                garch_vol = self._get_garch_vol(prices)
+                if garch_vol > 0:
+                    garch_stop_dist = current_price * garch_vol / np.sqrt(252) * 2.0
+                    stop_dist = max(atr_stop_dist, garch_stop_dist)
+                else:
+                    stop_dist = atr_stop_dist
+                stop_price = round(current_price + stop_dist, 2)
                 target_price = round(middle_bb, 2)
 
                 bb_distance = (current_price - upper_bb) / (upper_bb - lower_bb) if (upper_bb - lower_bb) > 0 else 0
@@ -914,8 +1249,25 @@ class StrategyEngine:
             if current_price < 10:
                 continue
 
-            # 200-day SMA — regime filter
+            # 200-day SMA — regime filter (enhanced by HMM when available)
             sma_200 = compute_sma(prices, self.cfg.mom_sma_period)
+
+            # HMM-enhanced regime: if HMM detected regime, use it;
+            # otherwise fall back to price-vs-SMA200.
+            hmm_is_bullish = self._current_regime == "trending_bull"
+            hmm_is_bearish = self._current_regime == "trending_bear"
+            hmm_skip_momentum = self._current_regime in ("mean_reverting", "high_volatility")
+
+            if self._hmm is not None and self._current_regime != "unknown":
+                # HMM regime overrides SMA filter
+                is_bullish = hmm_is_bullish
+                is_bearish = hmm_is_bearish
+                if hmm_skip_momentum:
+                    continue  # Mean-reverting/high-vol → skip momentum
+            else:
+                # Fallback: original SMA regime filter
+                is_bullish = current_price > sma_200
+                is_bearish = current_price < sma_200
 
             # 20-day EMA — pullback level
             ema_20 = compute_ema(prices, self.cfg.mom_ema_period)
@@ -947,14 +1299,22 @@ class StrategyEngine:
                 daily_ranges = np.abs(np.diff(prices[-15:]))
                 atr = float(np.mean(daily_ranges))
 
-            # === LONG: price above 200-SMA, pulling back to 20-EMA, strong trend ===
-            if (current_price > sma_200 and             # Bullish regime
+            # === LONG: bullish regime, pulling back to 20-EMA, strong trend ===
+            if (is_bullish and                           # Bullish regime (HMM or SMA)
                     adx > self.cfg.mom_adx_threshold and    # Confirmed trend
                     current_price <= ema_20 * 1.02 and      # At or below 20-EMA (pullback)
                     current_price >= ema_20 * 0.96):        # Not too far below (still in trend)
 
-                # Trailing stop at 2x ATR below entry
-                stop_price = round(current_price - self.cfg.mom_atr_trail_mult * atr, 2)
+                # GARCH-enhanced stop: use max of ATR-based and GARCH-based distance
+                atr_stop_dist = self.cfg.mom_atr_trail_mult * atr
+                garch_vol = self._get_garch_vol(prices)
+                if garch_vol > 0:
+                    # 2-sigma daily move from GARCH
+                    garch_stop_dist = current_price * garch_vol / np.sqrt(252) * 2.0
+                    stop_dist = max(atr_stop_dist, garch_stop_dist)
+                else:
+                    stop_dist = atr_stop_dist
+                stop_price = round(current_price - stop_dist, 2)
 
                 # Target: project the trend forward
                 trend_strength = (current_price - sma_200) / sma_200
@@ -978,22 +1338,31 @@ class StrategyEngine:
                     target_price=target_price,
                     strategy_source=(
                         f"MOM LONG: pullback to EMA20 ${ema_20:.2f}, "
-                        f"above SMA200 ${sma_200:.2f}, ADX={adx:.0f}, "
-                        f"trend={trend_strength:+.1%}"
+                        f"regime={'HMM:'+self._current_regime if self._hmm else 'SMA200:'+str(round(sma_200,2))}, "
+                        f"ADX={adx:.0f}, trend={trend_strength:+.1%}"
                     ),
+                    garch_vol=garch_vol if garch_vol > 0 else None,
                     atr=atr,
                     adx=adx,
                     timestamp=timestamp,
                 ))
                 mom_count += 1
 
-            # === SHORT: price below 200-SMA, bouncing to 20-EMA, strong downtrend ===
-            elif (current_price < sma_200 and
+            # === SHORT: bearish regime, bouncing to 20-EMA, strong downtrend ===
+            elif (is_bearish and
                     adx > self.cfg.mom_adx_threshold and
                     current_price >= ema_20 * 0.98 and
                     current_price <= ema_20 * 1.04):
 
-                stop_price = round(current_price + self.cfg.mom_atr_trail_mult * atr, 2)
+                # GARCH-enhanced stop for SHORT
+                atr_stop_dist = self.cfg.mom_atr_trail_mult * atr
+                garch_vol = self._get_garch_vol(prices)
+                if garch_vol > 0:
+                    garch_stop_dist = current_price * garch_vol / np.sqrt(252) * 2.0
+                    stop_dist = max(atr_stop_dist, garch_stop_dist)
+                else:
+                    stop_dist = atr_stop_dist
+                stop_price = round(current_price + stop_dist, 2)
                 trend_strength = (sma_200 - current_price) / sma_200
                 target_price = round(current_price * (1.0 - trend_strength), 2)
 
@@ -1012,9 +1381,10 @@ class StrategyEngine:
                     target_price=target_price,
                     strategy_source=(
                         f"MOM SHORT: bounce to EMA20 ${ema_20:.2f}, "
-                        f"below SMA200 ${sma_200:.2f}, ADX={adx:.0f}, "
-                        f"trend={trend_strength:+.1%}"
+                        f"regime={'HMM:'+self._current_regime if self._hmm else 'SMA200:'+str(round(sma_200,2))}, "
+                        f"ADX={adx:.0f}, trend={trend_strength:+.1%}"
                     ),
+                    garch_vol=garch_vol if garch_vol > 0 else None,
                     atr=atr,
                     adx=adx,
                     timestamp=timestamp,
@@ -1031,6 +1401,18 @@ class StrategyEngine:
         self,
         strategy: str,
         pnl: float,
+        *,
+        symbol: str = "",
+        entry_time: Optional[datetime] = None,
+        exit_time: Optional[datetime] = None,
+        pnl_pct: float = 0.0,
+        holding_bars: int = 0,
+        regime: str = "",
+        composite_score: float = 0.0,
+        ml_confidence: float = 0.0,
+        atr_pct: float = 0.0,
+        stop_distance_pct: float = 0.0,
+        exit_reason: str = "manual",
     ):
         """Record a completed trade for strategy performance tracking."""
         if strategy in self._strategy_stats:
@@ -1040,6 +1422,28 @@ class StrategyEngine:
                 stats["wins"] += 1
             else:
                 stats["losses"] += 1
+
+        # Feed adaptive parameter tuner (if available)
+        if self._adaptive_tuner is not None and symbol:
+            try:
+                from src.adaptive_parameters import TradeRecord as _TR
+                now = datetime.now()
+                record = _TR(
+                    symbol=symbol,
+                    entry_time=entry_time or now,
+                    exit_time=exit_time or now,
+                    pnl_pct=pnl_pct if pnl_pct else (pnl / 1.0),
+                    holding_bars=holding_bars,
+                    regime=regime or self._current_regime,
+                    composite_score=composite_score,
+                    ml_confidence=ml_confidence,
+                    atr_pct=atr_pct,
+                    stop_distance_pct=stop_distance_pct,
+                    exit_reason=exit_reason,
+                )
+                self._adaptive_tuner.record_trade(record)
+            except Exception:
+                pass  # adaptive tuner is best-effort
 
     def get_strategy_stats(self) -> Dict[str, dict]:
         """Get win rate and P&L stats per strategy."""

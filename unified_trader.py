@@ -137,8 +137,8 @@ SECTOR_MAP = {
     "SPY": "etf", "QQQ": "etf", "IWM": "etf",
     "XLF": "etf", "XLE": "etf", "XLV": "etf",
 }
-SECTOR_MAX_PCT = 0.40        # Max 40% equity per sector
-SECTOR_MAX_POSITIONS = 4     # Max 4 positions per sector
+SECTOR_MAX_PCT = 0.25        # Max 25% equity per sector
+SECTOR_MAX_POSITIONS = 3     # Max 3 positions per sector
 
 # ============================================================================
 # CONFIGURATION
@@ -154,30 +154,38 @@ class UnifiedConfig:
     market_close_hour: int = 15
     market_close_min: int = 50         # Stop 10 min before close
 
-    # Position sizing (Full-Kelly, capped)
-    max_position_pct: float = 0.08     # 8% max per position
-    min_position_pct: float = 0.01     # 1% min
-    kelly_fraction: float = 1.00       # Full-Kelly
-    default_position_pct: float = 0.04 # 4% default before Kelly history
+    # Position sizing (Quarter-Kelly, capped at 5%)
+    max_position_pct: float = 0.05     # 5% max per position (was 8%)
+    min_position_pct: float = 0.005    # 0.5% min
+    kelly_fraction: float = 0.25       # Quarter-Kelly (was 1.0 Full-Kelly)
+    default_position_pct: float = 0.025 # 2.5% default before Kelly history
 
     # ATR stops
     atr_period: int = 14
-    atr_mult_volatile: float = 2.0     # 2x ATR for volatile stocks
-    atr_mult_stable: float = 1.5       # 1.5x ATR for stable stocks
+    atr_mult_volatile: float = 2.5     # 2.5x ATR for volatile stocks
+    atr_mult_stable: float = 2.0       # 2.0x ATR for stable stocks
     volatility_threshold: float = 0.02 # ATR% > 2% = volatile
+    hard_stop_pct: float = 0.08        # Hard stop loss at -8% per position
+    atr_trailing_mult: float = 2.5     # 2.5x ATR trailing stop
+    time_exit_days: int = 5            # Close positions with no profit after 5 days
 
     # Signal thresholds
-    min_composite_score: float = 0.40  # Minimum score to buy (aggressive)
-    min_tda_alignment: float = -0.5    # TDA must not be strongly negative
+    min_composite_score: float = 0.55  # Minimum score to buy (tightened from 0.40)
+    min_tda_alignment: float = -0.3    # TDA must not be strongly negative
+    min_confirming_signals: int = 3    # Require 3+ confirming signals before entry
 
     # Profit taking
-    profit_target_pct: float = 0.06    # 6% take profit
+    profit_target_pct: float = 0.06    # 6% take profit (also uses 3x ATR)
+    scaled_exit_pct: float = 0.10      # Sell 50% at +10% gain
+    scaled_exit_fraction: float = 0.50 # Fraction to sell at scaled exit
     trailing_stop_activation: float = 0.03  # Trail after 3% gain
-    trailing_stop_pct: float = 0.015   # 1.5% trail distance
+    trailing_stop_pct: float = 0.02    # 2% trail distance (was 1.5%)
 
-    # Circuit breaker
+    # Circuit breaker & risk controls
     max_daily_loss_pct: float = 0.03   # 3% daily loss halt
-    max_open_positions: int = 12
+    max_drawdown_pct: float = 0.15     # 15% max drawdown from peak → liquidate all
+    max_consecutive_losses: int = 3    # Halt after 3 consecutive losers
+    max_open_positions: int = 10       # Max 10 positions (was 12)
 
     # Limit order buffer
     limit_buffer_pct: float = 0.001    # 0.1% above last for buys
@@ -842,6 +850,15 @@ _mean_reversion = None
 _pairs_trader = None
 _smart_executor_cls = None
 PROFIT_MODULES_AVAILABLE = False
+
+# ── Risk Guardian (CRITICAL safety layer) ────────────────────────
+_risk_guardian = None
+try:
+    from risk_guardian import RiskGuardian
+    logger.info("✅ Risk Guardian module loaded")
+except Exception as e:
+    logger.warning(f"⚠️ Risk Guardian import failed: {e} — inline safety only")
+
 try:
     from src.universe_manager import UniverseManager as _UniverseManagerCls
     from src.mean_reversion_strategy import MeanReversionStrategy as _MeanRevCls
@@ -859,6 +876,22 @@ try:
     )
 except Exception as e:
     logger.warning(f"⚠️ Profitability modules import failed: {e}")
+
+
+# ── NEW: Strategy Engine + Portfolio Allocator (stat-arb core) ─────────────
+_strategy_engine = None
+_portfolio_allocator = None
+STRATEGY_ENGINE_AVAILABLE = False
+try:
+    from strategy_engine import (
+        StrategyEngine, EngineConfig, TradeSignal,
+        SignalDirection, StrategyType,
+    )
+    from portfolio_allocator import PortfolioAllocator, AllocatorConfig
+    STRATEGY_ENGINE_AVAILABLE = True
+    logger.info("✅ Strategy Engine + Portfolio Allocator loaded (stat-arb core)")
+except Exception as e:
+    logger.warning(f"⚠️ Strategy Engine import failed: {e} — using legacy scan")
 
 
 # ── Tier 1: ML Regime, Alt Data, Portfolio Optimizer, Extended Hours ─────────
@@ -1201,6 +1234,7 @@ class CompositeSignal:
     price: float
     stop_price: float
     position_size_pct: float
+    confirming_signals: int = 0  # Number of confirming signal sources
     reasons: List[str] = field(default_factory=list)
 
 
@@ -1262,14 +1296,24 @@ def compute_composite_signal(
     scores = [tech.score, regime_val, ml_conf, tda_normalized]
     confidence = float(1.0 - np.std(scores))  # Higher agreement = higher confidence
 
-    # Direction — aggressive: buy on weaker signals in bullish regime
-    if composite >= cfg.min_composite_score:
-        if regime.is_bullish:
-            direction = "BUY"
-        elif composite >= 0.55:  # still buy on strong signal even if not confirmed bullish
-            direction = "BUY"
-        else:
-            direction = "HOLD"
+    # ── Count confirming signals (MUST have >= 3 to enter) ──
+    confirming = 0
+    if tech.score > 0.55:
+        confirming += 1  # Technical bullish
+    if regime.is_bullish:
+        confirming += 1  # Regime bullish
+    if ml_conf > 0.55:
+        confirming += 1  # ML bullish
+    if tda_score > 0.1:
+        confirming += 1  # TDA supports
+    if tech.rsi < 40:
+        confirming += 1  # RSI not overbought
+    if tech.momentum > 0:
+        confirming += 1  # Positive momentum
+
+    # Direction — TIGHTENED: require min confirming signals
+    if composite >= cfg.min_composite_score and confirming >= cfg.min_confirming_signals:
+        direction = "BUY"
     elif composite <= 0.30 or regime.is_bearish:
         direction = "SELL"
     else:
@@ -1285,19 +1329,23 @@ def compute_composite_signal(
     else:
         reasons_extra = []
 
-    # ATR-based stop loss
+    # ATR-based stop loss (2.5x ATR)
     is_volatile = tech.atr_pct > cfg.volatility_threshold
     atr_mult = cfg.atr_mult_volatile if is_volatile else cfg.atr_mult_stable
     stop_price = tech.price - (tech.atr * atr_mult)
 
-    # Position sizing — Half-Kelly
+    # Also enforce hard stop at -8%
+    hard_stop = tech.price * (1 - cfg.hard_stop_pct)
+    stop_price = max(stop_price, hard_stop)  # Use the tighter (higher) stop
+
+    # Position sizing — Quarter-Kelly with ATR volatility adjustment
     position_pct = _compute_position_size(
         composite, confidence, tech.atr_pct, regime, cfg
     )
 
     # Build reasons
     reasons = []
-    if tech.score > 0.6:
+    if tech.score > 0.55:
         reasons.append(f"Tech bullish ({tech.score:.2f})")
     elif tech.score < 0.4:
         reasons.append(f"Tech bearish ({tech.score:.2f})")
@@ -1305,14 +1353,15 @@ def compute_composite_signal(
         reasons.append(f"Regime: {regime.regime}")
     else:
         reasons.append(f"⚠️ Regime: {regime.regime}")
-    if tda_score > 0.2:
+    if tda_score > 0.1:
         reasons.append(f"TDA supports ({tda_score:.2f})")
     elif tda_score < -0.2:
         reasons.append(f"TDA warns ({tda_score:.2f})")
-    if ml_conf > 0.6:
+    if ml_conf > 0.55:
         reasons.append(f"ML bullish ({ml_conf:.2f})")
     elif ml_conf < 0.4:
         reasons.append(f"ML bearish ({ml_conf:.2f})")
+    reasons.append(f"Confirming: {confirming}/{cfg.min_confirming_signals}")
     reasons.extend(reasons_extra)
 
     return CompositeSignal(
@@ -1329,6 +1378,7 @@ def compute_composite_signal(
         price=tech.price,
         stop_price=round(stop_price, 2),
         position_size_pct=position_pct,
+        confirming_signals=confirming,
         reasons=reasons,
     )
 
@@ -1341,10 +1391,16 @@ def _compute_position_size(
     cfg: UnifiedConfig,
 ) -> float:
     """
-    Half-Kelly position sizing, capped at 5%.
-    
-    If Kelly sizer available, use it. Otherwise, heuristic sizing
-    based on signal strength and volatility.
+    Quarter-Kelly position sizing with ATR volatility adjustment, capped at 5%.
+
+    Sizing pipeline:
+      1. Start from Kelly sizer or default (2.5%)
+      2. Apply quarter-Kelly fraction (0.25)
+      3. Scale by signal strength (composite score)
+      4. Scale by inverse ATR volatility (higher vol → smaller position)
+      5. Scale by confidence level
+      6. Scale down in adverse regimes
+      7. Hard cap at 5% per position
     """
     if _kelly_sizer is not None:
         try:
@@ -1353,27 +1409,34 @@ def _compute_position_size(
         except Exception:
             base_pct = cfg.default_position_pct
     else:
-        base_pct = cfg.default_position_pct
+        # Heuristic: default * quarter-Kelly fraction
+        base_pct = cfg.default_position_pct * cfg.kelly_fraction
 
-    # Scale by composite signal strength (aggressive: less penalty for weaker signals)
-    signal_scale = float(np.clip(composite, 0.6, 1.0))
+    # Scale by composite signal strength (tighter: penalize weak signals more)
+    signal_scale = float(np.clip(composite, 0.4, 1.0))
     base_pct *= signal_scale
 
-    # Scale by inverse volatility (reduced penalty)
-    vol_scale = min(1.0, 0.03 / max(atr_pct, 0.005))
+    # ATR-based volatility adjustment: target ~1.5% daily ATR
+    # Higher ATR → proportionally smaller position
+    vol_target = 0.015
+    vol_scale = min(1.0, vol_target / max(atr_pct, 0.005))
     base_pct *= vol_scale
 
-    # Scale by regime (aggressive: higher allocation across regimes)
+    # Confidence scaling: lower confidence → smaller position
+    conf_scale = max(0.5, min(confidence, 1.0))
+    base_pct *= conf_scale
+
+    # Scale by regime (conservative: much lower in bad regimes)
     regime_scales = {
-        "trending_bull": 1.0, "strong_bull": 1.0, "bull": 1.0,
-        "mean_reverting": 0.9, "neutral": 0.8,
-        "high_volatility": 0.6, "trending_bear": 0.4,
-        "bear": 0.3, "strong_bear": 0.15, "crisis": 0.05,
+        "trending_bull": 1.0, "strong_bull": 1.0, "bull": 0.9,
+        "mean_reverting": 0.75, "neutral": 0.6,
+        "high_volatility": 0.35, "trending_bear": 0.2,
+        "bear": 0.15, "strong_bear": 0.05, "crisis": 0.0,
     }
-    regime_scale = regime_scales.get(regime.regime, 0.5)
+    regime_scale = regime_scales.get(regime.regime, 0.4)
     base_pct *= regime_scale
 
-    # Clamp to [min, max]
+    # Clamp to [min, max] — hard cap at 5%
     return float(np.clip(base_pct, cfg.min_position_pct, cfg.max_position_pct))
 
 
@@ -1680,6 +1743,34 @@ class UnifiedTrader:
         self._total_win_return = 0.0
         self._total_loss_return = 0.0
 
+        # ── Risk Guardian (CRITICAL safety layer) ──
+        self.guardian: Optional[Any] = None
+        try:
+            if _risk_guardian is not None or True:  # Always try
+                from risk_guardian import RiskGuardian as _RG
+                account = get_account()
+                init_eq = float(account.get("equity", 100000)) if account else 100000.0
+                self.guardian = _RG(
+                    initial_equity=init_eq,
+                    max_drawdown_pct=self.cfg.max_drawdown_pct,
+                    daily_loss_limit_pct=self.cfg.max_daily_loss_pct,
+                    hard_stop_pct=self.cfg.hard_stop_pct,
+                    consecutive_loss_limit=self.cfg.max_consecutive_losses,
+                    time_exit_days=self.cfg.time_exit_days,
+                    atr_trailing_mult=self.cfg.atr_trailing_mult,
+                    max_positions=self.cfg.max_open_positions,
+                    max_sector_positions=3,
+                )
+                logger.info(
+                    f"🛡️ Risk Guardian active: DD={self.cfg.max_drawdown_pct:.0%}, "
+                    f"daily={self.cfg.max_daily_loss_pct:.0%}, "
+                    f"hard_stop={self.cfg.hard_stop_pct:.0%}, "
+                    f"consec_loss={self.cfg.max_consecutive_losses}"
+                )
+        except Exception as e:
+            logger.warning(f"⚠️ Risk Guardian init failed: {e} — using inline safety only")
+            self.guardian = None
+
         # Options tracking
         self.options_positions: List[OptionsTradeRecord] = []
         self._last_options_scan: Optional[datetime] = None
@@ -1695,6 +1786,9 @@ class UnifiedTrader:
         self._last_retrain_date: Optional[date] = None
         self._retrain_thread: Optional[threading.Thread] = None
 
+        # Partial exit tracking (scaled exits)
+        self._partial_exits_done: set = set()
+
         # Phase 3-9 components
         self.news_sentiment = _news_sentiment_cls() if _news_sentiment_cls else None
         self.economic_calendar = _economic_calendar_cls() if _economic_calendar_cls else None
@@ -1708,6 +1802,22 @@ class UnifiedTrader:
             _smart_executor_cls(submit_fn=submit_limit_order)
             if _smart_executor_cls else None
         )
+
+        # ── NEW: Strategy Engine (stat-arb) + Portfolio Allocator ──
+        self.strategy_engine: Optional[Any] = None
+        self.portfolio_alloc: Optional[Any] = None
+        if STRATEGY_ENGINE_AVAILABLE:
+            try:
+                self.strategy_engine = StrategyEngine(EngineConfig())
+                self.portfolio_alloc = PortfolioAllocator(AllocatorConfig())
+                logger.info(
+                    "📊 Strategy engine: PAIRS(50%) + MR(30%) + MOM(20%) "
+                    "| market-neutral stat-arb active"
+                )
+            except Exception as e:
+                logger.warning(f"Strategy engine init failed: {e}")
+                self.strategy_engine = None
+                self.portfolio_alloc = None
 
         # Tier 1 modules
         self.ml_regime = _ml_regime_detector_inst
@@ -1756,14 +1866,21 @@ class UnifiedTrader:
         logger.info("UNIFIED TRADER — Starting")
         logger.info(f"  Universe: {len(UNIVERSE)} symbols")
         logger.info(f"  Mode: {'DRY RUN' if self.dry_run else 'LIVE' if not self.scan_only else 'SCAN ONLY'}")
-        logger.info(f"  Max position: {self.cfg.max_position_pct:.0%}")
-        logger.info(f"  Kelly fraction: {self.cfg.kelly_fraction}")
-        logger.info(f"  ATR period: {self.cfg.atr_period}")
+        logger.info(f"  Max position: {self.cfg.max_position_pct:.0%} (5% cap)")
+        logger.info(f"  Kelly fraction: {self.cfg.kelly_fraction} (quarter-Kelly)")
+        logger.info(f"  Hard stop: {self.cfg.hard_stop_pct:.0%}")
+        logger.info(f"  ATR trailing: {self.cfg.atr_trailing_mult}x ATR")
+        logger.info(f"  Time exit: {self.cfg.time_exit_days} days")
         logger.info(f"  Daily loss halt: {self.cfg.max_daily_loss_pct:.0%}")
+        logger.info(f"  Max drawdown: {self.cfg.max_drawdown_pct:.0%} → LIQUIDATE")
+        logger.info(f"  Consecutive loss limit: {self.cfg.max_consecutive_losses}")
+        logger.info(f"  Min confirming signals: {self.cfg.min_confirming_signals}")
+        logger.info(f"  Max positions: {self.cfg.max_open_positions}")
+        logger.info(f"  Max sector positions: {SECTOR_MAX_POSITIONS}")
         logger.info(f"  Options: {'ENABLED' if self.cfg.options_enabled else 'DISABLED'}")
         logger.info(f"  ML hard filter: {'ON (min={self.cfg.ml_min_confidence})' if self.cfg.ml_hard_filter else 'OFF'}")
         logger.info(f"  Thompson sampling: {'ON' if self.cfg.thompson_enabled else 'OFF'}")
-        logger.info(f"  Retraining: {'ON (midnight EST)' if self.cfg.retraining_enabled else 'OFF'}")
+        logger.info(f"  Risk Guardian: {'ACTIVE' if self.guardian else 'INLINE ONLY'}")
         logger.info("=" * 60)
 
         # Process lock — prevent multiple bots
@@ -1826,7 +1943,38 @@ class UnifiedTrader:
 
         logger.info(f"Account: equity=${equity:,.2f}  cash=${cash:,.2f}  buying_power=${buying_power:,.2f}")
 
-        # 3. Circuit breaker check
+        # 3. Risk Guardian check (drawdown, daily loss, consecutive losses)
+        if self.guardian is not None:
+            guardian_state = self.guardian.update(equity)
+
+            # EMERGENCY: Liquidate all if drawdown exceeds 15%
+            if guardian_state.should_liquidate:
+                logger.error(
+                    f"🚨🚨🚨 EMERGENCY LIQUIDATION: {'; '.join(guardian_state.halt_reasons)} 🚨🚨🚨"
+                )
+                self.guardian.force_liquidate_all(dry_run=self.dry_run)
+                self.positions.clear()
+                save_state(self.positions, self.trade_history)
+                self.running = False
+                return
+
+            # HALT: Stop new entries but manage existing positions
+            if guardian_state.should_halt:
+                logger.warning(
+                    f"🔴 Guardian HALT: {'; '.join(guardian_state.halt_reasons)}"
+                )
+                self._manage_positions(equity)
+                save_state(self.positions, self.trade_history)
+                return
+
+            logger.info(
+                f"🛡️ Guardian: DD={guardian_state.drawdown_pct:.1%} | "
+                f"Daily={guardian_state.daily_pnl_pct:+.2%} | "
+                f"ConsecLoss={guardian_state.consecutive_losses} | "
+                f"VIX_scale={self.guardian.get_vix_position_scale():.0%}"
+            )
+
+        # 3b. Circuit breaker check (legacy inline fallback)
         allowed, reason = check_circuit_breaker(equity)
         if not allowed:
             logger.warning(f"🔴 Circuit breaker: {reason}")
@@ -1971,18 +2119,27 @@ class UnifiedTrader:
             except Exception as e:
                 logger.debug(f"Vol surface error: {e}")
 
-        # 9d. Mean-reversion & pairs-trading scans
-        if not skip_new_longs and len(self.positions) < self.cfg.max_open_positions:
+        # 9d. Mean-reversion & pairs-trading scans (legacy, only if no strategy engine)
+        if (not skip_new_longs
+                and len(self.positions) < self.cfg.max_open_positions
+                and self.strategy_engine is None):
             self._scan_mean_reversion(equity, cash, regime, econ_size_mult)
             self._scan_pairs(equity, cash, regime, econ_size_mult)
 
-        # 10. Scan for new equity entries (if regime allows)
+        # 10. Scan for new entries: prefer strategy_engine, fall back to legacy
         if not skip_new_longs and len(self.positions) < self.cfg.max_open_positions:
-            self._scan_for_entries(
-                equity, cash, regime,
-                econ_size_mult=econ_size_mult,
-                ml_regime_scale=ml_regime_scale,
-            )
+            if self.strategy_engine is not None:
+                self._scan_for_entries_v2(
+                    equity, cash, regime,
+                    econ_size_mult=econ_size_mult,
+                    ml_regime_scale=ml_regime_scale,
+                )
+            else:
+                self._scan_for_entries(
+                    equity, cash, regime,
+                    econ_size_mult=econ_size_mult,
+                    ml_regime_scale=ml_regime_scale,
+                )
         elif skip_new_longs:
             logger.info("Skipping new entries — bearish regime")
         else:
@@ -2166,22 +2323,50 @@ class UnifiedTrader:
 
     # ── Manage existing positions ───────────────────────────────────
     def _manage_positions(self, equity: float):
-        """Check stops, targets, and trailing for all positions."""
+        """
+        Check ALL exit conditions for every position:
+          1. Hard stop at -8%
+          2. ATR-based trailing stop (2.5x ATR)
+          3. Time-based exit: close positions with no profit after 5 days
+          4. Profit target at 3x ATR
+          5. Scaled exit: sell 50% at +10% gain, trail rest
+          6. Original stop/target hit
+          7. Weight deviation check (2x equal-weight max)
+        """
         to_close = []
+        to_partial_close = []
 
         for sym, pos in self.positions.items():
             price = get_latest_trade(sym)
             if price is None:
                 continue
 
-            # Update trailing stop
+            gain_pct = (price - pos.entry_price) / pos.entry_price
+            days_held = (datetime.now() - pos.entry_time).days
+
+            # Update highest price for trailing stop
+            pos.highest_price = max(pos.highest_price, price)
+
+            # Update trailing stop with ATR-based calculation (2.5x ATR)
+            if pos.atr_at_entry > 0:
+                # Dynamic ATR trailing: 2.5x ATR below highest price
+                atr_trail = pos.highest_price - (pos.atr_at_entry * self.cfg.atr_trailing_mult)
+                pos.trailing_stop = max(pos.trailing_stop, atr_trail)
+
+            # Also update percentage-based trailing
             pos.update_trailing(price, self.cfg.trailing_stop_pct,
                                 self.cfg.trailing_stop_activation)
 
             effective_stop = pos.effective_stop
-            gain_pct = (price - pos.entry_price) / pos.entry_price
 
-            # Check stop loss
+            # ── Check 1: HARD STOP at -8% (non-negotiable) ──
+            if gain_pct <= -self.cfg.hard_stop_pct:
+                reason = f"HARD STOP: {gain_pct:.1%} <= -{self.cfg.hard_stop_pct:.0%}"
+                logger.error(f"🛑 [{sym}]: {reason}")
+                to_close.append((sym, price, reason))
+                continue
+
+            # ── Check 2: ATR trailing stop hit ──
             if price <= effective_stop:
                 reason = "trailing stop" if pos.trailing_active else "ATR stop"
                 logger.warning(
@@ -2191,7 +2376,23 @@ class UnifiedTrader:
                 to_close.append((sym, price, reason))
                 continue
 
-            # Check profit target
+            # ── Check 3: Time-based exit (no profit after 5 days) ──
+            if days_held >= self.cfg.time_exit_days and gain_pct <= 0.005:
+                reason = f"TIME EXIT: {days_held}d held, P&L={gain_pct:+.1%}"
+                logger.info(f"⏱️ [{sym}]: {reason}")
+                to_close.append((sym, price, reason))
+                continue
+
+            # ── Check 4: Profit target at 3x ATR ──
+            if pos.atr_at_entry > 0:
+                atr_target = pos.entry_price + (pos.atr_at_entry * 3.0)
+                if price >= atr_target:
+                    reason = f"ATR TARGET (3x): ${price:.2f} >= ${atr_target:.2f}"
+                    logger.info(f"🎯 [{sym}]: {reason}")
+                    to_close.append((sym, price, reason))
+                    continue
+
+            # ── Check 5: Original profit target hit ──
             if price >= pos.target_price:
                 logger.info(
                     f"🎯 TARGET HIT [{sym}]: ${price:.2f} >= ${pos.target_price:.2f} "
@@ -2200,9 +2401,35 @@ class UnifiedTrader:
                 to_close.append((sym, price, "profit target"))
                 continue
 
-        # Execute closes
+            # ── Check 6: Scaled exit — sell 50% at +10% gain ──
+            if (gain_pct >= self.cfg.scaled_exit_pct
+                    and sym not in getattr(self, '_partial_exits_done', set())
+                    and pos.qty >= 2):
+                partial_qty = max(1, int(pos.qty * self.cfg.scaled_exit_fraction))
+                reason = f"SCALED EXIT: +{gain_pct:.1%} >= +{self.cfg.scaled_exit_pct:.0%}, sell {partial_qty}/{pos.qty}"
+                logger.info(f"📊 [{sym}]: {reason}")
+                to_partial_close.append((sym, price, partial_qty, reason))
+                continue
+
+        # Execute full closes
         for sym, price, reason in to_close:
             self._close_position(sym, price, reason)
+
+        # Execute partial closes (scaled exits)
+        for sym, price, partial_qty, reason in to_partial_close:
+            self._close_partial_position(sym, price, partial_qty, reason)
+
+        # ── Weight deviation check ──
+        if self.positions and equity > 0:
+            pos_values = {}
+            for sym, pos in self.positions.items():
+                p = get_latest_trade(sym)
+                if p:
+                    pos_values[sym] = p * pos.qty
+            if self.guardian:
+                overweight = self.guardian.check_weight_deviation(pos_values, equity)
+                for sym, weight, reason in overweight:
+                    logger.warning(f"⚠️ OVERWEIGHT: {sym} at {weight:.1%} — {reason}")
 
     # ── Tighten stops in bearish regime ─────────────────────────────
     def _tighten_stops(self):
@@ -2248,6 +2475,13 @@ class UnifiedTrader:
 
         if _kelly_sizer is not None:
             _kelly_sizer.add_trade_result(pnl_pct)
+
+        # Feed result to Risk Guardian (consecutive loss tracking)
+        if self.guardian is not None:
+            self.guardian.record_trade_result(pnl_pct > 0)
+
+        # Clean up partial exit tracking
+        self._partial_exits_done.discard(symbol)
 
         # Feed trade outcome to Enhanced ML Retrainer
         if _ml_retrainer is not None:
@@ -2306,10 +2540,389 @@ class UnifiedTrader:
         del self.positions[symbol]
         logger.info(f"Position closed: {symbol} P&L={pnl_pct:+.2%} ({reason})")
 
-    # ── Scan for new entries ────────────────────────────────────────
+    # ── Close partial position (scaled exit) ────────────────────────
+    def _close_partial_position(self, symbol: str, price: float, sell_qty: int, reason: str):
+        """
+        Sell a PORTION of a position (scaled exit).
+        Sells sell_qty shares, keeps the rest with trailing stop active.
+        """
+        pos = self.positions.get(symbol)
+        if pos is None:
+            return
+
+        if sell_qty >= pos.qty:
+            # If selling all, just close entirely
+            self._close_position(symbol, price, reason)
+            return
+
+        if self.dry_run:
+            logger.info(
+                f"[DRY RUN] Would sell {sell_qty}/{pos.qty} {symbol} @ ${price:.2f} ({reason})"
+            )
+        else:
+            limit_price = round(price * (1 - self.cfg.limit_buffer_pct), 2)
+            result = submit_limit_order(symbol, sell_qty, "sell", limit_price)
+            if result:
+                logger.info(
+                    f"PARTIAL SELL: {sell_qty}/{pos.qty} {symbol} @ ${limit_price:.2f} ({reason})"
+                )
+            else:
+                logger.error(f"Failed to submit partial sell for {symbol}")
+                return
+
+        # Update position qty (keep remaining shares)
+        pos.qty -= sell_qty
+
+        # Activate trailing stop for remaining shares
+        pos.trailing_active = True
+        if pos.atr_at_entry > 0:
+            pos.trailing_stop = max(
+                pos.trailing_stop,
+                price - (pos.atr_at_entry * self.cfg.atr_trailing_mult)
+            )
+
+        # Mark as partial exit done
+        self._partial_exits_done.add(symbol)
+        if self.guardian:
+            self.guardian.mark_partial_exit(symbol)
+
+        trade_record = {
+            "symbol": symbol, "side": "sell_partial", "qty": sell_qty,
+            "remaining_qty": pos.qty,
+            "entry_price": pos.entry_price, "exit_price": price,
+            "pnl_pct": round((price - pos.entry_price) / pos.entry_price, 4),
+            "reason": reason,
+            "timestamp": datetime.now().isoformat(),
+        }
+        self.trade_history.append(trade_record)
+        self.daily_trades += 1
+
+        logger.info(
+            f"📊 Partial exit: sold {sell_qty} {symbol}, keeping {pos.qty} "
+            f"with trailing stop @ ${pos.trailing_stop:.2f}"
+        )
+
+    # ── NEW: Stat-arb strategy engine scan ─────────────────────────
+    def _scan_for_entries_v2(self, equity: float, cash: float,
+                             regime: AlpacaRegimeResult,
+                             econ_size_mult: float = 1.0,
+                             ml_regime_scale: float = 1.0):
+        """
+        Scan for entries using the stat-arb strategy engine.
+
+        Flow:
+          1. Fetch Alpaca bars for the trading universe
+          2. Build price/volume DataFrames for the strategy engine
+          3. strategy_engine.get_signals() -> raw signals (pairs, MR, momentum)
+          4. portfolio_allocator.allocate() -> sized signals
+          5. risk_guardian.validate_entry() -> gated signals
+          6. Execute approved signals via limit orders
+        """
+        import pandas as pd
+
+        if self.strategy_engine is None:
+            logger.warning("Strategy engine unavailable — falling back to legacy scan")
+            return self._scan_for_entries(equity, cash, regime, econ_size_mult, ml_regime_scale)
+
+        # Determine active universe
+        active_universe = (
+            self.universe_manager.get_active_universe()
+            if self.universe_manager is not None
+            else UNIVERSE
+        )
+
+        # ── Step 1: Fetch bars for all symbols ──
+        bar_cache: Dict[str, List[dict]] = {}
+        for sym in active_universe:
+            bars = get_bars(sym, limit=max(260, self.cfg.bars_lookback))
+            if bars and len(bars) >= 50:
+                bar_cache[sym] = bars
+            time.sleep(0.12)  # Rate limit: Alpaca allows ~200 req/min
+
+        if not bar_cache:
+            logger.info("No symbols with sufficient bar data for strategy engine")
+            return
+
+        logger.info(f"Fetched bars for {len(bar_cache)} symbols")
+
+        # ── Step 2: Build price/volume/OHLCV DataFrames ──
+        price_dict: Dict[str, list] = {}
+        volume_dict: Dict[str, list] = {}
+        ohlcv_dict: Dict[str, pd.DataFrame] = {}
+        volatilities: Dict[str, float] = {}
+
+        # We need dates aligned; use the longest bar list as reference
+        max_len = max(len(bars) for bars in bar_cache.values())
+
+        for sym, bars in bar_cache.items():
+            closes = [float(b["c"]) for b in bars]
+            volumes = [float(b["v"]) for b in bars]
+            highs = [float(b["h"]) for b in bars]
+            lows = [float(b["l"]) for b in bars]
+            opens = [float(b["o"]) for b in bars]
+
+            # Right-align shorter arrays with NaN padding
+            pad = max_len - len(closes)
+            price_dict[sym] = [np.nan] * pad + closes
+            volume_dict[sym] = [np.nan] * pad + volumes
+
+            # OHLCV DataFrame for ATR/ADX calculations
+            ohlcv_dict[sym] = pd.DataFrame({
+                "open": opens, "high": highs, "low": lows,
+                "close": closes, "volume": volumes,
+            })
+
+            # 20-day realized volatility for inv-vol weighting
+            if len(closes) >= 21:
+                arr = np.array(closes[-21:])
+                rets = np.diff(arr) / arr[:-1]
+                volatilities[sym] = float(np.std(rets)) if len(rets) > 0 else 0.02
+            else:
+                volatilities[sym] = 0.02  # Default 2%
+
+        price_data = pd.DataFrame(price_dict)
+        volume_data = pd.DataFrame(volume_dict)
+
+        # Build current_positions dict for the strategy engine
+        current_positions: Dict[str, Any] = {}
+        for sym, pos in self.positions.items():
+            current_positions[sym] = {
+                "qty": pos.qty,
+                "entry_price": pos.entry_price,
+                "market_value": pos.qty * pos.entry_price,  # Approximate
+                "sector": pos.sector,
+                "strategy": getattr(pos, "strategy_source", "legacy"),
+            }
+
+        # ── Step 3: Get signals from strategy engine ──
+        try:
+            raw_signals = self.strategy_engine.get_signals(
+                price_data=price_data,
+                volume_data=volume_data,
+                equity=equity,
+                current_positions=current_positions,
+                ohlcv_data=ohlcv_dict,
+            )
+        except Exception as e:
+            logger.error(f"Strategy engine error: {e}")
+            return
+
+        if not raw_signals:
+            logger.info("Strategy engine produced no signals")
+            return
+
+        logger.info(f"Strategy engine: {len(raw_signals)} raw signals")
+
+        # ── Step 4: Size signals via portfolio allocator ──
+        sized_signals = raw_signals
+        if self.portfolio_alloc is not None:
+            try:
+                sized_signals = self.portfolio_alloc.allocate(
+                    signals=raw_signals,
+                    equity=equity,
+                    current_positions=current_positions,
+                    volatilities=volatilities,
+                )
+            except Exception as e:
+                logger.warning(f"Portfolio allocator error: {e} — using raw sizing")
+
+        if not sized_signals:
+            logger.info("No signals survived portfolio allocation")
+            return
+
+        # ── Step 5 & 6: Validate and execute ──
+        current_pos_values = {}
+        for p_data in get_positions():
+            sym = p_data["symbol"]
+            mktval = abs(float(p_data.get("market_value", 0)))
+            current_pos_values[sym] = mktval
+
+        executed = 0
+        for sig in sized_signals:
+            if len(self.positions) >= self.cfg.max_open_positions:
+                break
+
+            # Handle CLOSE signals: exit existing positions
+            if sig.direction == SignalDirection.CLOSE:
+                if sig.symbol in self.positions:
+                    pos = self.positions[sig.symbol]
+                    limit_price = round(sig.entry_price * 0.999, 2)  # Slight discount for fills
+                    if not self.dry_run:
+                        result = submit_limit_order(sig.symbol, pos.qty, "sell", limit_price)
+                        if result:
+                            pnl_pct = (sig.entry_price - pos.entry_price) / pos.entry_price
+                            logger.info(
+                                f"CLOSE {sig.symbol}: {pos.qty} shares @ ${limit_price:.2f} "
+                                f"pnl={pnl_pct:+.1%} | {sig.strategy_source}"
+                            )
+                            # Record for strategy performance tracking
+                            if self.strategy_engine:
+                                self.strategy_engine.record_trade_result(
+                                    sig.strategy.value, pnl_pct
+                                )
+                            if self.portfolio_alloc:
+                                self.portfolio_alloc.record_trade(sig.strategy.value, pnl_pct)
+                            del self.positions[sig.symbol]
+                    else:
+                        logger.info(f"[DRY RUN] Would CLOSE {pos.qty} {sig.symbol} @ ${limit_price:.2f}")
+                continue
+
+            # Skip if already holding
+            if sig.symbol in self.positions:
+                continue
+
+            # Map signal direction to order side
+            side = "buy" if sig.direction == SignalDirection.LONG else "sell"
+
+            # Compute shares if not already set
+            qty = sig.shares
+            if qty <= 0 and sig.entry_price > 0:
+                proposed_cost = equity * sig.position_size_pct
+                qty = int(proposed_cost / sig.entry_price)
+            if qty <= 0:
+                continue
+
+            proposed_cost = qty * sig.entry_price
+
+            # ── GUARDIAN: entry validation ──
+            if self.guardian is not None:
+                existing_syms = list(self.positions.keys())
+                # Pairs trading signals always get 3 confirming signals
+                # (cointegration + z-score + half-life)
+                n_confirms = 3 if sig.strategy == StrategyType.PAIRS else 2
+                if sig.confidence >= 0.7:
+                    n_confirms += 1  # High-confidence boost
+
+                g_ok, g_reason = self.guardian.validate_entry(
+                    symbol=sig.symbol,
+                    existing_positions=existing_syms,
+                    sector_map=SECTOR_MAP,
+                    num_confirming_signals=n_confirms,
+                    min_confirming_signals=self.cfg.min_confirming_signals,
+                )
+                if not g_ok:
+                    logger.info(f"Guardian blocked {sig.symbol}: {g_reason}")
+                    continue
+
+                # VIX-based scaling
+                vix_scale = self.guardian.get_vix_position_scale()
+                if vix_scale < 0.01:
+                    logger.info(f"Skipping {sig.symbol}: VIX too high (scale={vix_scale:.0%})")
+                    continue
+                proposed_cost *= vix_scale
+                qty = int(proposed_cost / sig.entry_price) if sig.entry_price > 0 else 0
+                if qty <= 0:
+                    continue
+
+            # Sector cap check
+            allowed, reason = sector_allows_trade_check(
+                sig.symbol, proposed_cost, current_pos_values, equity
+            )
+            if not allowed:
+                logger.debug(f"Sector cap blocked {sig.symbol}: {reason}")
+                continue
+
+            # Economic calendar scaling
+            proposed_cost *= econ_size_mult
+            proposed_cost *= ml_regime_scale
+            qty = int(proposed_cost / sig.entry_price) if sig.entry_price > 0 else 0
+            if qty <= 0:
+                continue
+
+            # Cash check
+            if proposed_cost > cash * 0.95:
+                logger.debug(f"Skipping {sig.symbol}: insufficient cash (${cash:.0f} < ${proposed_cost:.0f})")
+                continue
+
+            # Limit order with buffer
+            limit_price = round(sig.entry_price * (1 + self.cfg.limit_buffer_pct), 2)
+            if side == "sell":
+                # For short entries, limit below current price
+                limit_price = round(sig.entry_price * (1 - self.cfg.limit_buffer_pct), 2)
+
+            if self.dry_run:
+                logger.info(
+                    f"[DRY RUN] Would {side.upper()} {qty} {sig.symbol} @ ${limit_price:.2f} "
+                    f"| stop=${sig.stop_price:.2f} target=${sig.target_price:.2f} "
+                    f"| {sig.strategy.value} conf={sig.confidence:.2f} "
+                    f"| {sig.strategy_source}"
+                )
+            else:
+                result = submit_limit_order(sig.symbol, qty, side, limit_price)
+                if result is None:
+                    logger.error(f"Failed to submit {side} order for {sig.symbol}")
+                    continue
+                logger.info(
+                    f"{side.upper()} order: {qty} {sig.symbol} @ ${limit_price:.2f} "
+                    f"| {sig.strategy.value}"
+                )
+
+            # Compute safe stop
+            if sig.stop_price > 0:
+                hard_floor = round(sig.entry_price * (1 - self.cfg.hard_stop_pct), 2)
+                safe_stop = max(sig.stop_price, hard_floor)
+            else:
+                # For pairs trades, use 4% hard stop since z-score manages exits
+                safe_stop = round(sig.entry_price * 0.96, 2)
+
+            target = sig.target_price if sig.target_price > 0 else round(
+                sig.entry_price * (1 + self.cfg.profit_target_pct), 2
+            )
+
+            self.positions[sig.symbol] = TrackedPosition(
+                symbol=sig.symbol,
+                entry_price=sig.entry_price,
+                entry_time=datetime.now(),
+                qty=qty,
+                stop_price=safe_stop,
+                target_price=target,
+                trailing_stop=0,
+                highest_price=sig.entry_price,
+                atr_at_entry=sig.atr,
+                sector=get_sector(sig.symbol),
+            )
+
+            current_pos_values[sig.symbol] = proposed_cost
+            cash -= proposed_cost
+            self.daily_trades += 1
+            executed += 1
+
+            trade_record = {
+                "symbol": sig.symbol,
+                "side": side,
+                "qty": qty,
+                "entry_price": sig.entry_price,
+                "limit_price": limit_price,
+                "stop_price": safe_stop,
+                "target_price": target,
+                "strategy": sig.strategy.value,
+                "strategy_source": sig.strategy_source,
+                "confidence": sig.confidence,
+                "z_score": sig.z_score,
+                "pair_symbol": sig.pair_symbol,
+                "timestamp": datetime.now().isoformat(),
+            }
+            self.trade_history.append(trade_record)
+
+            logger.info(
+                f"✅ {side.upper()} {sig.symbol}: {qty} shares @ ${sig.entry_price:.2f} "
+                f"| stop=${safe_stop:.2f} target=${target:.2f} "
+                f"| {sig.strategy.value} conf={sig.confidence:.2f} "
+                f"| {sig.strategy_source}"
+            )
+
+        if executed > 0:
+            logger.info(
+                f"Strategy engine executed {executed} trades "
+                f"(pairs/mr/momentum stat-arb)"
+            )
+        else:
+            logger.info("No signals passed risk validation this cycle")
+
+    # ── Scan for new entries (LEGACY — kept as fallback) ────────────
     def _scan_for_entries(self, equity: float, cash: float, regime: AlpacaRegimeResult,
                           econ_size_mult: float = 1.0, ml_regime_scale: float = 1.0):
-        """Scan universe for new entry signals."""
+        """Scan universe for new entry signals (legacy composite signal approach)."""
         # Get current position values for sector check
         current_pos_values = {}
         for p_data in get_positions():
@@ -2404,6 +3017,14 @@ class UnifiedTrader:
             )
 
             if sig.direction == "BUY" and sig.composite_score >= self.cfg.min_composite_score:
+                # ── GUARDIAN: confirming signals gate ──
+                if sig.confirming_signals < self.cfg.min_confirming_signals:
+                    logger.debug(
+                        f"Skipping {sym}: only {sig.confirming_signals} confirming signals "
+                        f"(need {self.cfg.min_confirming_signals})"
+                    )
+                    continue
+
                 # TDA alignment check
                 if sig.tda_score < self.cfg.min_tda_alignment:
                     logger.debug(f"Skipping {sym}: TDA misaligned ({sig.tda_score:.2f})")
@@ -2532,6 +3153,27 @@ class UnifiedTrader:
             if not allowed:
                 continue
 
+            # ── GUARDIAN: entry validation (position count, VIX, correlation) ──
+            if hasattr(self, 'guardian') and self.guardian is not None:
+                existing_syms = list(self.positions.keys())
+                g_ok, g_reason = self.guardian.validate_entry(
+                    symbol=sig.symbol,
+                    existing_positions=existing_syms,
+                    sector_map=SECTOR_MAP,
+                    num_confirming_signals=sig.confirming_signals,
+                    min_confirming_signals=self.cfg.min_confirming_signals,
+                )
+                if not g_ok:
+                    logger.info(f"Skipping {sig.symbol}: guardian blocked — {g_reason}")
+                    continue
+
+                # Apply VIX-based position scaling (0% at VIX>35, 50% at VIX>25)
+                vix_scale = self.guardian.get_vix_position_scale()
+                if vix_scale < 0.01:
+                    logger.info(f"Skipping {sig.symbol}: VIX too high — scale={vix_scale:.0%}")
+                    continue
+                proposed_cost *= vix_scale
+
             # Phase 3-9: apply economic calendar position size reduction
             proposed_cost *= econ_size_mult
 
@@ -2622,19 +3264,31 @@ class UnifiedTrader:
                     continue
                 logger.info(f"BUY order submitted: {qty} {sig.symbol} @ ${limit_price:.2f}")
 
-            # Track position
-            target = round(sig.price * (1 + self.cfg.profit_target_pct), 2)
+            # Track position — target is the LESSER of pct target and 3x ATR
+            pct_target = sig.price * (1 + self.cfg.profit_target_pct)
+            atr_target = sig.price + sig.atr * 3.0 if sig.atr > 0 else pct_target
+            target = round(min(pct_target, atr_target), 2)
+
+            # Hard stop = max(signal stop, -8% hard floor)
+            hard_floor = round(sig.price * (1 - self.cfg.hard_stop_pct), 2)
+            safe_stop = max(sig.stop_price, hard_floor) if sig.stop_price > 0 else hard_floor
+
             self.positions[sig.symbol] = TrackedPosition(
                 symbol=sig.symbol,
                 entry_price=sig.price,
                 entry_time=datetime.now(),
                 qty=qty,
-                stop_price=sig.stop_price,
+                stop_price=safe_stop,
                 target_price=target,
                 trailing_stop=0,
                 highest_price=sig.price,
                 atr_at_entry=sig.atr,
                 sector=get_sector(sig.symbol),
+            )
+            logger.info(
+                f"  → Entry {sig.symbol}: stop=${safe_stop:.2f} "
+                f"target=${target:.2f} ATR=${sig.atr:.2f} "
+                f"confirms={sig.confirming_signals}"
             )
 
             # Update sector exposure tracking

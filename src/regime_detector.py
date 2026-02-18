@@ -498,6 +498,320 @@ class GMMRegimeDetector:
 
 
 # ============================================================================
+# LIVE REGIME DETECTOR — 3-state HMM for strategy_engine integration
+# ============================================================================
+
+class LiveRegime(Enum):
+    """Simplified 3-state regime for live trading decisions."""
+    BULL = "bull"
+    NEUTRAL = "neutral"
+    BEAR = "bear"
+
+
+@dataclass
+class RegimeAdjustments:
+    """Action mapping for a given regime — drives allocation & risk."""
+    regime: LiveRegime
+    confidence: float
+    strategy_weights: Dict[str, float]   # {pairs, mr, momentum}
+    position_scale: float                # 0.0–1.0 multiplier on sizing
+    stop_multiplier: float               # < 1.0 = tighter stops
+    transition_probs: Optional[np.ndarray] = None
+
+    def describe(self) -> str:
+        wts = ", ".join(f"{k}={v:.0%}" for k, v in self.strategy_weights.items())
+        return (
+            f"regime={self.regime.value} conf={self.confidence:.2f} "
+            f"wts=[{wts}] scale={self.position_scale:.2f} "
+            f"stop_mult={self.stop_multiplier:.2f}"
+        )
+
+
+# Regime → action lookup (the user-specified mapping)
+_REGIME_ACTION_MAP: Dict[LiveRegime, Dict[str, float]] = {
+    LiveRegime.BULL: {
+        "pairs": 0.30, "mr": 0.20, "momentum": 0.50,
+        "position_scale": 1.0, "stop_multiplier": 1.2,
+    },
+    LiveRegime.NEUTRAL: {
+        "pairs": 0.50, "mr": 0.35, "momentum": 0.15,
+        "position_scale": 0.7, "stop_multiplier": 1.0,
+    },
+    LiveRegime.BEAR: {
+        "pairs": 0.60, "mr": 0.30, "momentum": 0.10,
+        "position_scale": 0.4, "stop_multiplier": 0.8,
+    },
+}
+
+
+class LiveRegimeDetector:
+    """
+    3-state HMM regime detector for live strategy-engine integration.
+
+    States: BULL / NEUTRAL / BEAR  (mapped from GaussianHMM latent states).
+
+    Features used for fitting:
+      - Daily log returns
+      - 20-day realised volatility (annualized)
+
+    Auto-refits weekly using a rolling 252-day window of SPY returns.
+
+    Usage::
+
+        detector = LiveRegimeDetector()
+        adj = detector.predict_regime(spy_close_prices)
+        print(adj.regime, adj.strategy_weights, adj.position_scale)
+    """
+
+    REFIT_INTERVAL_DAYS: int = 7
+    LOOKBACK_BARS: int = 252
+    MODEL_PATH: str = "models/live_regime_3state.pkl"
+
+    def __init__(self, lookback_bars: int = 252, refit_days: int = 7):
+        self.lookback_bars = lookback_bars
+        self.refit_days = refit_days
+        self.is_fitted: bool = False
+        self._last_refit: Optional[datetime] = None
+        self._state_map: Dict[int, LiveRegime] = {}
+        self._prev_regime: Optional[LiveRegime] = None
+        self._regime_history: List[Tuple[datetime, LiveRegime, float]] = []
+        self.logger = logging.getLogger(f"{__name__}.LiveRegimeDetector")
+
+        if _HMM_AVAILABLE:
+            self.model = hmmlearn_hmm.GaussianHMM(
+                n_components=3,
+                covariance_type="full",
+                n_iter=200,
+                random_state=42,
+            )
+        else:
+            self.model = None
+            self.logger.warning("hmmlearn not available — LiveRegimeDetector disabled")
+
+        self._try_load_model()
+
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+
+    def predict_regime(self, close_prices: np.ndarray) -> RegimeAdjustments:
+        """
+        Predict current regime and return action adjustments.
+
+        Parameters
+        ----------
+        close_prices : np.ndarray
+            Array of daily close prices (most recent last), length >= 60.
+
+        Returns
+        -------
+        RegimeAdjustments
+            Contains regime label, confidence, strategy weights,
+            position_scale, stop_multiplier, and transition probs.
+        """
+        if self.model is None:
+            return self._default_adjustments()
+
+        prices = np.asarray(close_prices, dtype=float)
+        if len(prices) < 60:
+            self.logger.warning("Too few bars for regime detection (<60)")
+            return self._default_adjustments()
+
+        returns, volatility = self._build_features(prices)
+
+        # Auto-refit if needed (weekly or first call)
+        if self._needs_refit():
+            self._fit(returns, volatility)
+
+        if not self.is_fitted:
+            self._fit(returns, volatility)
+
+        # Predict
+        try:
+            X = np.column_stack([returns[-1:], volatility[-1:]])
+            probs = self.model.predict_proba(X)[0]
+            state_idx = int(np.argmax(probs))
+            regime = self._state_map.get(state_idx, LiveRegime.NEUTRAL)
+            confidence = float(probs[state_idx])
+
+            # Get transition matrix row for current state
+            trans_probs = None
+            if hasattr(self.model, 'transmat_'):
+                trans_probs = self.model.transmat_[state_idx]
+
+            # Log regime transitions
+            self._log_transition(regime, confidence)
+
+            return self._build_adjustments(regime, confidence, trans_probs)
+
+        except Exception as e:
+            self.logger.warning(f"Regime prediction failed: {e}")
+            return self._default_adjustments()
+
+    def get_regime_history(self, n: int = 20) -> List[Tuple[datetime, str, float]]:
+        """Return last *n* regime transitions."""
+        return [
+            (ts, r.value, c) for ts, r, c in self._regime_history[-n:]
+        ]
+
+    @property
+    def current_regime(self) -> str:
+        """Return current regime label string."""
+        if self._prev_regime is not None:
+            return self._prev_regime.value
+        return "neutral"
+
+    # ------------------------------------------------------------------ #
+    # Feature engineering
+    # ------------------------------------------------------------------ #
+
+    def _build_features(
+        self, prices: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute daily log returns and 20-day realised vol."""
+        log_ret = np.diff(np.log(prices))
+
+        vol_window = 20
+        volatility = np.array([
+            np.std(log_ret[max(0, i - vol_window):i]) * np.sqrt(252)
+            if i >= vol_window
+            else np.std(log_ret[:max(1, i)]) * np.sqrt(252)
+            for i in range(1, len(log_ret) + 1)
+        ])
+
+        return log_ret, volatility
+
+    # ------------------------------------------------------------------ #
+    # Fitting
+    # ------------------------------------------------------------------ #
+
+    def _needs_refit(self) -> bool:
+        if not self.is_fitted or self._last_refit is None:
+            return True
+        return (datetime.now() - self._last_refit).days >= self.refit_days
+
+    def _fit(self, returns: np.ndarray, volatility: np.ndarray) -> None:
+        """Fit the 3-state GaussianHMM and label states."""
+        if self.model is None:
+            return
+
+        n = min(len(returns), len(volatility), self.lookback_bars)
+        X = np.column_stack([returns[-n:], volatility[-n:]])
+
+        try:
+            self.model.fit(X)
+            self.is_fitted = True
+            self._last_refit = datetime.now()
+            self._label_states(X)
+            self._persist_model()
+            self.logger.info(
+                f"LiveRegimeDetector fitted on {n} bars  "
+                f"state_map={{{', '.join(f'{k}:{v.value}' for k, v in self._state_map.items())}}}"
+            )
+        except Exception as e:
+            self.logger.warning(f"LiveRegimeDetector fit failed: {e}")
+
+    def _label_states(self, X: np.ndarray) -> None:
+        """
+        Map HMM numeric states → {BULL, NEUTRAL, BEAR}.
+
+        Heuristic:
+          - Highest mean return → BULL
+          - Lowest mean return  → BEAR
+          - Remaining           → NEUTRAL
+        """
+        labels = self.model.predict(X)
+        state_means: Dict[int, float] = {}
+        for s in range(3):
+            mask = labels == s
+            if mask.sum() == 0:
+                state_means[s] = 0.0
+            else:
+                state_means[s] = float(np.mean(X[mask, 0]))
+
+        sorted_states = sorted(state_means.items(), key=lambda kv: kv[1])
+        # sorted_states[0] = lowest return (BEAR), sorted_states[-1] = highest (BULL)
+        self._state_map = {
+            sorted_states[0][0]: LiveRegime.BEAR,
+            sorted_states[1][0]: LiveRegime.NEUTRAL,
+            sorted_states[2][0]: LiveRegime.BULL,
+        }
+
+    # ------------------------------------------------------------------ #
+    # Regime → action mapping
+    # ------------------------------------------------------------------ #
+
+    def _build_adjustments(
+        self, regime: LiveRegime, confidence: float,
+        trans_probs: Optional[np.ndarray],
+    ) -> RegimeAdjustments:
+        mapping = _REGIME_ACTION_MAP[regime]
+        return RegimeAdjustments(
+            regime=regime,
+            confidence=confidence,
+            strategy_weights={
+                "pairs": mapping["pairs"],
+                "mr": mapping["mr"],
+                "momentum": mapping["momentum"],
+            },
+            position_scale=mapping["position_scale"],
+            stop_multiplier=mapping["stop_multiplier"],
+            transition_probs=trans_probs,
+        )
+
+    def _default_adjustments(self) -> RegimeAdjustments:
+        """Return NEUTRAL adjustments when model is unavailable."""
+        return self._build_adjustments(LiveRegime.NEUTRAL, 0.0, None)
+
+    # ------------------------------------------------------------------ #
+    # Transition logging
+    # ------------------------------------------------------------------ #
+
+    def _log_transition(self, regime: LiveRegime, confidence: float) -> None:
+        now = datetime.now()
+        if self._prev_regime is not None and regime != self._prev_regime:
+            self.logger.info(
+                f"REGIME TRANSITION: {self._prev_regime.value} → {regime.value} "
+                f"(conf={confidence:.2f})"
+            )
+        self._prev_regime = regime
+        self._regime_history.append((now, regime, confidence))
+        # Keep bounded
+        if len(self._regime_history) > 500:
+            self._regime_history = self._regime_history[-250:]
+
+    # ------------------------------------------------------------------ #
+    # Persistence
+    # ------------------------------------------------------------------ #
+
+    def _persist_model(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.MODEL_PATH) or ".", exist_ok=True)
+            with open(self.MODEL_PATH, "wb") as f:
+                pickle.dump({
+                    "model": self.model,
+                    "state_map": self._state_map,
+                    "last_refit": self._last_refit,
+                }, f)
+            self.logger.debug(f"LiveRegimeDetector persisted to {self.MODEL_PATH}")
+        except Exception as e:
+            self.logger.warning(f"Failed to persist LiveRegimeDetector: {e}")
+
+    def _try_load_model(self) -> None:
+        try:
+            if os.path.exists(self.MODEL_PATH):
+                with open(self.MODEL_PATH, "rb") as f:
+                    data = pickle.load(f)
+                self.model = data["model"]
+                self._state_map = data["state_map"]
+                self._last_refit = data.get("last_refit")
+                self.is_fitted = True
+                self.logger.info(f"LiveRegimeDetector loaded from {self.MODEL_PATH}")
+        except Exception as e:
+            self.logger.debug(f"Could not load LiveRegimeDetector model: {e}")
+
+
+# ============================================================================
 # COMBINED REGIME DETECTOR (Public interface — drop-in replacement)
 # ============================================================================
 

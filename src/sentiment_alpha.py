@@ -498,3 +498,141 @@ if __name__ == "__main__":
     print(f"\nAAPL sentiment: {detail.composite_score:+.3f} ({detail.signal})")
     print(f"  Sources: {detail.source_scores}")
     print(f"  Items: {detail.item_count}")
+
+
+# =============================================================================
+# SENTIMENT SIGNAL PROCESSOR — decay + contrarian for strategy_engine
+# =============================================================================
+
+@dataclass
+class SentimentSignal:
+    """Processed sentiment signal for a single symbol."""
+    symbol: str
+    raw_score: float               # composite [-1, 1]
+    decayed_score_6h: float        # fast-decay (intraday)
+    decayed_score_24h: float       # slow-decay (swing)
+    blended_score: float           # 0.6 × 6h + 0.4 × 24h
+    contrarian_flag: bool          # True if extreme → fade
+    confidence_boost: float        # 0-0.15 confidence increment for signals
+    signal_label: str              # "bullish" / "neutral" / "bearish"
+    timestamp: str = ""
+
+    def describe(self) -> str:
+        c = "CONTRARIAN" if self.contrarian_flag else ""
+        return (
+            f"{self.symbol}: {self.signal_label} "
+            f"blend={self.blended_score:+.3f} "
+            f"(6h={self.decayed_score_6h:+.3f} 24h={self.decayed_score_24h:+.3f}) "
+            f"boost={self.confidence_boost:+.3f} {c}"
+        ).strip()
+
+
+class SentimentSignalProcessor:
+    """
+    Convert raw multi-source sentiment into an actionable trading signal.
+
+    Features:
+      - Dual half-life decay: 6h (intraday) and 24h (swing)
+      - Blended score: 60% fast + 40% slow
+      - Contrarian filter: extreme scores (|score| > 0.8) are faded
+      - Confidence boost: moderate agreement → +0-15% signal confidence
+      - Source weighting inherited from SentimentAlpha
+
+    Usage::
+
+        processor = SentimentSignalProcessor()
+        sig = processor.process("AAPL")
+        if sig.confidence_boost > 0:
+            trade_signal.confidence += sig.confidence_boost
+    """
+
+    def __init__(
+        self,
+        fast_half_life_hours: float = 6.0,
+        slow_half_life_hours: float = 24.0,
+        fast_weight: float = 0.60,
+        contrarian_threshold: float = 0.80,
+        max_confidence_boost: float = 0.15,
+        sentiment_config: Optional[SentimentConfig] = None,
+    ):
+        self.fast_hl = fast_half_life_hours
+        self.slow_hl = slow_half_life_hours
+        self.fast_w = fast_weight
+        self.slow_w = 1.0 - fast_weight
+        self.contrarian_thresh = contrarian_threshold
+        self.max_boost = max_confidence_boost
+
+        # Two SentimentAlpha instances with different decay rates
+        fast_cfg = sentiment_config or SentimentConfig()
+        slow_cfg = sentiment_config or SentimentConfig()
+        fast_cfg.decay_half_life_hours = self.fast_hl
+        slow_cfg.decay_half_life_hours = self.slow_hl
+        self._sa_fast = SentimentAlpha(config=fast_cfg)
+        self._sa_slow = SentimentAlpha(config=slow_cfg)
+        self.logger = logging.getLogger(f"{__name__}.SentimentSignalProcessor")
+
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
+
+    def process(self, symbol: str) -> SentimentSignal:
+        """
+        Process sentiment for a symbol with dual-decay and contrarian logic.
+
+        Parameters
+        ----------
+        symbol : str
+            Ticker symbol.
+
+        Returns
+        -------
+        SentimentSignal
+        """
+        score_fast = self._sa_fast.get_sentiment_score(symbol)
+        score_slow = self._sa_slow.get_sentiment_score(symbol)
+
+        blended = self.fast_w * score_fast + self.slow_w * score_slow
+
+        # Contrarian filter: extreme consensus → fade
+        contrarian = abs(blended) > self.contrarian_thresh
+        if contrarian:
+            # Reduce magnitude by 50% (market often reverses at extremes)
+            blended *= 0.50
+            self.logger.info(
+                f"Contrarian fade on {symbol}: raw_blend={score_fast:.3f}/{score_slow:.3f} "
+                f"→ faded {blended:+.3f}"
+            )
+
+        # Confidence boost: proportional to |blended|, capped
+        boost = min(abs(blended) * self.max_boost, self.max_boost)
+
+        # Label
+        if blended > 0.15:
+            label = "bullish"
+        elif blended < -0.15:
+            label = "bearish"
+        else:
+            label = "neutral"
+
+        raw_composite = self._sa_fast.get_sentiment_score(symbol)  # use cached
+
+        return SentimentSignal(
+            symbol=symbol,
+            raw_score=raw_composite,
+            decayed_score_6h=score_fast,
+            decayed_score_24h=score_slow,
+            blended_score=blended,
+            contrarian_flag=contrarian,
+            confidence_boost=boost,
+            signal_label=label,
+            timestamp=datetime.utcnow().isoformat(),
+        )
+
+    def process_batch(self, symbols: List[str]) -> Dict[str, SentimentSignal]:
+        """Process sentiment for multiple symbols."""
+        return {sym: self.process(sym) for sym in symbols}
+
+    def inject_items(self, symbol: str, items: List[SentimentItem]) -> None:
+        """Inject items into both fast and slow analyzers (for testing)."""
+        self._sa_fast.inject_items(symbol, items)
+        self._sa_slow.inject_items(symbol, items)

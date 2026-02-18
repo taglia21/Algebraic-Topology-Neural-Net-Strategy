@@ -21,11 +21,14 @@ Integration:
 """
 
 import logging
+import threading
+import time
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime
+from typing import Dict, List, Optional, Tuple, Callable
+from datetime import datetime, timedelta
 from enum import Enum
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +148,11 @@ class OrderFlowAnalyzer:
         if not bars or len(bars) < 20:
             return self._neutral_signal(symbol)
 
-        opens = np.array([float(b["o"]) for b in bars])
-        highs = np.array([float(b["h"]) for b in bars])
-        lows = np.array([float(b["l"]) for b in bars])
-        closes = np.array([float(b["c"]) for b in bars])
-        volumes = np.array([float(b["v"]) for b in bars])
+        opens = np.array([float(b.get("o", b.get("open", b.get("Open", 0)))) for b in bars])
+        highs = np.array([float(b.get("h", b.get("high", b.get("High", 0)))) for b in bars])
+        lows = np.array([float(b.get("l", b.get("low", b.get("Low", 0)))) for b in bars])
+        closes = np.array([float(b.get("c", b.get("close", b.get("Close", 0)))) for b in bars])
+        volumes = np.array([float(b.get("v", b.get("volume", b.get("Volume", 0)))) for b in bars])
 
         # 1. Volume analysis
         rel_volume = self._relative_volume(volumes)
@@ -503,3 +506,308 @@ class OrderFlowAnalyzer:
             vwap=0.0,
             vwap_deviation=0.0,
         )
+
+
+# ============================================================================
+# REAL-TIME ORDER FLOW IMBALANCE
+# ============================================================================
+
+@dataclass
+class OrderFlowImbalance:
+    """Real-time order flow imbalance snapshot."""
+    symbol: str
+    timestamp: datetime
+    buy_volume: float
+    sell_volume: float
+    total_volume: float
+    imbalance: float             # (buy - sell) / total ∈ [-1, 1]
+    cumulative_delta: float      # Running buy_vol - sell_vol
+    tick_count: int              # Number of ticks aggregated
+    vwap_buy: float              # VWAP of buy-classified trades
+    vwap_sell: float             # VWAP of sell-classified trades
+    window_seconds: int = 60     # Aggregation window
+
+    @property
+    def is_bullish(self) -> bool:
+        return self.imbalance > 0.15 and self.tick_count >= 10
+
+    @property
+    def is_bearish(self) -> bool:
+        return self.imbalance < -0.15 and self.tick_count >= 10
+
+
+@dataclass
+class MicrostructureSignal:
+    """Microstructure-derived trading signal."""
+    symbol: str
+    imbalance_score: float       # [-1, 1] order flow imbalance
+    confidence: float            # [0, 1] signal confidence
+    suggested_direction: str     # "buy", "sell", "neutral"
+    avg_trade_size: float        # Average trade size (shares)
+    large_trade_pct: float       # % of volume from large trades
+    price_pressure: float        # Directional price pressure estimate
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+class RealTimeFlowTracker:
+    """
+    Tracks real-time order flow from trade ticks.
+
+    Classifies trades as buys/sells using tick rule:
+      - Trade at ask or uptick → BUY
+      - Trade at bid or downtick → SELL
+
+    Maintains rolling windows of order flow imbalance per symbol.
+
+    Usage:
+        tracker = RealTimeFlowTracker()
+        tracker.on_trade("AAPL", price=175.50, size=100, timestamp=now)
+        imbalance = tracker.get_imbalance("AAPL")
+        signal = tracker.get_microstructure_signal("AAPL")
+    """
+
+    def __init__(
+        self,
+        window_seconds: int = 60,
+        large_trade_threshold: float = 10000,
+        max_history: int = 5000,
+    ):
+        self.window_seconds = window_seconds
+        self.large_trade_threshold = large_trade_threshold
+        self.max_history = max_history
+
+        # Per-symbol trade buffers: deque of (timestamp, price, size, direction)
+        self._trades: Dict[str, deque] = {}
+        self._last_price: Dict[str, float] = {}
+        self._cumulative_delta: Dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._connected = False
+        self._stream_thread: Optional[threading.Thread] = None
+
+    def on_trade(
+        self,
+        symbol: str,
+        price: float,
+        size: float,
+        timestamp: Optional[datetime] = None,
+    ):
+        """
+        Process a single trade tick.
+
+        Classifies as buy/sell using tick rule and stores in buffer.
+        """
+        ts = timestamp or datetime.now()
+
+        with self._lock:
+            # Tick rule classification
+            last_px = self._last_price.get(symbol, price)
+            if price > last_px:
+                direction = "buy"
+            elif price < last_px:
+                direction = "sell"
+            else:
+                # Same price → use previous direction or default buy
+                direction = "buy"
+
+            self._last_price[symbol] = price
+
+            if symbol not in self._trades:
+                self._trades[symbol] = deque(maxlen=self.max_history)
+                self._cumulative_delta[symbol] = 0.0
+
+            self._trades[symbol].append((ts, price, size, direction))
+
+            # Update cumulative delta
+            if direction == "buy":
+                self._cumulative_delta[symbol] += size
+            else:
+                self._cumulative_delta[symbol] -= size
+
+    def get_imbalance(self, symbol: str) -> OrderFlowImbalance:
+        """
+        Get current order flow imbalance for a symbol.
+
+        Returns imbalance computed over the rolling window.
+        """
+        with self._lock:
+            trades = self._trades.get(symbol, deque())
+            cutoff = datetime.now() - timedelta(seconds=self.window_seconds)
+
+            buy_vol = 0.0
+            sell_vol = 0.0
+            buy_px_vol = 0.0
+            sell_px_vol = 0.0
+            tick_count = 0
+
+            for ts, px, sz, direction in trades:
+                if ts < cutoff:
+                    continue
+                tick_count += 1
+                if direction == "buy":
+                    buy_vol += sz
+                    buy_px_vol += px * sz
+                else:
+                    sell_vol += sz
+                    sell_px_vol += px * sz
+
+            total_vol = buy_vol + sell_vol
+            imbalance = (buy_vol - sell_vol) / max(total_vol, 1.0)
+            cum_delta = self._cumulative_delta.get(symbol, 0.0)
+            vwap_buy = buy_px_vol / max(buy_vol, 1.0)
+            vwap_sell = sell_px_vol / max(sell_vol, 1.0)
+
+            return OrderFlowImbalance(
+                symbol=symbol,
+                timestamp=datetime.now(),
+                buy_volume=buy_vol,
+                sell_volume=sell_vol,
+                total_volume=total_vol,
+                imbalance=round(imbalance, 4),
+                cumulative_delta=cum_delta,
+                tick_count=tick_count,
+                vwap_buy=round(vwap_buy, 4),
+                vwap_sell=round(vwap_sell, 4),
+                window_seconds=self.window_seconds,
+            )
+
+    def get_microstructure_signal(self, symbol: str) -> MicrostructureSignal:
+        """
+        Derive a trading signal from microstructure data.
+
+        Combines order flow imbalance with trade size analysis
+        and price pressure estimation.
+        """
+        imb = self.get_imbalance(symbol)
+
+        with self._lock:
+            trades = self._trades.get(symbol, deque())
+            cutoff = datetime.now() - timedelta(seconds=self.window_seconds)
+            recent = [(ts, px, sz, d) for ts, px, sz, d in trades if ts >= cutoff]
+
+        # Average trade size
+        sizes = [sz for _, _, sz, _ in recent] if recent else [0]
+        avg_size = float(np.mean(sizes)) if sizes else 0.0
+
+        # Large trade percentage
+        large_vol = sum(sz for _, _, sz, _ in recent if sz >= self.large_trade_threshold)
+        total_vol = sum(sz for _, _, sz, _ in recent) if recent else 1.0
+        large_pct = large_vol / max(total_vol, 1.0)
+
+        # Price pressure: weighted average of price changes per trade
+        price_pressure = 0.0
+        if len(recent) >= 2:
+            returns = []
+            for i in range(1, len(recent)):
+                ret = (recent[i][1] - recent[i - 1][1]) / max(recent[i - 1][1], 0.01)
+                weight = recent[i][2]  # size-weighted
+                returns.append(ret * weight)
+            total_w = sum(r[2] for r in recent[1:])
+            price_pressure = sum(returns) / max(total_w, 1.0)
+
+        # Confidence: higher with more ticks and clearer imbalance
+        raw_conf = min(abs(imb.imbalance), 1.0) * min(imb.tick_count / 50, 1.0)
+        # Boost if large trades confirm direction
+        if large_pct > 0.3 and abs(imb.imbalance) > 0.2:
+            raw_conf = min(raw_conf * 1.3, 1.0)
+        confidence = round(raw_conf, 3)
+
+        # Direction
+        if imb.imbalance > 0.15 and confidence >= 0.2:
+            direction = "buy"
+        elif imb.imbalance < -0.15 and confidence >= 0.2:
+            direction = "sell"
+        else:
+            direction = "neutral"
+
+        return MicrostructureSignal(
+            symbol=symbol,
+            imbalance_score=imb.imbalance,
+            confidence=confidence,
+            suggested_direction=direction,
+            avg_trade_size=round(avg_size, 1),
+            large_trade_pct=round(large_pct, 4),
+            price_pressure=round(price_pressure, 6),
+        )
+
+    def connect_realtime(self, api_client: Optional[object] = None, symbols: Optional[List[str]] = None):
+        """
+        Connect to Alpaca WebSocket stream for real-time trade data.
+
+        Args:
+            api_client: Alpaca API client with streaming support.
+                        If None, runs in manual mode (call on_trade directly).
+            symbols: List of symbols to subscribe to.
+        """
+        if api_client is None:
+            logger.info("RealTimeFlowTracker: No API client — manual mode (call on_trade())")
+            self._connected = True
+            return
+
+        try:
+            from alpaca.data.live import StockDataStream
+
+            if not hasattr(api_client, 'api_key'):
+                logger.warning("API client missing api_key — manual mode")
+                self._connected = True
+                return
+
+            stream = StockDataStream(
+                api_key=api_client.api_key,
+                secret_key=api_client.secret_key,
+            )
+
+            async def _handle_trade(trade):
+                self.on_trade(
+                    symbol=trade.symbol,
+                    price=float(trade.price),
+                    size=float(trade.size),
+                    timestamp=trade.timestamp,
+                )
+
+            for sym in (symbols or []):
+                stream.subscribe_trades(_handle_trade, sym)
+
+            # Run in background thread
+            def _run_stream():
+                try:
+                    stream.run()
+                except Exception as e:
+                    logger.error(f"Stream error: {e}")
+
+            self._stream_thread = threading.Thread(target=_run_stream, daemon=True)
+            self._stream_thread.start()
+            self._connected = True
+            logger.info(f"RealTimeFlowTracker: Connected to {len(symbols or [])} symbols")
+
+        except ImportError:
+            logger.warning("alpaca-py not installed — manual mode")
+            self._connected = True
+        except Exception as e:
+            logger.error(f"Failed to connect realtime: {e}")
+            self._connected = True
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def get_active_symbols(self) -> List[str]:
+        """Return symbols with recent trade data."""
+        with self._lock:
+            cutoff = datetime.now() - timedelta(seconds=self.window_seconds * 2)
+            active = []
+            for sym, trades in self._trades.items():
+                if trades and trades[-1][0] >= cutoff:
+                    active.append(sym)
+            return active
+
+    def reset(self, symbol: Optional[str] = None):
+        """Clear accumulated trade data."""
+        with self._lock:
+            if symbol:
+                self._trades.pop(symbol, None)
+                self._cumulative_delta.pop(symbol, None)
+                self._last_price.pop(symbol, None)
+            else:
+                self._trades.clear()
+                self._cumulative_delta.clear()
+                self._last_price.clear()

@@ -32,6 +32,12 @@ from datetime import datetime
 
 import numpy as np
 
+try:
+    from risk_guardian import KellyVolSizer, SizingResult
+    _KELLY_AVAILABLE = True
+except ImportError:
+    _KELLY_AVAILABLE = False
+
 logger = logging.getLogger("portfolio_allocator")
 
 
@@ -122,8 +128,17 @@ class PortfolioAllocator:
       4. Return sized signals ready for execution
     """
 
-    def __init__(self, config: AllocatorConfig = None):
+    def __init__(self, config: AllocatorConfig = None, kelly_sizer: Optional[Any] = None):
         self.cfg = config or AllocatorConfig()
+
+        # Kelly+VolTarget sizer (institutional pipeline)
+        self._kelly_sizer = kelly_sizer
+        if self._kelly_sizer is None and _KELLY_AVAILABLE:
+            self._kelly_sizer = KellyVolSizer()
+
+        # Portfolio vol tracking (rolling 20-day)
+        self._portfolio_returns: List[float] = []
+        self._portfolio_vol: float = 0.10  # Default 10% annualized
 
         # Track strategy performance for dynamic reallocation
         self._strategy_trades: Dict[str, List[float]] = {
@@ -239,8 +254,23 @@ class PortfolioAllocator:
             if raw_size_pct <= 0:
                 raw_size_pct = self.cfg.max_position_pct * 0.5  # Default 2.5%
 
-            # Apply inverse-volatility weighting
-            if self.cfg.use_inv_vol_weighting and sig.symbol in volatilities:
+            # ── Kelly+VolTarget sizing (if available) ──
+            if self._kelly_sizer is not None:
+                sym_vol = volatilities.get(sig.symbol, 0.25)
+                sizing = self._kelly_sizer.compute_position_size(
+                    symbol=sig.symbol,
+                    equity=equity,
+                    symbol_vol=sym_vol,
+                    portfolio_vol=self._portfolio_vol,
+                    signal_confidence=sig.confidence,
+                )
+                if sizing.rejected:
+                    logger.info(
+                        f"Kelly sizer REJECTED {sig.symbol}: {sizing.reject_reason}"
+                    )
+                    continue
+                raw_size_pct = sizing.final_size_pct
+            elif self.cfg.use_inv_vol_weighting and sig.symbol in volatilities:
                 vol = volatilities[sig.symbol]
                 if vol > 0:
                     # Higher vol -> smaller position
@@ -436,6 +466,27 @@ class PortfolioAllocator:
     def get_current_allocation(self) -> Dict[str, float]:
         """Get current strategy allocation percentages."""
         return dict(self._current_alloc)
+
+    def update_portfolio_return(self, daily_return: float):
+        """
+        Record a daily portfolio return for rolling vol estimation.
+        Call once per day with the portfolio's daily return.
+        """
+        self._portfolio_returns.append(daily_return)
+        if len(self._portfolio_returns) > 60:
+            self._portfolio_returns = self._portfolio_returns[-60:]
+        # Recompute 20-day realized vol
+        if len(self._portfolio_returns) >= 5:
+            recent = np.array(self._portfolio_returns[-20:])
+            self._portfolio_vol = float(np.std(recent) * np.sqrt(252))
+            if self._portfolio_vol < 0.01:
+                self._portfolio_vol = 0.01
+
+    def set_drawdown(self, current_drawdown: float):
+        """Update drawdown for Kelly sizer (called from risk_guardian)."""
+        if self._kelly_sizer is not None:
+            # Drawdown is passed through via compute_position_size each call
+            pass  # Drawdown is already tracked in risk_guardian
 
     def get_net_beta_estimate(
         self,

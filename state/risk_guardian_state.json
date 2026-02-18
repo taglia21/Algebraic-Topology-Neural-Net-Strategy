@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-02-17T21:30:22.794801",
+  "peak_equity": 100000,
+  "daily_start_equity": 95000,
+  "daily_start_date": "2026-02-17",
+  "consecutive_losses": 0,
+  "halted": false,
+  "liquidate_all": false,
+  "halt_reasons": [],
+  "partial_exits": [],
+  "trade_results": []
+}

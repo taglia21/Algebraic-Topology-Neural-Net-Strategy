@@ -54,6 +54,13 @@ except ImportError:
         "Install with: pip install statsmodels"
     )
 
+try:
+    from pykalman import KalmanFilter as _PyKalmanFilter
+    HAS_PYKALMAN = True
+except ImportError:
+    HAS_PYKALMAN = False
+    logger.info("pykalman not installed — using static OLS hedge ratios")
+
 
 # ============================================================================
 # UNIVERSE — 100+ liquid US equities grouped by GICS sector
@@ -156,11 +163,263 @@ class CointegrationResult:
     current_z_score: float              # Current z-score of the spread
     adf_stat: float                     # ADF test statistic on the spread
     correlation: float                  # Price correlation (for comparison)
+    kalman_half_life: float = 0.0       # Kalman-filtered OU half-life (more accurate)
     last_updated: str = ""
     is_tradeable: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+# ============================================================================
+# KALMAN FILTER FOR DYNAMIC HEDGE RATIOS
+# ============================================================================
+
+class KalmanHedgeRatio:
+    """
+    Time-varying hedge ratio estimation via Kalman filter.
+
+    Models the hedge ratio β and intercept α as a latent state that
+    evolves over time according to a random-walk transition:
+
+        state  = [α_t, β_t]'
+        obs    = log(A_t)
+        obs_eq = [1, log(B_t)] · state  +  ε_t
+        state  = state_{t-1}  +  η_t        (random walk)
+
+    Advantages over static OLS:
+      - Adapts to structural breaks in the relationship
+      - Produces tighter spreads → better z-scores
+      - Half-life estimation on Kalman spread is more accurate
+    """
+
+    def __init__(
+        self,
+        delta: float = 1e-4,
+        obs_noise: float = 1.0,
+    ):
+        """
+        Parameters
+        ----------
+        delta : float
+            Transition covariance scaling.  Smaller = smoother hedge ratio.
+            1e-4 is a good default for daily data.
+        obs_noise : float
+            Observation noise variance.  Controls how tightly we track prices.
+        """
+        self.delta = delta
+        self.obs_noise = obs_noise
+        self._state_mean: Optional[np.ndarray] = None
+        self._state_cov: Optional[np.ndarray] = None
+        self._hedge_ratios: List[float] = []
+        self._intercepts: List[float] = []
+        self._spreads: List[float] = []
+
+    def fit(
+        self,
+        log_prices_a: np.ndarray,
+        log_prices_b: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Run the Kalman filter over the full history.
+
+        Returns
+        -------
+        hedge_ratios : np.ndarray   — time-varying β_t
+        intercepts   : np.ndarray   — time-varying α_t
+        spreads      : np.ndarray   — Kalman-filtered spread (residual)
+        """
+        n = len(log_prices_a)
+        if n != len(log_prices_b):
+            raise ValueError("Price arrays must have same length")
+
+        if HAS_PYKALMAN:
+            return self._fit_pykalman(log_prices_a, log_prices_b)
+        return self._fit_manual(log_prices_a, log_prices_b)
+
+    def _fit_manual(
+        self,
+        log_a: np.ndarray,
+        log_b: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Manual Kalman filter implementation (no pykalman dependency)."""
+        n = len(log_a)
+        state_dim = 2  # [intercept, hedge_ratio]
+
+        # Initialise with OLS
+        x0 = np.polyfit(log_b[:min(60, n)], log_a[:min(60, n)], 1)
+        state = np.array([x0[1], x0[0]], dtype=float)  # [alpha, beta]
+        P = np.eye(state_dim) * 1.0
+
+        Q = np.eye(state_dim) * self.delta  # Transition noise
+        R = np.array([[self.obs_noise]])     # Observation noise
+
+        hedge_ratios = np.zeros(n)
+        intercepts = np.zeros(n)
+        spreads = np.zeros(n)
+
+        for t in range(n):
+            # Observation matrix: y_t = H_t · state_t + noise
+            H = np.array([[1.0, log_b[t]]])
+            y = log_a[t]
+
+            # Predict
+            state_pred = state  # Random walk
+            P_pred = P + Q
+
+            # Innovation
+            y_hat = float(H @ state_pred)
+            innovation = y - y_hat
+            S = float(H @ P_pred @ H.T + R)
+
+            # Kalman gain
+            K = (P_pred @ H.T) / S
+
+            # Update
+            state = state_pred + K.flatten() * innovation
+            P = P_pred - np.outer(K.flatten(), H.flatten()) @ P_pred
+
+            intercepts[t] = state[0]
+            hedge_ratios[t] = state[1]
+            spreads[t] = innovation  # Kalman residual = spread
+
+        self._state_mean = state
+        self._state_cov = P
+        self._hedge_ratios = hedge_ratios.tolist()
+        self._intercepts = intercepts.tolist()
+        self._spreads = spreads.tolist()
+
+        return hedge_ratios, intercepts, spreads
+
+    def _fit_pykalman(
+        self,
+        log_a: np.ndarray,
+        log_b: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Kalman filter using pykalman library."""
+        n = len(log_a)
+
+        # Build time-varying observation matrices: [[1, log_b_t]]
+        obs_matrices = np.zeros((n, 1, 2))
+        obs_matrices[:, 0, 0] = 1.0
+        obs_matrices[:, 0, 1] = log_b
+
+        kf = _PyKalmanFilter(
+            n_dim_obs=1,
+            n_dim_state=2,
+            transition_matrices=np.eye(2),
+            observation_matrices=obs_matrices,
+            initial_state_mean=np.zeros(2),
+            initial_state_covariance=np.eye(2),
+            transition_covariance=np.eye(2) * self.delta,
+            observation_covariance=np.array([[self.obs_noise]]),
+        )
+
+        state_means, state_covs = kf.filter(log_a.reshape(-1, 1))
+
+        intercepts = state_means[:, 0]
+        hedge_ratios = state_means[:, 1]
+        spreads = log_a - intercepts - hedge_ratios * log_b
+
+        self._state_mean = state_means[-1]
+        self._state_cov = state_covs[-1]
+        self._hedge_ratios = hedge_ratios.tolist()
+        self._intercepts = intercepts.tolist()
+        self._spreads = spreads.tolist()
+
+        return hedge_ratios, intercepts, spreads
+
+    def update(
+        self,
+        log_a_new: float,
+        log_b_new: float,
+    ) -> Tuple[float, float, float]:
+        """
+        Single-step Kalman update with a new observation.
+
+        Returns (hedge_ratio, intercept, spread).
+        """
+        if self._state_mean is None:
+            raise RuntimeError("Must call fit() before update()")
+
+        state = self._state_mean.copy()
+        P = self._state_cov.copy()
+        Q = np.eye(2) * self.delta
+        R = self.obs_noise
+        H = np.array([1.0, log_b_new])
+
+        # Predict
+        state_pred = state
+        P_pred = P + Q
+
+        # Innovate
+        y_hat = float(H @ state_pred)
+        innovation = log_a_new - y_hat
+        S = float(H @ P_pred @ H + R)
+        K = (P_pred @ H) / S
+
+        # Update
+        self._state_mean = state_pred + K * innovation
+        self._state_cov = P_pred - np.outer(K, H) @ P_pred
+
+        alpha = float(self._state_mean[0])
+        beta = float(self._state_mean[1])
+        spread = innovation
+
+        self._hedge_ratios.append(beta)
+        self._intercepts.append(alpha)
+        self._spreads.append(spread)
+
+        return beta, alpha, spread
+
+    @property
+    def current_hedge_ratio(self) -> float:
+        return self._hedge_ratios[-1] if self._hedge_ratios else 1.0
+
+    @property
+    def current_intercept(self) -> float:
+        return self._intercepts[-1] if self._intercepts else 0.0
+
+    @property
+    def spread_series(self) -> np.ndarray:
+        return np.array(self._spreads)
+
+    @staticmethod
+    def compute_ou_half_life(spread: np.ndarray) -> float:
+        """
+        Estimate Ornstein-Uhlenbeck half-life from a spread series.
+
+        Uses the regression:  Δs_t = a + θ · s_{t-1} + ε
+        Half-life = -ln(2) / θ
+
+        This is more accurate on a Kalman-filtered spread because
+        the spread itself is smoother and more stationary.
+        """
+        if len(spread) < 20:
+            return float('inf')
+
+        lagged = spread[:-1]
+        delta = np.diff(spread)
+
+        if HAS_STATSMODELS:
+            X = add_constant(lagged)
+            model = OLS(delta, X).fit()
+            theta = model.params[1]
+        else:
+            # Fallback: numpy least-squares
+            A = np.column_stack([np.ones(len(lagged)), lagged])
+            coefs, _, _, _ = np.linalg.lstsq(A, delta, rcond=None)
+            theta = coefs[1]
+
+        if theta >= 0:
+            return float('inf')  # Not mean-reverting
+
+        try:
+            half_life = -np.log(2) / np.log(1 + theta)
+        except (ValueError, RuntimeWarning):
+            half_life = np.log(2) / abs(theta)
+
+        return max(float(half_life), 0.1)
 
 
 # ============================================================================
@@ -369,6 +628,31 @@ class PairFinder:
             # Correlation (informational, not used for trading)
             correlation = float(np.corrcoef(pa, pb)[0, 1])
 
+            # Step 8: Kalman-filtered hedge ratio & half-life
+            kalman_hl = 0.0
+            try:
+                kalman = KalmanHedgeRatio(delta=1e-4, obs_noise=1.0)
+                k_hedge, k_intercept, k_spread = kalman.fit(log_a, log_b)
+                kalman_hl = KalmanHedgeRatio.compute_ou_half_life(k_spread)
+
+                # If Kalman half-life is valid, prefer it (more accurate)
+                if 0 < kalman_hl < float('inf'):
+                    # Use Kalman hedge ratio (latest) as the primary one
+                    beta = float(k_hedge[-1])
+                    alpha = float(k_intercept[-1])
+                    # Re-compute spread stats from Kalman spread
+                    spread = k_spread
+                    spread_mean = float(np.mean(spread))
+                    spread_std = float(np.std(spread))
+                    recent_spread = spread[-self.cfg.z_score_lookback:]
+                    z_mean = float(np.mean(recent_spread))
+                    z_std = float(np.std(recent_spread))
+                    current_z = float((spread[-1] - z_mean) / z_std) if z_std > 1e-10 else current_z
+                    # Use Kalman HL for trading, keep OLS HL for comparison
+                    half_life = kalman_hl
+            except Exception as e:
+                logger.debug(f"Kalman filter failed for {sym_a}/{sym_b}: {e}")
+
             return CointegrationResult(
                 sym_a=sym_a,
                 sym_b=sym_b,
@@ -382,6 +666,7 @@ class PairFinder:
                 current_z_score=current_z,
                 adf_stat=adf_stat,
                 correlation=correlation,
+                kalman_half_life=kalman_hl,
                 last_updated=datetime.now().isoformat(),
                 is_tradeable=True,
             )
@@ -441,7 +726,9 @@ class PairFinder:
         price_b: np.ndarray,
     ) -> Tuple[float, float]:
         """
-        Compute current z-score for a pair using rolling hedge ratio.
+        Compute current z-score for a pair using Kalman-filtered hedge ratio.
+
+        Falls back to rolling OLS when Kalman is unavailable.
 
         Parameters
         ----------
@@ -455,7 +742,7 @@ class PairFinder:
         z_score : float
             Current z-score of the spread.
         hedge_ratio : float
-            Current rolling hedge ratio.
+            Current (Kalman-filtered or rolling OLS) hedge ratio.
         """
         if len(price_a) < self.cfg.hedge_ratio_lookback or len(price_b) < self.cfg.hedge_ratio_lookback:
             return 0.0, pair.hedge_ratio
@@ -463,7 +750,29 @@ class PairFinder:
         log_a = np.log(price_a[-self.cfg.hedge_ratio_lookback:])
         log_b = np.log(price_b[-self.cfg.hedge_ratio_lookback:])
 
-        # Rolling OLS for hedge ratio (adapts to changing relationship)
+        # --- Kalman-filtered hedge ratio (preferred) ---
+        try:
+            kalman = KalmanHedgeRatio(delta=1e-4, obs_noise=1.0)
+            k_hedge, k_intercept, k_spread = kalman.fit(log_a, log_b)
+            beta = float(k_hedge[-1])
+            alpha = float(k_intercept[-1])
+
+            # Use full price history for spread, but Kalman's latest beta
+            spread = np.log(price_a) - beta * np.log(price_b) - alpha
+            recent = spread[-self.cfg.z_score_lookback:]
+            z_mean = float(np.mean(recent))
+            z_std = float(np.std(recent))
+
+            if z_std < 1e-10:
+                return 0.0, beta
+
+            z_score = float((spread[-1] - z_mean) / z_std)
+            return z_score, beta
+
+        except Exception:
+            pass  # Fall through to OLS
+
+        # --- Fallback: rolling OLS ---
         try:
             X = add_constant(log_b) if HAS_STATSMODELS else np.column_stack([np.ones(len(log_b)), log_b])
             if HAS_STATSMODELS:
@@ -471,15 +780,11 @@ class PairFinder:
                 alpha = model.params[0]
                 beta = model.params[1]
             else:
-                # Fallback: numpy least-squares
                 beta, alpha = np.polyfit(log_b, log_a, 1)
         except Exception:
             return 0.0, pair.hedge_ratio
 
-        # Spread using rolling hedge ratio
         spread = np.log(price_a) - beta * np.log(price_b) - alpha
-
-        # Z-score over lookback window
         recent = spread[-self.cfg.z_score_lookback:]
         z_mean = float(np.mean(recent))
         z_std = float(np.std(recent))

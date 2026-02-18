@@ -599,3 +599,164 @@ if __name__ == "__main__":
     print(f"  Circuit breaker: {snapshot.circuit_breaker_triggered}")
     print(f"  Gamma scalp: {snapshot.gamma_scalp_opportunity}")
     print("Greeks manager OK")
+
+
+# ============================================================================
+# PORTFOLIO GREEKS AGGREGATOR — wraps GreeksManager + DeltaHedger
+# ============================================================================
+
+@dataclass
+class AggregatedExposure:
+    """Full portfolio exposure: options Greeks + equity beta-delta."""
+    options_delta: float = 0.0
+    equity_delta: float = 0.0       # sum(shares × beta × share_price / scale)
+    total_delta: float = 0.0
+    net_gamma: float = 0.0
+    net_theta: float = 0.0
+    net_vega: float = 0.0
+    needs_hedge: bool = False
+    hedge_reason: str = ""
+    circuit_breaker: bool = False
+    circuit_breaker_reason: str = ""
+    gamma_scalp: bool = False
+    timestamp: datetime = field(default_factory=datetime.now)
+
+    def describe(self) -> str:
+        return (
+            f"Δ_total={self.total_delta:+.2f} "
+            f"(opt={self.options_delta:+.2f} eq={self.equity_delta:+.2f}) "
+            f"Γ={self.net_gamma:+.4f} Θ=${self.net_theta:+.1f}/d "
+            f"ν=${self.net_vega:+.1f} "
+            f"hedge={'YES' if self.needs_hedge else 'no'}"
+        )
+
+
+class PortfolioGreeksAggregator:
+    """
+    Aggregate options Greeks and equity beta-delta into a single exposure.
+
+    Combines:
+      1. GreeksManager  — BS options Greeks (delta, gamma, theta, vega)
+      2. Equity holdings — approximated as delta-1 × beta per share
+      3. Auto-hedge decision — triggers DeltaHedger when thresholds exceeded
+
+    Parameters
+    ----------
+    greeks_config : GreeksConfig, optional
+    equity_beta_map : dict, optional
+        {symbol: beta_to_SPY}. Defaults to 1.0 for unknowns.
+    notional_scale : float
+        Scale for delta normalisation (default $100k).
+    """
+
+    DEFAULT_BETAS: Dict[str, float] = {
+        "SPY": 1.0, "QQQ": 1.15, "IWM": 1.20,
+        "XLK": 1.10, "XLF": 1.05, "XLE": 0.95,
+        "XLV": 0.80, "XLP": 0.65, "XLI": 1.00,
+        "AAPL": 1.20, "MSFT": 1.10, "GOOGL": 1.15,
+        "AMZN": 1.25, "NVDA": 1.60, "META": 1.30,
+        "TSLA": 1.80, "JPM": 1.10, "BAC": 1.15, "GS": 1.25,
+        "TLT": -0.30, "GLD": 0.05, "HYG": 0.40,
+    }
+
+    def __init__(
+        self,
+        greeks_config: Optional[GreeksConfig] = None,
+        equity_beta_map: Optional[Dict[str, float]] = None,
+        notional_scale: float = 100_000.0,
+    ):
+        self.greeks_mgr = GreeksManager(config=greeks_config)
+        self.betas = dict(self.DEFAULT_BETAS)
+        if equity_beta_map:
+            self.betas.update(equity_beta_map)
+        self.scale = notional_scale
+        self._last_exposure: Optional[AggregatedExposure] = None
+        self.logger = logging.getLogger(f"{__name__}.PortfolioGreeksAggregator")
+
+    def get_beta(self, symbol: str) -> float:
+        """Look up beta for a symbol (default 1.0)."""
+        return self.betas.get(symbol, 1.0)
+
+    def compute_equity_delta(
+        self, equity_positions: Dict[str, Tuple[int, float]]
+    ) -> float:
+        """
+        Compute equity beta-delta.
+
+        Parameters
+        ----------
+        equity_positions : dict
+            {symbol: (shares, current_price)}
+
+        Returns
+        -------
+        float
+            Equity delta normalised to ``notional_scale``.
+        """
+        raw_delta = 0.0
+        for sym, (shares, price) in equity_positions.items():
+            beta = self.get_beta(sym)
+            raw_delta += shares * price * beta
+        return raw_delta / self.scale
+
+    def aggregate(
+        self,
+        option_positions: Optional[List[dict]] = None,
+        equity_positions: Optional[Dict[str, Tuple[int, float]]] = None,
+    ) -> AggregatedExposure:
+        """
+        Compute aggregated exposure for full portfolio.
+
+        Parameters
+        ----------
+        option_positions : list[dict], optional
+            Option positions for GreeksManager.calculate_portfolio_greeks().
+        equity_positions : dict, optional
+            {symbol: (shares, current_price)} for equity delta.
+
+        Returns
+        -------
+        AggregatedExposure
+        """
+        exp = AggregatedExposure()
+
+        # Options Greeks
+        if option_positions:
+            snapshot = self.greeks_mgr.calculate_portfolio_greeks(option_positions)
+            exp.options_delta = snapshot.net_delta
+            exp.net_gamma = snapshot.net_gamma
+            exp.net_theta = snapshot.net_theta
+            exp.net_vega = snapshot.net_vega
+            exp.circuit_breaker = snapshot.circuit_breaker_triggered
+            exp.circuit_breaker_reason = snapshot.circuit_breaker_reason
+            exp.gamma_scalp = snapshot.gamma_scalp_opportunity
+
+        # Equity delta
+        if equity_positions:
+            exp.equity_delta = self.compute_equity_delta(equity_positions)
+
+        # Total
+        exp.total_delta = exp.options_delta + exp.equity_delta
+
+        # Hedge decision on total delta
+        threshold = self.greeks_mgr.config.delta_hedge_threshold
+        max_delta = self.greeks_mgr.config.max_portfolio_delta
+        abs_td = abs(exp.total_delta)
+        if abs_td > max_delta:
+            exp.needs_hedge = True
+            exp.hedge_reason = (
+                f"Total delta {exp.total_delta:+.2f} exceeds max {max_delta:.2f}"
+            )
+        elif abs_td > threshold:
+            exp.needs_hedge = True
+            exp.hedge_reason = (
+                f"Total delta {exp.total_delta:+.2f} exceeds threshold {threshold:.2f}"
+            )
+
+        self._last_exposure = exp
+        self.logger.info(f"Aggregated exposure: {exp.describe()}")
+        return exp
+
+    @property
+    def last_exposure(self) -> Optional[AggregatedExposure]:
+        return self._last_exposure

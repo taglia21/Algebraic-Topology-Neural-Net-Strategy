@@ -142,6 +142,28 @@ except ImportError:
     HAS_TDA = False
 
 # ---------------------------------------------------------------------------
+# Phase C: Kalman spread tracking, transaction costs, retraining
+# ---------------------------------------------------------------------------
+
+try:
+    from pair_finder import KalmanSpreadTracker
+    HAS_KALMAN_TRACKER = True
+except ImportError:
+    HAS_KALMAN_TRACKER = False
+
+try:
+    from src.risk.transaction_costs import TransactionCostModel
+    HAS_TCA = True
+except ImportError:
+    HAS_TCA = False
+
+try:
+    from src.ml.retraining_scheduler import RetrainingScheduler, RetrainingConfig
+    HAS_RETRAIN = True
+except ImportError:
+    HAS_RETRAIN = False
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
@@ -270,6 +292,10 @@ class EquityEngine:
         self.tda_engine = None
         self._nn_trained = False
 
+        # Phase C: Kalman + TCA + retraining
+        self.tca_model = None
+        self.retrain_scheduler = None
+
         self.logger = logging.getLogger("equity_engine")
         self._high_water_marks: dict[str, float] = {}
 
@@ -393,12 +419,37 @@ class EquityEngine:
             except Exception as e:
                 self.logger.warning(f"TDAFeatureGenerator init failed: {e}")
 
+        # 12. Transaction Cost Model (Phase C)
+        if HAS_TCA:
+            try:
+                self.tca_model = TransactionCostModel()
+                self.logger.info("TransactionCostModel loaded (pre-trade cost gate)")
+            except Exception as e:
+                self.logger.warning(f"TransactionCostModel init failed: {e}")
+
+        # 13. Retraining Scheduler (Phase C)
+        if HAS_RETRAIN:
+            try:
+                self.retrain_scheduler = RetrainingScheduler(
+                    config=RetrainingConfig(
+                        accuracy_floor=0.52,
+                        sharpe_floor=0.3,
+                        check_interval_hours=24,
+                        cooldown_hours=72,
+                    ),
+                )
+                self.logger.info("RetrainingScheduler loaded (performance watchdog)")
+            except Exception as e:
+                self.logger.warning(f"RetrainingScheduler init failed: {e}")
+
         _phase_b = []
         if self.signal_aggregator: _phase_b.append("SignalAgg")
         if self.nn_predictor: _phase_b.append("NNPredictor")
         if self.smart_executor: _phase_b.append("SmartExec")
         if self.signal_filter: _phase_b.append("SigFilter")
         if self.tda_engine: _phase_b.append("TDA")
+        if self.tca_model: _phase_b.append("TCA")
+        if self.retrain_scheduler: _phase_b.append("Retrain")
 
         self.logger.info(
             f"Equity engine initialized (mode={self.mode}) with "
@@ -749,6 +800,31 @@ class EquityEngine:
                     decision.recommended_quantity = max(1, int(equity * 0.08 / decision.entry_price))
                     proposed_cost = decision.recommended_quantity * decision.entry_price
 
+                # Phase C: Transaction Cost gate
+                if self.tca_model:
+                    try:
+                        _vol = None
+                        if price_data is not None and len(price_data) >= 22:
+                            _rets = np.diff(price_data[-22:]) / np.maximum(price_data[-22:-1], 1e-8)
+                            _vol = float(np.std(_rets))
+                        _adv = None
+                        if vol_data is not None and len(vol_data) >= 20:
+                            _adv = float(np.mean(vol_data[-20:]))
+                        tca_est = self.tca_model.estimate_cost(
+                            symbol=symbol,
+                            qty=decision.recommended_quantity,
+                            price=decision.entry_price,
+                            side="buy",
+                            adv=_adv,
+                            volatility=_vol,
+                        )
+                        allowed, tca_reason = self.tca_model.should_trade(tca_est)
+                        if not allowed:
+                            self.logger.info(f"TCA blocked {symbol}: {tca_reason}")
+                            continue
+                    except Exception as e:
+                        self.logger.debug(f"TCA error {symbol}: {e}")
+
                 self.logger.info(
                     f"EQUITY SIGNAL: {symbol} → {decision.signal.name} "
                     f"(conf={decision.confidence:.2f}, combined={decision.combined_score:.2f}, "
@@ -792,6 +868,18 @@ class EquityEngine:
                 regime_scale=self._regime_size_scale,
                 max_dd_pct=dd_pct,
             )
+
+        # ── Phase C: Retraining check (once per cycle) ──
+        if self.retrain_scheduler:
+            try:
+                result = self.retrain_scheduler.check_and_retrain()
+                if result.get("triggered"):
+                    self.logger.info(
+                        f"🔄 Retrain result: success={result.get('success')}, "
+                        f"reason={result.get('reason')}"
+                    )
+            except Exception as e:
+                self.logger.debug(f"RetrainingScheduler check error: {e}")
 
     def _fetch_price_array(self, symbol: str) -> Optional[np.ndarray]:
         """Fetch recent close prices as numpy array."""

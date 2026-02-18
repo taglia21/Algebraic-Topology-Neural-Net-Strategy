@@ -424,6 +424,167 @@ class KalmanHedgeRatio:
 
 
 # ============================================================================
+# KALMAN SPREAD TRACKER — STREAMING Z-SCORE + SIGNAL GENERATION
+# ============================================================================
+
+class KalmanSpreadTracker:
+    """
+    High-level streaming spread tracker for pairs trading.
+
+    Wraps KalmanHedgeRatio and adds:
+      - Rolling z-score normalisation (expanding window, minimum 60 obs)
+      - Signal generation: entry/exit z-score levels
+      - Half-life estimation on the live Kalman spread
+      - State persistence (serialisable to dict)
+
+    Usage::
+
+        tracker = KalmanSpreadTracker(
+            entry_z=2.0, exit_z=0.5, stop_z=3.5,
+        )
+        # Bootstrap with history
+        tracker.fit(log_prices_a, log_prices_b)
+
+        # Stream new observations
+        sig = tracker.update(log_a_new, log_b_new)
+        # sig.z_score, sig.signal ('long_spread', 'short_spread', 'exit', 'stop', 'neutral')
+    """
+
+    def __init__(
+        self,
+        entry_z: float = 2.0,
+        exit_z: float = 0.5,
+        stop_z: float = 3.5,
+        kalman_delta: float = 1e-4,
+        kalman_obs_noise: float = 1.0,
+        min_obs_for_z: int = 60,
+    ):
+        self.entry_z = entry_z
+        self.exit_z = exit_z
+        self.stop_z = stop_z
+        self.min_obs_for_z = min_obs_for_z
+
+        self._kalman = KalmanHedgeRatio(delta=kalman_delta, obs_noise=kalman_obs_noise)
+        self._spread_mean: float = 0.0
+        self._spread_m2: float = 0.0   # for Welford's online variance
+        self._n_obs: int = 0
+        self._last_signal: str = "neutral"  # state machine for exits
+
+    # ── Batch bootstrap ──────────────────────────────────────────
+
+    def fit(
+        self,
+        log_prices_a: np.ndarray,
+        log_prices_b: np.ndarray,
+    ):
+        """Bootstrap Kalman filter + spread stats on historical data."""
+        _, _, spreads = self._kalman.fit(log_prices_a, log_prices_b)
+        # Initialise rolling stats via Welford
+        for s in spreads:
+            self._welford_update(s)
+
+    # ── Streaming update ─────────────────────────────────────────
+
+    def update(self, log_a: float, log_b: float) -> dict:
+        """
+        Process one new observation.
+
+        Returns
+        -------
+        dict with keys:
+            hedge_ratio, intercept, spread, z_score, signal, half_life
+        """
+        beta, alpha, spread = self._kalman.update(log_a, log_b)
+        self._welford_update(spread)
+
+        z = self._z_score(spread)
+        signal = self._generate_signal(z)
+
+        half_life = float('inf')
+        spread_arr = self._kalman.spread_series
+        if len(spread_arr) >= 60:
+            half_life = KalmanHedgeRatio.compute_ou_half_life(spread_arr[-252:])
+
+        return {
+            "hedge_ratio": beta,
+            "intercept": alpha,
+            "spread": spread,
+            "z_score": z,
+            "signal": signal,
+            "half_life": half_life,
+            "n_obs": self._n_obs,
+        }
+
+    # ── Signal state machine ─────────────────────────────────────
+
+    def _generate_signal(self, z: float) -> str:
+        """
+        Entry/exit signal based on z-score thresholds.
+
+        State transitions:
+            neutral → short_spread   if z > +entry_z
+            neutral → long_spread    if z < -entry_z
+            short_spread → exit      if z < +exit_z
+            long_spread → exit       if z > -exit_z
+            any → stop               if |z| > stop_z
+        """
+        if abs(z) >= self.stop_z:
+            self._last_signal = "neutral"
+            return "stop"
+
+        if self._last_signal == "neutral":
+            if z >= self.entry_z:
+                self._last_signal = "short_spread"
+                return "short_spread"
+            elif z <= -self.entry_z:
+                self._last_signal = "long_spread"
+                return "long_spread"
+            return "neutral"
+
+        if self._last_signal == "short_spread":
+            if z <= self.exit_z:
+                self._last_signal = "neutral"
+                return "exit"
+            return "short_spread"
+
+        if self._last_signal == "long_spread":
+            if z >= -self.exit_z:
+                self._last_signal = "neutral"
+                return "exit"
+            return "long_spread"
+
+        return "neutral"
+
+    # ── Welford online mean/var ──────────────────────────────────
+
+    def _welford_update(self, value: float):
+        self._n_obs += 1
+        delta = value - self._spread_mean
+        self._spread_mean += delta / self._n_obs
+        delta2 = value - self._spread_mean
+        self._spread_m2 += delta * delta2
+
+    def _z_score(self, spread: float) -> float:
+        if self._n_obs < self.min_obs_for_z:
+            return 0.0
+        var = self._spread_m2 / self._n_obs
+        std = np.sqrt(var) if var > 0 else 1e-8
+        return (spread - self._spread_mean) / std
+
+    # ── Serialisation ────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        return {
+            "n_obs": self._n_obs,
+            "spread_mean": self._spread_mean,
+            "spread_var": self._spread_m2 / max(self._n_obs, 1),
+            "hedge_ratio": self._kalman.current_hedge_ratio,
+            "intercept": self._kalman.current_intercept,
+            "last_signal": self._last_signal,
+        }
+
+
+# ============================================================================
 # PAIR FINDER
 # ============================================================================
 

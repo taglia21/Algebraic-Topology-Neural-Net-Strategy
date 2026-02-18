@@ -57,6 +57,16 @@ COMMS = ['NFLX', 'DIS', 'CMCSA', 'T', 'VZ', 'TMUS', 'EA', 'CHTR']
 
 UTILITIES = ['NEE', 'DUK', 'SO', 'D', 'AEP', 'AMT', 'PLD', 'CCI', 'EQIX', 'PSA']
 
+# ── Phase 3: Quality filters ────────────────────────────────────
+# Symbols banned from entry (chronic losers, broken tickers)
+BANNED_SYMBOLS: set = {
+    'BBBY', 'SIVB', 'FRC',   # Delisted / bankrupt
+    'COIN',                   # Excessive drawdowns
+}
+
+# Max beta allowed for new entries (skip hyper-volatile names)
+MAX_BETA: float = 2.5
+
 def get_full_universe():
     """Get complete trading universe - ~200 liquid stocks."""
     all_symbols = set()

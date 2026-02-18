@@ -64,6 +64,12 @@ except ImportError:
     _HMM_AVAILABLE = False
 
 try:
+    from src.regime_detector import LiveRegimeDetector, RegimeAdjustments, LiveRegime
+    _LIVE_REGIME_AVAILABLE = True
+except ImportError:
+    _LIVE_REGIME_AVAILABLE = False
+
+try:
     from src.quant_models.garch import GARCHModel
     _GARCH_AVAILABLE = True
 except ImportError:
@@ -76,7 +82,7 @@ except ImportError:
     _STACKER_AVAILABLE = False
 
 try:
-    from src.order_flow_analyzer import OrderFlowAnalyzer
+    from src.order_flow_analyzer import OrderFlowAnalyzer, RealTimeFlowTracker
     _FLOW_AVAILABLE = True
 except ImportError:
     _FLOW_AVAILABLE = False
@@ -86,6 +92,12 @@ try:
     _ADAPTIVE_AVAILABLE = True
 except ImportError:
     _ADAPTIVE_AVAILABLE = False
+
+try:
+    from src.sentiment_alpha import SentimentSignalProcessor, SentimentSignal
+    _SENTIMENT_AVAILABLE = True
+except ImportError:
+    _SENTIMENT_AVAILABLE = False
 
 logger = logging.getLogger("strategy_engine")
 
@@ -350,13 +362,13 @@ class EngineConfig:
 
     # --- STRATEGY B: Mean Reversion (Bollinger + RSI) ---
     mr_bb_period: int = 20              # 20-period Bollinger Bands (standard)
-    mr_bb_std: float = 2.0              # 2.0 standard deviations (captures 95% of moves)
+    mr_bb_std: float = 2.5              # 2.5 standard deviations (wider entry -> fewer false MR)
     mr_rsi_period: int = 14             # 14-period RSI (standard)
-    mr_rsi_oversold: float = 30.0       # RSI < 30 = oversold (buy)
+    mr_rsi_oversold: float = 25.0       # RSI < 25 = oversold (stricter filter)
     mr_rsi_overbought: float = 70.0     # RSI > 70 = overbought (sell)
     mr_volume_spike: float = 1.5        # Volume must be 1.5x 20-day avg (confirms capitulation)
-    mr_atr_stop_mult: float = 1.5       # Stop at 1.5x ATR from entry (tight for MR)
-    mr_max_hold_days: int = 5           # Max 5 day hold (MR is fast or it's wrong)
+    mr_atr_stop_mult: float = 2.5       # Stop at 2.5x ATR from entry (wider for MR)
+    mr_max_hold_days: int = 8           # Max 8 day hold (give MR more room)
     mr_target_sma: bool = True          # Target = 20-day SMA (reversion target)
     mr_max_positions: int = 5           # Max 5 MR positions
 
@@ -379,10 +391,12 @@ class EngineConfig:
 
     # --- Advanced modules (graceful fallback when unavailable) ---
     use_hmm_regime: bool = True         # Use HMM regime instead of 200-SMA
+    use_live_regime: bool = True        # Use 3-state LiveRegimeDetector for strategy weighting
     use_garch_stops: bool = True        # Use GARCH vol for dynamic stops
     use_ml_stacker: bool = True         # Score signals through ML ensemble
     use_order_flow: bool = True         # Confirm signals with institutional flow
     use_adaptive_params: bool = True    # Self-tune thresholds from P&L
+    use_sentiment: bool = True          # Process sentiment with decay for confidence boost
     hmm_high_vol_scale: float = 0.5     # Scale confidence by this in HIGH_VOL regime
     flow_reject_threshold: float = -0.3 # Reject signals with flow score below this
 
@@ -430,9 +444,19 @@ class StrategyEngine:
         self._garch: Optional[Any] = None
         self._stacker: Optional[Any] = None
         self._flow_analyzer: Optional[Any] = None
+        self._rt_flow_tracker: Optional[Any] = None
         self._adaptive_tuner: Optional[Any] = None
+        self._live_regime: Optional[Any] = None
         self._current_regime: str = "unknown"
         self._regime_probs: Optional[np.ndarray] = None
+        self._regime_adjustments: Optional[Any] = None
+
+        if self.cfg.use_live_regime and _LIVE_REGIME_AVAILABLE:
+            try:
+                self._live_regime = LiveRegimeDetector(lookback_bars=252, refit_days=7)
+                logger.info("LiveRegimeDetector (3-state) initialized")
+            except Exception as e:
+                logger.warning(f"LiveRegimeDetector init failed: {e}")
 
         if self.cfg.use_hmm_regime and _HMM_AVAILABLE:
             try:
@@ -458,7 +482,8 @@ class StrategyEngine:
         if self.cfg.use_order_flow and _FLOW_AVAILABLE:
             try:
                 self._flow_analyzer = OrderFlowAnalyzer()
-                logger.info("Order flow analyzer initialized")
+                self._rt_flow_tracker = RealTimeFlowTracker(window_seconds=60)
+                logger.info("Order flow analyzer + real-time tracker initialized")
             except Exception as e:
                 logger.warning(f"Order flow init failed: {e}")
 
@@ -468,6 +493,17 @@ class StrategyEngine:
                 logger.info("Adaptive parameter tuner initialized")
             except Exception as e:
                 logger.warning(f"Adaptive tuner init failed: {e}")
+
+        self._sentiment_processor: Optional[Any] = None
+        if self.cfg.use_sentiment and _SENTIMENT_AVAILABLE:
+            try:
+                self._sentiment_processor = SentimentSignalProcessor(
+                    fast_half_life_hours=6.0,
+                    slow_half_life_hours=24.0,
+                )
+                logger.info("Sentiment signal processor initialized (6h/24h decay)")
+            except Exception as e:
+                logger.warning(f"Sentiment processor init failed: {e}")
 
     # ------------------------------------------------------------------
     # Advanced module helpers
@@ -548,9 +584,24 @@ class StrategyEngine:
         Get institutional flow score for a symbol.
         Returns (smart_money_score, bias_string).
         Score is in [-1, 1]: positive = accumulation, negative = distribution.
+
+        Uses real-time microstructure data when available, falls back to bar-based analysis.
         """
         if self._flow_analyzer is None or ohlcv_data is None:
             return 0.0, "neutral"
+
+        # 1. Try real-time microstructure signal first
+        if self._rt_flow_tracker is not None and self._rt_flow_tracker.is_connected:
+            try:
+                micro = self._rt_flow_tracker.get_microstructure_signal(symbol)
+                if micro.confidence >= 0.2:
+                    logger.debug(
+                        f"RT flow {symbol}: imb={micro.imbalance_score:+.3f} "
+                        f"conf={micro.confidence:.2f} dir={micro.suggested_direction}"
+                    )
+                    return micro.imbalance_score, micro.suggested_direction
+            except Exception as e:
+                logger.debug(f"RT flow failed for {symbol}: {e}")
 
         try:
             if symbol not in ohlcv_data:
@@ -577,16 +628,32 @@ class StrategyEngine:
 
     def _apply_regime_scaling(self, signal: TradeSignal, regime: str, regime_conf: float) -> TradeSignal:
         """
-        Scale signal confidence based on current regime.
+        Scale signal confidence and sizing based on current regime.
 
-        - HIGH_VOLATILITY: reduce confidence (risky)
-        - MEAN_REVERTING regime + MR strategy: boost confidence
-        - TRENDING regime + MOMENTUM strategy: boost confidence
-        - Mismatch (e.g. momentum in mean-reverting): reduce
+        If LiveRegimeDetector is active, uses its position_scale & stop_multiplier.
+        Otherwise falls back to the original hardcoded rules.
         """
         signal.regime = regime
         signal.regime_confidence = regime_conf
 
+        # --- Live regime path (preferred) ---
+        if self._regime_adjustments is not None:
+            adj = self._regime_adjustments
+            signal.confidence *= adj.position_scale
+            signal.position_size_pct *= adj.position_scale
+
+            # Tighter or looser stops via stop_multiplier
+            if signal.stop_price > 0 and signal.atr > 0:
+                if signal.direction == SignalDirection.LONG:
+                    gap = signal.entry_price - signal.stop_price
+                    signal.stop_price = signal.entry_price - gap * adj.stop_multiplier
+                elif signal.direction == SignalDirection.SHORT:
+                    gap = signal.stop_price - signal.entry_price
+                    signal.stop_price = signal.entry_price + gap * adj.stop_multiplier
+                signal.stop_price = round(signal.stop_price, 2)
+            return signal
+
+        # --- Fallback: original hardcoded logic ---
         if regime == "high_volatility":
             signal.confidence *= self.cfg.hmm_high_vol_scale
             signal.position_size_pct *= self.cfg.hmm_high_vol_scale
@@ -623,6 +690,29 @@ class StrategyEngine:
             signal.confidence = min(0.95, signal.confidence * (1 + abs(flow_score) * 0.2))
 
         return signal
+
+    # ------------------------------------------------------------------
+    # Real-Time Flow Connection
+    # ------------------------------------------------------------------
+
+    def connect_realtime_flow(self, api_client: Optional[object] = None, symbols: Optional[list] = None):
+        """
+        Connect the real-time flow tracker to live trade stream.
+
+        Args:
+            api_client: Alpaca API client with streaming support.
+            symbols: List of symbols to subscribe to.
+        """
+        if self._rt_flow_tracker is not None:
+            self._rt_flow_tracker.connect_realtime(api_client, symbols)
+            logger.info(f"Real-time flow tracker connected for {len(symbols or [])} symbols")
+        else:
+            logger.warning("Real-time flow tracker not available")
+
+    def feed_trade_tick(self, symbol: str, price: float, size: float):
+        """Feed a single trade tick to the real-time flow tracker (manual mode)."""
+        if self._rt_flow_tracker is not None:
+            self._rt_flow_tracker.on_trade(symbol, price, size)
 
     # ------------------------------------------------------------------
     # Main entry point — get all signals
@@ -664,8 +754,27 @@ class StrategyEngine:
         all_signals: List[TradeSignal] = []
         timestamp = datetime.now().isoformat()
 
-        # --- Detect regime via HMM (before scanning strategies) ---
-        regime, regime_conf = self._detect_regime(price_data)
+        # --- 1. Live regime detection (3-state, preferred) ---
+        self._regime_adjustments = None
+        regime_adj: Optional[Any] = None
+
+        if self._live_regime is not None:
+            try:
+                ref_sym = "SPY" if "SPY" in price_data.columns else price_data.columns[0]
+                spy_prices = price_data[ref_sym].dropna().values.astype(float)
+                regime_adj = self._live_regime.predict_regime(spy_prices)
+                self._regime_adjustments = regime_adj
+                regime = regime_adj.regime.value          # "bull" / "neutral" / "bear"
+                regime_conf = regime_adj.confidence
+                self._current_regime = regime
+                logger.info(f"LiveRegime: {regime_adj.describe()}")
+            except Exception as e:
+                logger.warning(f"LiveRegimeDetector failed, falling back to HMM: {e}")
+                regime_adj = None
+
+        # Fallback to legacy 4-state HMM if live detector unavailable
+        if regime_adj is None:
+            regime, regime_conf = self._detect_regime(price_data)
 
         # --- Get adaptive parameter adjustments ---
         adjustments = None
@@ -682,27 +791,51 @@ class StrategyEngine:
         # Refresh cointegrated pairs if needed
         self._refresh_pairs_if_needed(price_data, volume_data)
 
-        # --- Strategy A: Pairs Trading (50% allocation) ---
+        # --- Strategy scanning (weights driven by regime) ---
+        # Default weights match EngineConfig allocations
+        w_pairs = self.cfg.pairs_allocation
+        w_mr = self.cfg.mr_allocation
+        w_mom = self.cfg.momentum_allocation
+        if regime_adj is not None:
+            w_pairs = regime_adj.strategy_weights.get("pairs", w_pairs)
+            w_mr = regime_adj.strategy_weights.get("mr", w_mr)
+            w_mom = regime_adj.strategy_weights.get("momentum", w_mom)
+            logger.info(
+                f"Regime-weighted allocations: pairs={w_pairs:.0%} "
+                f"mr={w_mr:.0%} mom={w_mom:.0%}"
+            )
+
+        # --- Strategy A: Pairs Trading ---
         pairs_signals = self._scan_pairs(price_data, equity, current_positions, timestamp)
+        # Scale position sizes by regime weight ratio
+        for sig in pairs_signals:
+            sig.position_size_pct *= (w_pairs / self.cfg.pairs_allocation)
         all_signals.extend(pairs_signals)
         logger.info(f"Pairs trading: {len(pairs_signals)} signals")
 
-        # --- Strategy B: Mean Reversion (30% allocation) ---
+        # --- Strategy B: Mean Reversion ---
         mr_signals = self._scan_mean_reversion(
             price_data, volume_data, ohlcv_data, equity, current_positions, timestamp
         )
+        for sig in mr_signals:
+            sig.position_size_pct *= (w_mr / self.cfg.mr_allocation)
         all_signals.extend(mr_signals)
         logger.info(f"Mean reversion: {len(mr_signals)} signals")
 
-        # --- Strategy C: Momentum (20% allocation, only if A+B have few signals) ---
-        # Momentum is a FALLBACK — only used when stat-arb has no signals
-        if len(pairs_signals) + len(mr_signals) < 2:
+        # --- Strategy C: Momentum ---
+        # In BULL regime (high momentum weight), always scan momentum.
+        # Otherwise, momentum is a fallback when stat-arb has few signals.
+        run_momentum = (w_mom >= 0.30) or (len(pairs_signals) + len(mr_signals) < 2)
+        if run_momentum:
             mom_signals = self._scan_momentum(
                 price_data, volume_data, ohlcv_data, equity, current_positions, timestamp
             )
+            for sig in mom_signals:
+                sig.position_size_pct *= (w_mom / self.cfg.momentum_allocation)
             all_signals.extend(mom_signals)
-            logger.info(f"Momentum (fallback): {len(mom_signals)} signals")
+            logger.info(f"Momentum: {len(mom_signals)} signals (w_mom={w_mom:.0%})")
         else:
+            mom_signals = []
             logger.info("Momentum skipped — stat-arb strategies have signals")
 
         # --- Post-processing: apply regime scaling ---
@@ -756,6 +889,30 @@ class StrategyEngine:
                         sig.confidence = 0.6 * sig.confidence + 0.4 * result.alpha_score
             except Exception as e:
                 logger.debug(f"ML stacker scoring failed: {e}")
+
+        # --- Post-processing: sentiment signal boost ---
+        if self._sentiment_processor is not None:
+            try:
+                syms_in_signals = set(s.symbol for s in all_signals if s.direction != SignalDirection.CLOSE)
+                if syms_in_signals:
+                    sent_batch = self._sentiment_processor.process_batch(list(syms_in_signals))
+                    for sig in all_signals:
+                        if sig.direction == SignalDirection.CLOSE:
+                            continue
+                        sent = sent_batch.get(sig.symbol)
+                        if sent is None:
+                            continue
+                        # Boost or penalize confidence based on agreement
+                        if sig.direction == SignalDirection.LONG and sent.blended_score > 0:
+                            sig.confidence = min(0.95, sig.confidence + sent.confidence_boost)
+                        elif sig.direction == SignalDirection.SHORT and sent.blended_score < 0:
+                            sig.confidence = min(0.95, sig.confidence + sent.confidence_boost)
+                        elif sent.contrarian_flag:
+                            # Contrarian: sentiment extreme opposes → reduce
+                            sig.confidence *= 0.85
+                        logger.debug(f"Sentiment {sig.symbol}: {sent.describe()}")
+            except Exception as e:
+                logger.debug(f"Sentiment processing failed: {e}")
 
         # Filter below minimum confidence
         all_signals = [s for s in all_signals if s.confidence >= self.cfg.min_confidence
@@ -1060,6 +1217,27 @@ class StrategyEngine:
             if current_price < 10:
                 continue  # Skip penny stocks
 
+            # Phase 3: banned symbol check
+            try:
+                from config.universe import BANNED_SYMBOLS
+                if sym in BANNED_SYMBOLS:
+                    continue
+            except ImportError:
+                pass
+
+            # Phase 3: freefall filter — skip if down >8% in last 5 bars
+            if len(prices) >= 6:
+                five_bar_ret = (prices[-1] / prices[-6]) - 1.0
+                if five_bar_ret < -0.08:
+                    continue
+
+            # Phase 3: trend filter — skip LONG if SMA50 < SMA200 (downtrend)
+            if len(prices) >= 200:
+                sma50 = float(np.mean(prices[-50:]))
+                sma200 = float(np.mean(prices[-200:]))
+                if sma50 < sma200:
+                    continue  # death cross — skip MR longs in downtrend
+
             # Bollinger Bands
             upper_bb, middle_bb, lower_bb = compute_bollinger_bands(
                 prices, self.cfg.mr_bb_period, self.cfg.mr_bb_std
@@ -1248,6 +1426,20 @@ class StrategyEngine:
             current_price = float(prices[-1])
             if current_price < 10:
                 continue
+
+            # Phase 3: banned symbol check
+            try:
+                from config.universe import BANNED_SYMBOLS
+                if sym in BANNED_SYMBOLS:
+                    continue
+            except ImportError:
+                pass
+
+            # Phase 3: freefall filter — skip if down >8% in last 5 bars
+            if len(prices) >= 6:
+                five_bar_ret = (prices[-1] / prices[-6]) - 1.0
+                if five_bar_ret < -0.08:
+                    continue
 
             # 200-day SMA — regime filter (enhanced by HMM when available)
             sma_200 = compute_sma(prices, self.cfg.mom_sma_period)

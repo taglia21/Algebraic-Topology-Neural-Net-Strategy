@@ -385,15 +385,16 @@ class AutonomousTradingEngine:
             alpaca_positions = self.trade_executor.trading_client.get_all_positions()
             total_delta = 0.0
             for ap in alpaca_positions:
-                # For options, qty * delta ≈ position delta
-                # Alpaca doesn't expose greeks directly, so approximate:
-                # qty > 0 = long, qty < 0 = short; assume ~0.50 delta per contract
+                # Only count OPTIONS positions toward options engine delta.
+                # Equity positions are managed by the equity engine and
+                # should not block the options risk check.
+                sym = ap.symbol or ""
+                is_option = len(sym) > 6 and any(c.isdigit() for c in sym[:6])
+                if not is_option:
+                    continue  # skip equity positions
+
                 qty = float(ap.qty) if ap.qty else 0
-                # If it's an option (OCC symbol has digits), approximate delta
-                if any(c.isdigit() for c in ap.symbol[:4]):
-                    total_delta += qty * 50  # 1 option contract ≈ 50 delta (0.50 * 100 shares)
-                else:
-                    total_delta += qty  # equity position = qty delta
+                total_delta += qty * 50  # 1 option contract ≈ 50 delta (0.50 * 100 shares)
             self.portfolio_delta = total_delta
         except Exception as e:
             self.logger.warning(f"Could not refresh portfolio delta: {e}")
@@ -1054,6 +1055,14 @@ class AutonomousTradingEngine:
             self.portfolio_delta = state.get("portfolio_delta", 0.0)
             self.current_positions = state.get("current_positions", [])
             self.stats = state.get("stats", self.stats)
+
+            # Sanity: delta must be consistent with positions.  If no
+            # positions are tracked the delta should be zero.
+            if not self.current_positions and self.portfolio_delta != 0.0:
+                self.logger.warning(
+                    f"Stale delta={self.portfolio_delta:.1f} with 0 positions — resetting to 0"
+                )
+                self.portfolio_delta = 0.0
             
             self.logger.info(f"Loaded state from {self.state_file}")
         except Exception as e:

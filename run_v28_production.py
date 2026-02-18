@@ -803,8 +803,8 @@ class EquityEngine:
 
                 # Anti-churn: turnover gate
                 if not self._turnover_allows_trade(proposed_cost, equity):
-                    self.logger.info(f"Turnover cap reached — stopping entries")
-                    return
+                    self.logger.info(f"Turnover cap reached — skipping {symbol}")
+                    continue
 
                 # Max single position: 8% of portfolio
                 if proposed_cost > equity * 0.08:

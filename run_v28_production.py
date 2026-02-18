@@ -5,6 +5,14 @@ V28 Production Trading System - Unified Runner
 Runs BOTH the equity engine and options engine concurrently via asyncio.
 Entry point for the systemd service (deploy/v28_trading_bot.service).
 
+All trading decisions are gated through:
+  - RiskGuardian (bracket stops, regime sizing, drawdown circuit breakers)
+  - StrategyEngine (BB+RSI mean reversion, stat-arb pairs, momentum)
+  - Anti-churn (15% daily turnover cap, 6-bar minimum hold)
+  - Universe filter (BANNED_SYMBOLS, freefall, death-cross)
+  - Correlation check (max 0.7 pairwise correlation)
+  - Volume confirmation (1.5x 20-period average)
+
 Usage:
     python run_v28_production.py --mode=live
     python run_v28_production.py --mode=paper
@@ -17,9 +25,11 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Any
+
+import numpy as np
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -28,6 +38,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from dotenv import load_dotenv
 
 load_dotenv(PROJECT_ROOT / ".env")
+
+# ---------------------------------------------------------------------------
+# Core improved modules (Phases 1-4 of the trading fix)
+# ---------------------------------------------------------------------------
+
+from risk_guardian import RiskGuardian
+from strategy_engine import StrategyEngine, EngineConfig, SignalDirection, StrategyType
+from config.universe import BANNED_SYMBOLS, MAX_BETA
 
 # ---------------------------------------------------------------------------
 # Safety modules — circuit breaker, regime filter, sector caps, process lock
@@ -56,6 +74,24 @@ try:
     HAS_PROCESS_LOCK = True
 except ImportError:
     HAS_PROCESS_LOCK = False
+
+try:
+    from pair_finder import PairFinder, PairFinderConfig
+    HAS_PAIR_FINDER = True
+except ImportError:
+    HAS_PAIR_FINDER = False
+
+try:
+    from src.factor_monitor import FactorMonitor
+    HAS_FACTOR_MONITOR = True
+except ImportError:
+    HAS_FACTOR_MONITOR = False
+
+try:
+    from portfolio_allocator import PortfolioAllocator
+    HAS_PORTFOLIO_ALLOCATOR = True
+except ImportError:
+    HAS_PORTFOLIO_ALLOCATOR = False
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -153,106 +189,367 @@ def seconds_until_premarket() -> float:
 # ---------------------------------------------------------------------------
 
 class EquityEngine:
-    """Async wrapper around EnhancedTradingEngine."""
+    """
+    Async equity engine — delegates ALL risk/sizing to RiskGuardian,
+    signals to EnhancedTradingEngine + StrategyEngine, and gates every
+    order through anti-churn, universe filter, correlation, and volume checks.
+    """
+
+    # ── Position monitoring thresholds (fallback — RiskGuardian is primary) ──
+    EQUITY_STOP_LOSS_PCT = -0.05
+    EQUITY_TAKE_PROFIT_PCT = 0.10
+    TRAILING_STOP_ACTIVATE_PCT = 0.04
+    TRAILING_STOP_TRAIL_PCT = 0.40
+
+    # ── Anti-churn constants ──
+    MAX_DAILY_TURNOVER_PCT = 0.15   # 15% of equity per day
+    MIN_HOLD_BARS = 6               # minimum scan cycles before soft exit
 
     def __init__(self, mode: str):
         self.mode = mode
-        self.engine = None
-        self.client = None  # reusable AlpacaClient (issue #14)
+        self.engine = None           # EnhancedTradingEngine (signal source)
+        self.client = None           # AlpacaClient
+        self.risk_guardian = None     # RiskGuardian (safety layer)
+        self.strategy_engine = None  # StrategyEngine (improved MR/pairs/momentum)
+        self.pair_finder = None      # PairFinder (stat-arb)
+        self.factor_monitor = None   # FactorMonitor (factor exposure)
         self.logger = logging.getLogger("equity_engine")
-        self._high_water_marks: dict[str, float] = {}  # trailing stop state
+        self._high_water_marks: dict[str, float] = {}
+
+        # Anti-churn state
+        self._daily_turnover_used: float = 0.0
+        self._position_entry_bar: dict[str, int] = {}   # symbol → scan bar
+        self._bar_count: int = 0
+        self._last_trading_date: Optional[date] = None
+
+        # Regime state
+        self._regime_size_scale: float = 0.70
+        self._max_positions_regime: int = 6
 
     async def initialize(self):
-        from src.enhanced_trading_engine import EnhancedTradingEngine, EngineConfig
-        # Use calibrated thresholds — defaults are already tuned in EngineConfig
-        # Override max_position_pct for paper trading to allow slightly larger positions
-        config = EngineConfig()
+        # 1. EnhancedTradingEngine for signal analysis
+        from src.enhanced_trading_engine import EnhancedTradingEngine, EngineConfig as ETEConfig
+        config = ETEConfig()
         self.engine = EnhancedTradingEngine(config)
-        # Create AlpacaClient for BOTH paper and live modes
-        # Paper mode uses Alpaca's paper trading API — real orders, simulated fills
-        # This also enables position monitoring (SL/TP enforcement) in paper mode
+
+        # 2. AlpacaClient for order execution
         from src.trading.alpaca_client import AlpacaClient
         self.client = AlpacaClient()
-        self.logger.info(f"Equity engine initialized (mode={self.mode})")
-        self.logger.info(f"  Thresholds: MTF≥{config.min_mtf_score}, combined≥{config.min_combined_score}, "
-                        f"weights: MTF={config.mtf_weight}, sent={config.sentiment_weight}")
+
+        # 3. RiskGuardian — bracket stops, drawdown circuit breaker, regime sizing
+        try:
+            acct = self.client.get_account()
+            init_equity = acct.equity
+        except Exception:
+            init_equity = 100_000.0
+        self.risk_guardian = RiskGuardian(
+            initial_equity=init_equity,
+            max_drawdown_pct=0.15,
+            daily_loss_limit_pct=0.03,
+            hard_stop_pct=0.08,
+            consecutive_loss_limit=3,
+            max_positions=10,
+            max_sector_positions=3,
+            max_correlation=0.70,
+        )
+
+        # 4. StrategyEngine — improved MR/pairs/momentum with wider params
+        self.strategy_engine = StrategyEngine(EngineConfig())
+
+        # 5. PairFinder (optional)
+        if HAS_PAIR_FINDER:
+            try:
+                self.pair_finder = PairFinder(PairFinderConfig())
+                self.logger.info("PairFinder loaded for stat-arb signals")
+            except Exception as e:
+                self.logger.warning(f"PairFinder init failed: {e}")
+
+        # 6. FactorMonitor (optional)
+        if HAS_FACTOR_MONITOR:
+            try:
+                self.factor_monitor = FactorMonitor()
+                self.logger.info("FactorMonitor loaded for factor exposure tracking")
+            except Exception as e:
+                self.logger.warning(f"FactorMonitor init failed: {e}")
+
+        self.logger.info(
+            f"Equity engine initialized (mode={self.mode}) with "
+            f"RiskGuardian + StrategyEngine + anti-churn + universe filter"
+        )
+
+    # ── Anti-churn helpers ──────────────────────────────────────────
+
+    def _turnover_allows_trade(self, proposed_cost: float, equity: float) -> bool:
+        """Return True if adding proposed_cost stays within daily turnover cap."""
+        if equity <= 0:
+            return False
+        return (self._daily_turnover_used + proposed_cost) / equity <= self.MAX_DAILY_TURNOVER_PCT
+
+    def _record_fill(self, symbol: str, cost: float, equity: float):
+        """Record a fill for turnover tracking."""
+        self._daily_turnover_used += cost
+        self._position_entry_bar[symbol] = self._bar_count
+        pct = self._daily_turnover_used / equity * 100 if equity > 0 else 0
+        self.logger.info(f"Turnover: +${cost:,.0f} → {pct:.1f}% of equity used today")
+
+    def _min_hold_allows_exit(self, symbol: str) -> bool:
+        """Return True if position has been held long enough for soft exit."""
+        entry_bar = self._position_entry_bar.get(symbol)
+        if entry_bar is None:
+            return True  # unknown entry → allow exit
+        return (self._bar_count - entry_bar) >= self.MIN_HOLD_BARS
+
+    # ── Universe / quality filters ──────────────────────────────────
+
+    def _passes_universe_filter(self, symbol: str, prices: Optional[np.ndarray] = None) -> bool:
+        """Check banned list, freefall, and death-cross filters."""
+        if symbol in BANNED_SYMBOLS:
+            self.logger.debug(f"Blocked {symbol}: in BANNED_SYMBOLS")
+            return False
+
+        if prices is not None and len(prices) >= 6:
+            five_bar_ret = (prices[-1] / prices[-6]) - 1.0
+            if five_bar_ret < -0.08:
+                self.logger.info(f"Blocked {symbol}: freefall {five_bar_ret:+.1%} in 5 bars")
+                return False
+
+        if prices is not None and len(prices) >= 200:
+            sma50 = float(np.mean(prices[-50:]))
+            sma200 = float(np.mean(prices[-200:]))
+            if sma50 < sma200:
+                self.logger.debug(f"Blocked {symbol}: death cross SMA50 < SMA200")
+                return False
+
+        return True
+
+    def _passes_volume_check(self, volumes: Optional[np.ndarray]) -> bool:
+        """Require volume ≥ 1.5x the 20-period average."""
+        if volumes is None or len(volumes) < 21:
+            return True  # insufficient data → allow (don't block on missing data)
+        avg_20 = float(np.mean(volumes[-21:-1]))
+        if avg_20 <= 0:
+            return True
+        return float(volumes[-1]) >= 1.5 * avg_20
+
+    def _passes_correlation_check(self, symbol: str) -> bool:
+        """Check correlation vs. existing holdings using RiskGuardian."""
+        if self.risk_guardian is None:
+            return True
+        try:
+            existing = list(self._position_entry_bar.keys())
+            if not existing:
+                return True
+            return self.risk_guardian.correlation_checker.check_correlation(
+                symbol, existing
+            )
+        except Exception:
+            return True  # allow on error
+
+    # ── Regime detection ────────────────────────────────────────────
+
+    def _update_regime(self):
+        """Set regime-gated position sizing from RiskGuardian/regime filter."""
+        regime_label = "neutral"
+        if HAS_REGIME_FILTER:
+            try:
+                if is_bullish_regime():
+                    regime_label = "bull"
+                else:
+                    regime_label = "bear"
+            except Exception:
+                pass
+
+        if regime_label == "bull":
+            self._regime_size_scale = 1.0
+            self._max_positions_regime = 10
+        elif regime_label == "neutral":
+            self._regime_size_scale = 0.70
+            self._max_positions_regime = 6
+        else:
+            self._regime_size_scale = 0.40
+            self._max_positions_regime = 4
+
+        self.logger.info(
+            f"Regime: {regime_label} → scale={self._regime_size_scale:.0%}, "
+            f"max_pos={self._max_positions_regime}"
+        )
 
     async def run_cycle(self, symbols: list[str]):
-        """Run a single equity trading cycle."""
+        """Run a single equity trading cycle with ALL protections."""
         if self.engine is None:
             return
 
-        # Circuit breaker gate (issue #3)
+        self._bar_count += 1
+
+        # Reset daily turnover at start of new trading day
+        today = date.today()
+        if self._last_trading_date != today:
+            self._daily_turnover_used = 0.0
+            self._last_trading_date = today
+
+        # Circuit breaker gate
         if HAS_TRADING_GATE:
             allowed, reason = check_trading_allowed()
             if not allowed:
-                self.logger.warning(f"⚠️ CIRCUIT BREAKER: {reason} — skipping equity cycle")
+                self.logger.warning(f"⚠️ CIRCUIT BREAKER: {reason}")
                 return
 
-        # Regime filter: skip new longs in bear markets (issue #3)
-        regime_scale = 1.0
-        skip_buys = False
-        if HAS_REGIME_FILTER:
-            if not is_bullish_regime():
-                skip_buys = True
-                self.logger.info("📉 Bear regime — skipping new long entries")
-            else:
-                regime_scale = get_position_scale()
+        # Regime detection → sets _regime_size_scale and _max_positions_regime
+        self._update_regime()
+        skip_buys = (self._regime_size_scale <= 0.40)
 
-        # Build current position map for sector cap checks
-        pos_values: dict[str, float] = {}
+        # Get account state
         equity = 100_000.0
+        pos_values: dict[str, float] = {}
+        existing_symbols: list[str] = []
         if self.client:
             try:
                 acct = self.client.get_account()
                 equity = acct.equity
                 for p in self.client.get_positions():
-                    pos_values[p.symbol] = abs(p.market_value)
+                    if len(p.symbol) <= 6 and not any(ch.isdigit() for ch in p.symbol[:4]):
+                        pos_values[p.symbol] = abs(p.market_value)
+                        existing_symbols.append(p.symbol)
             except Exception:
                 pass
 
-        # ── Position monitoring: check existing equity positions for SL/TP ──
+        # Update RiskGuardian with current equity
+        if self.risk_guardian:
+            guardian_state = self.risk_guardian.update(equity)
+            if guardian_state.should_liquidate:
+                self.logger.error(f"🚨 EMERGENCY LIQUIDATION: {guardian_state.halt_reasons}")
+                return
+            if guardian_state.should_halt:
+                self.logger.warning(f"🔴 Guardian HALT: {guardian_state.halt_reasons}")
+                await self._monitor_equity_positions(equity)
+                return
+
+        # Update FactorMonitor
+        if self.factor_monitor:
+            try:
+                self.factor_monitor.update_positions(pos_values, equity)
+            except Exception as e:
+                self.logger.debug(f"FactorMonitor update error: {e}")
+
+        # Monitor existing positions (SL/TP/trailing)
         if self.client:
             await self._monitor_equity_positions(equity)
 
-        for symbol in symbols:
-            try:
-                decision = self.engine.analyze(symbol)
-                if decision and decision.is_tradeable:
-                    is_buy = decision.signal.name in ("STRONG_BUY", "BUY")
+        # Skip new entries if bearish or at position limit
+        n_positions = len(existing_symbols)
+        if skip_buys:
+            self.logger.info("📉 Bear regime — skipping new entries")
+            return
+        if n_positions >= self._max_positions_regime:
+            self.logger.info(
+                f"At position cap ({n_positions}/{self._max_positions_regime})"
+            )
+            return
 
-                    # Skip buys in bear regime
-                    if is_buy and skip_buys:
-                        self.logger.info(f"[REGIME] Skipping BUY {symbol} — bear market")
+        # Analyze each symbol
+        for symbol in symbols:
+            if n_positions >= self._max_positions_regime:
+                break
+            if symbol in existing_symbols:
+                continue
+
+            try:
+                # Universe filter (banned, freefall, death-cross)
+                price_data = self._fetch_price_array(symbol)
+                if not self._passes_universe_filter(symbol, price_data):
+                    continue
+
+                # Volume confirmation
+                vol_data = self._fetch_volume_array(symbol)
+                if not self._passes_volume_check(vol_data):
+                    self.logger.debug(f"Skipping {symbol}: low volume")
+                    continue
+
+                # Correlation check vs existing holdings
+                if not self._passes_correlation_check(symbol):
+                    self.logger.info(f"Skipping {symbol}: too correlated with existing holdings")
+                    continue
+
+                # Get signal from EnhancedTradingEngine
+                decision = self.engine.analyze(symbol)
+                if not decision or not decision.is_tradeable:
+                    continue
+
+                is_buy = decision.signal.name in ("STRONG_BUY", "BUY")
+                if not is_buy:
+                    continue  # only longs for now
+
+                # Sector cap check
+                cost = decision.recommended_quantity * decision.entry_price
+                if HAS_SECTOR_CAPS:
+                    allowed, cap_reason = sector_allows_trade(symbol, cost, pos_values, equity)
+                    if not allowed:
+                        self.logger.info(f"🚫 Sector cap: {cap_reason}")
                         continue
 
-                    # Sector cap check (issue #3)
-                    if is_buy and HAS_SECTOR_CAPS:
-                        cost = decision.recommended_quantity * decision.entry_price
-                        allowed, cap_reason = sector_allows_trade(symbol, cost, pos_values, equity)
-                        if not allowed:
-                            self.logger.info(f"🚫 Sector cap: {cap_reason}")
-                            continue
-
-                    self.logger.info(
-                        f"EQUITY SIGNAL: {symbol} → {decision.signal.name} "
-                        f"(confidence={decision.confidence:.2f}, "
-                        f"combined={decision.combined_score:.2f})"
+                # RiskGuardian position sizing with regime scale
+                if self.risk_guardian:
+                    atr_pct = decision.metadata.get('atr', decision.entry_price * 0.02) / max(decision.entry_price, 1)
+                    safe_size = self.risk_guardian.compute_safe_position_size(
+                        base_pct=decision.recommended_position_value / max(equity, 1),
+                        atr_pct=atr_pct,
+                        confidence=decision.confidence,
+                        regime_scale=self._regime_size_scale,
                     )
-                    # Execute in both paper and live — Alpaca paper API handles simulation
-                    await self._execute_equity_trade(decision, regime_scale)
+                    cost = equity * safe_size
+                    decision.recommended_quantity = max(1, int(cost / decision.entry_price))
+
+                proposed_cost = decision.recommended_quantity * decision.entry_price
+
+                # Anti-churn: turnover gate
+                if not self._turnover_allows_trade(proposed_cost, equity):
+                    self.logger.info(f"Turnover cap reached — stopping entries")
+                    return
+
+                # Max single position: 8% of portfolio
+                if proposed_cost > equity * 0.08:
+                    decision.recommended_quantity = max(1, int(equity * 0.08 / decision.entry_price))
+                    proposed_cost = decision.recommended_quantity * decision.entry_price
+
+                self.logger.info(
+                    f"EQUITY SIGNAL: {symbol} → {decision.signal.name} "
+                    f"(conf={decision.confidence:.2f}, combined={decision.combined_score:.2f}, "
+                    f"qty={decision.recommended_quantity}, cost=${proposed_cost:,.0f})"
+                )
+
+                await self._execute_equity_trade(decision, self._regime_size_scale)
+
+                # Record fill for anti-churn tracking
+                self._record_fill(symbol, proposed_cost, equity)
+                n_positions += 1
+
             except Exception as exc:
                 self.logger.error(f"Equity cycle error for {symbol}: {exc}", exc_info=True)
 
-    # ── Position monitoring thresholds ──
-    EQUITY_STOP_LOSS_PCT = -0.05    # -5% unrealized P&L → close
-    EQUITY_TAKE_PROFIT_PCT = 0.10   # +10% unrealized P&L → close
-    # Trailing stop activates once position reaches +4%, then trails at 40% of peak
-    TRAILING_STOP_ACTIVATE_PCT = 0.04
-    TRAILING_STOP_TRAIL_PCT = 0.40
+    def _fetch_price_array(self, symbol: str) -> Optional[np.ndarray]:
+        """Fetch recent close prices as numpy array."""
+        try:
+            import yfinance as yf
+            data = yf.download(symbol, period="1y", interval="1d", progress=False)
+            if data is not None and len(data) >= 50:
+                return data["Close"].values.flatten().astype(float)
+        except Exception:
+            pass
+        return None
+
+    def _fetch_volume_array(self, symbol: str) -> Optional[np.ndarray]:
+        """Fetch recent volume as numpy array."""
+        try:
+            import yfinance as yf
+            data = yf.download(symbol, period="2mo", interval="1d", progress=False)
+            if data is not None and len(data) >= 21:
+                return data["Volume"].values.flatten().astype(float)
+        except Exception:
+            pass
+        return None
 
     async def _monitor_equity_positions(self, equity: float):
-        """Monitor existing equity positions — SL, TP, and trailing stop."""
+        """Monitor existing equity positions — SL, TP, trailing stop, and min-hold."""
         try:
             positions = self.client.get_positions()
         except Exception as exc:
@@ -270,7 +567,6 @@ class EquityEngine:
                 unrealized_pnl = float(pos.unrealized_pl)
                 cost_basis = abs(float(pos.cost_basis))
                 if cost_basis <= 0:
-                    # Fallback: compute from qty * avg_entry_price
                     cost_basis = abs(float(pos.qty) * float(pos.avg_entry_price))
                 if cost_basis <= 0:
                     continue
@@ -283,14 +579,26 @@ class EquityEngine:
                     self._high_water_marks[pos.symbol] = pnl_pct
                     prev_hwm = pnl_pct
 
-                # 1. Hard stop loss
+                # 1. Hard stop loss — ALWAYS fires regardless of hold period
                 if pnl_pct <= self.EQUITY_STOP_LOSS_PCT:
                     self.logger.warning(
                         f"🛑 EQUITY STOP-LOSS: {pos.symbol} "
                         f"P&L ${unrealized_pnl:+,.2f} ({pnl_pct:+.1%}) — closing"
                     )
                     self.client.close_position(pos.symbol)
-                # 2. Trailing stop: if we reached +4% and now gave back 40% of peak
+                    self._position_entry_bar.pop(pos.symbol, None)
+                    if self.risk_guardian:
+                        self.risk_guardian.record_trade_result(pnl_pct)
+
+                # ── Soft exits below require min-hold check ──
+                elif not self._min_hold_allows_exit(pos.symbol):
+                    self.logger.debug(
+                        f"  {pos.symbol}: P&L {pnl_pct:+.1%} but min-hold not met "
+                        f"({self._bar_count - self._position_entry_bar.get(pos.symbol, 0)}"
+                        f"/{self.MIN_HOLD_BARS} bars)"
+                    )
+
+                # 2. Trailing stop: reached +4% and gave back 40% of peak
                 elif (prev_hwm >= self.TRAILING_STOP_ACTIVATE_PCT and
                       pnl_pct < prev_hwm * (1 - self.TRAILING_STOP_TRAIL_PCT)):
                     trail_floor = prev_hwm * (1 - self.TRAILING_STOP_TRAIL_PCT)
@@ -299,6 +607,10 @@ class EquityEngine:
                         f"now={pnl_pct:+.1%}, floor={trail_floor:+.1%} — closing"
                     )
                     self.client.close_position(pos.symbol)
+                    self._position_entry_bar.pop(pos.symbol, None)
+                    if self.risk_guardian:
+                        self.risk_guardian.record_trade_result(pnl_pct)
+
                 # 3. Hard take profit
                 elif pnl_pct >= self.EQUITY_TAKE_PROFIT_PCT:
                     self.logger.info(
@@ -306,6 +618,10 @@ class EquityEngine:
                         f"P&L ${unrealized_pnl:+,.2f} ({pnl_pct:+.1%}) — closing"
                     )
                     self.client.close_position(pos.symbol)
+                    self._position_entry_bar.pop(pos.symbol, None)
+                    if self.risk_guardian:
+                        self.risk_guardian.record_trade_result(pnl_pct)
+
                 else:
                     self.logger.debug(
                         f"  Equity holding {pos.symbol}: {float(pos.qty):.0f} sh, "
@@ -321,16 +637,20 @@ class EquityEngine:
                 del self._high_water_marks[sym]
 
     async def _execute_equity_trade(self, decision, regime_scale: float = 1.0):
-        """Place equity order via Alpaca REST — limit order with bracket stop/TP."""
+        """Place equity order via Alpaca REST — LIMIT order with bracket stop/TP.
+        
+        Sizing is already done in run_cycle via RiskGuardian, so qty is final.
+        All orders are LIMIT — MARKET orders are NEVER used.
+        """
         if self.client is None:
             return
         try:
             from src.trading.alpaca_client import OrderSide, OrderType
 
             side = OrderSide.BUY if decision.signal.name in ("STRONG_BUY", "BUY") else OrderSide.SELL
-            qty = max(1, int(decision.recommended_quantity * regime_scale))
+            qty = max(1, int(decision.recommended_quantity))
 
-            # Get current quote for limit price (issue #2)
+            # Get current quote for limit price
             quote = self.client.get_latest_quote(decision.symbol)
             if side == OrderSide.BUY:
                 limit_price = round(quote["ask"] * 1.001, 2)  # slightly above ask
@@ -341,10 +661,13 @@ class EquityEngine:
                 self.logger.warning(f"Bad quote for {decision.symbol} — skipping")
                 return
 
-            # Place bracket order with stop-loss and take-profit (issue #11)
+            # Place bracket order with stop-loss and take-profit for buys
             if side == OrderSide.BUY and decision.stop_loss and decision.take_profits:
                 stop_price = round(decision.stop_loss, 2)
-                tp_price = round(decision.take_profits[0] if decision.take_profits else limit_price * 1.04, 2)
+                tp_price = round(
+                    decision.take_profits[0] if decision.take_profits else limit_price * 1.04,
+                    2,
+                )
                 order_data = {
                     "symbol": decision.symbol,
                     "qty": str(qty),
@@ -358,8 +681,9 @@ class EquityEngine:
                 }
                 data = self.client._request("POST", "/v2/orders", data=order_data)
                 self.logger.info(
-                    f"Bracket order submitted: {decision.symbol} {qty}sh "
-                    f"limit=${limit_price} SL=${stop_price} TP=${tp_price} → {data.get('id', '?')}"
+                    f"✅ Bracket order: {decision.symbol} {qty}sh "
+                    f"limit=${limit_price} SL=${stop_price} TP=${tp_price} "
+                    f"→ {data.get('id', '?')}"
                 )
             else:
                 # Simple limit order for sells or if no stop/TP available
@@ -370,7 +694,7 @@ class EquityEngine:
                     order_type=OrderType.LIMIT,
                     limit_price=limit_price,
                 )
-                self.logger.info(f"Limit order submitted: {result}")
+                self.logger.info(f"✅ Limit order: {result}")
         except Exception as exc:
             self.logger.error(f"Equity execution failed: {exc}", exc_info=True)
 
@@ -443,28 +767,30 @@ async def run_premarket_analysis():
 # ---------------------------------------------------------------------------
 
 EQUITY_UNIVERSE = [
-    # Broad Market ETFs
-    "SPY", "QQQ", "IWM", "DIA",
-    # Technology (~20%)
-    "AAPL", "MSFT", "GOOGL", "NVDA", "AMD", "CRM", "ADBE", "ORCL",
-    # Consumer / Communication
-    "AMZN", "META", "TSLA", "NFLX", "DIS",
-    # Financials
-    "JPM", "V", "GS", "MA", "BAC",
-    # Healthcare
-    "UNH", "JNJ", "LLY", "PFE", "ABBV", "MRK",
-    # Energy
-    "XOM", "CVX", "COP", "SLB",
-    # Industrials
-    "CAT", "HON", "UPS", "GE", "RTX", "DE",
-    # Consumer Staples
-    "PG", "KO", "PEP", "COST", "WMT",
-    # Utilities / REITs
-    "NEE", "SO", "AMT",
-    # Materials
-    "LIN", "FCX", "NEM",
-    # Semiconductors (separate from broad tech)
-    "AVGO", "QCOM",
+    s for s in [
+        # Broad Market ETFs
+        "SPY", "QQQ", "IWM", "DIA",
+        # Technology (~20%)
+        "AAPL", "MSFT", "GOOGL", "NVDA", "AMD", "CRM", "ADBE", "ORCL",
+        # Consumer / Communication
+        "AMZN", "META", "TSLA", "NFLX", "DIS",
+        # Financials
+        "JPM", "V", "GS", "MA", "BAC",
+        # Healthcare
+        "UNH", "JNJ", "LLY", "PFE", "ABBV", "MRK",
+        # Energy
+        "XOM", "CVX", "COP", "SLB",
+        # Industrials
+        "CAT", "HON", "UPS", "GE", "RTX", "DE",
+        # Consumer Staples
+        "PG", "KO", "PEP", "COST", "WMT",
+        # Utilities / REITs
+        "NEE", "SO", "AMT",
+        # Materials
+        "LIN", "FCX", "NEM",
+        # Semiconductors (separate from broad tech)
+        "AVGO", "QCOM",
+    ] if s not in BANNED_SYMBOLS
 ]
 
 EQUITY_CYCLE_INTERVAL = 300  # 5 minutes

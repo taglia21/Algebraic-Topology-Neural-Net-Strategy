@@ -63,6 +63,18 @@ Thumbs.db
 .coverage
 htmlcov/
 
-# Log files
-logs/*.log
+# Runtime artifacts — do not track
+results/
+logs/
+catboost_info/
+tmp/
 *.log
+*.pyc
+state/
+models/*.pt
+models/*.h5
+cache/
+data/cache/
+data/tda_cache/
+data/polygon_cache/
+data/sector_cache/

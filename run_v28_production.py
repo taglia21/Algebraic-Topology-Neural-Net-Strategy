@@ -163,6 +163,16 @@ try:
 except ImportError:
     HAS_RETRAIN = False
 
+try:
+    import pandas as _pd
+except ImportError:
+    _pd = None
+
+try:
+    import tensorflow as _tf
+except ImportError:
+    _tf = None
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -736,7 +746,6 @@ class EquityEngine:
                 # B3: Signal Filter — RSI + volatility gate
                 if self.signal_filter and price_data is not None and len(price_data) >= 21:
                     try:
-                        import pandas as _pd
                         _price_df = _pd.DataFrame({"close": price_data})
                         filt = self.signal_filter.filter_signal("buy", _price_df)
                         if filt.get("filtered", False):
@@ -752,7 +761,6 @@ class EquityEngine:
                 # B4: NN Predictor — ML confidence gate (only with trained weights)
                 if self.nn_predictor and self._nn_trained and price_data is not None and len(price_data) >= 21:
                     try:
-                        import tensorflow as _tf
                         _rets = np.diff(price_data[-21:]) / np.maximum(price_data[-21:-1], 1e-8)
                         _seq = _rets.reshape(1, 20, 1)
                         _seq = np.pad(_seq, ((0, 0), (0, 0), (0, 5)))  # pad to 6 features

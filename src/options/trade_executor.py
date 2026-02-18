@@ -288,7 +288,19 @@ class AlpacaOptionsExecutor:
                 legs=internal_legs,
             )
         except Exception as e:
-            self.logger.error(f"MLEG spread submission failed: {e}")
+            err_str = str(e)
+            self.logger.error(f"MLEG spread submission failed: {err_str}")
+
+            # ── Fallback: submit each leg individually ──
+            if "not allowed for mleg" in err_str.lower() or "mleg" in err_str.lower():
+                self.logger.info(
+                    "MLEG not supported — falling back to single-leg execution"
+                )
+                return await self._submit_spread_as_single_legs(
+                    long_symbol, short_symbol, quantity,
+                    net_credit=net_credit, net_debit=net_debit,
+                )
+
             return ExecutionResult(
                 success=False,
                 order_id=None,
@@ -296,10 +308,58 @@ class AlpacaOptionsExecutor:
                 filled_quantity=0,
                 average_fill_price=0.0,
                 timestamp=datetime.now(),
-                error_message=str(e),
+                error_message=err_str,
                 legs=internal_legs,
             )
-    
+
+    async def _submit_spread_as_single_legs(
+        self,
+        long_symbol: str,
+        short_symbol: str,
+        quantity: int,
+        net_credit: float = None,
+        net_debit: float = None,
+    ) -> ExecutionResult:
+        """Fallback: submit spread as two separate single-leg limit orders."""
+        legs_results = []
+
+        # Determine limit prices from mid-market via data client
+        for occ_sym, side in [(long_symbol, OrderSide.BUY), (short_symbol, OrderSide.SELL)]:
+            limit_price = None
+            try:
+                req = OptionLatestQuoteRequest(symbol_or_symbols=occ_sym)
+                quotes = self.data_client.get_option_latest_quote(req)
+                q = quotes.get(occ_sym) or (list(quotes.values())[0] if quotes else None)
+                if q and q.bid_price and q.ask_price:
+                    limit_price = round((q.bid_price + q.ask_price) / 2.0, 2)
+            except Exception:
+                pass
+
+            result = await self.submit_single_leg_order(
+                option_symbol=occ_sym,
+                side=side,
+                quantity=quantity,
+                limit_price=limit_price,
+                with_bracket=False,  # no bracket on individual spread legs
+            )
+            legs_results.append(result)
+
+        all_ok = all(r.success for r in legs_results)
+        order_ids = [r.order_id for r in legs_results if r.order_id]
+        return ExecutionResult(
+            success=all_ok,
+            order_id=",".join(order_ids) if order_ids else None,
+            status=OrderStatus.FILLED if all_ok else OrderStatus.PARTIAL,
+            filled_quantity=quantity if all_ok else 0,
+            average_fill_price=0.0,
+            timestamp=datetime.now(),
+            error_message="" if all_ok else "Partial fill on single-leg fallback",
+            legs=[
+                OrderLeg(symbol=long_symbol, side=OrderSide.BUY, quantity=quantity),
+                OrderLeg(symbol=short_symbol, side=OrderSide.SELL, quantity=quantity),
+            ],
+        )
+
     async def submit_iron_condor(
         self,
         underlying: str,
@@ -392,7 +452,48 @@ class AlpacaOptionsExecutor:
                 legs=internal_legs,
             )
         except Exception as e:
-            self.logger.error(f"MLEG iron condor submission failed: {e}")
+            err_str = str(e)
+            self.logger.error(f"MLEG iron condor submission failed: {err_str}")
+
+            # ── Fallback: submit each leg individually ──
+            if "not allowed for mleg" in err_str.lower() or "mleg" in err_str.lower():
+                self.logger.info(
+                    "MLEG not supported — falling back to single-leg IC execution"
+                )
+                all_legs = [
+                    (put_long_occ, OrderSide.BUY),
+                    (put_short_occ, OrderSide.SELL),
+                    (call_short_occ, OrderSide.SELL),
+                    (call_long_occ, OrderSide.BUY),
+                ]
+                results = []
+                for occ_sym, side in all_legs:
+                    lp = None
+                    try:
+                        req = OptionLatestQuoteRequest(symbol_or_symbols=occ_sym)
+                        quotes = self.data_client.get_option_latest_quote(req)
+                        q = quotes.get(occ_sym) or (list(quotes.values())[0] if quotes else None)
+                        if q and q.bid_price and q.ask_price:
+                            lp = round((q.bid_price + q.ask_price) / 2.0, 2)
+                    except Exception:
+                        pass
+                    results.append(await self.submit_single_leg_order(
+                        option_symbol=occ_sym, side=side, quantity=quantity,
+                        limit_price=lp, with_bracket=False,
+                    ))
+                all_ok = all(r.success for r in results)
+                order_ids = [r.order_id for r in results if r.order_id]
+                return ExecutionResult(
+                    success=all_ok,
+                    order_id=",".join(order_ids) if order_ids else None,
+                    status=OrderStatus.FILLED if all_ok else OrderStatus.PARTIAL,
+                    filled_quantity=quantity if all_ok else 0,
+                    average_fill_price=0.0,
+                    timestamp=datetime.now(),
+                    error_message="" if all_ok else "Partial fill on single-leg IC fallback",
+                    legs=internal_legs,
+                )
+
             return ExecutionResult(
                 success=False,
                 order_id=None,
@@ -400,7 +501,7 @@ class AlpacaOptionsExecutor:
                 filled_quantity=0,
                 average_fill_price=0.0,
                 timestamp=datetime.now(),
-                error_message=str(e),
+                error_message=err_str,
                 legs=internal_legs,
             )
     
@@ -483,7 +584,41 @@ class AlpacaOptionsExecutor:
                 legs=internal_legs,
             )
         except Exception as e:
-            self.logger.error(f"MLEG straddle submission failed: {e}")
+            err_str = str(e)
+            self.logger.error(f"MLEG straddle submission failed: {err_str}")
+
+            if "not allowed for mleg" in err_str.lower() or "mleg" in err_str.lower():
+                self.logger.info(
+                    "MLEG not supported — falling back to single-leg straddle execution"
+                )
+                results = []
+                for occ_sym in [call_occ, put_occ]:
+                    lp = None
+                    try:
+                        req = OptionLatestQuoteRequest(symbol_or_symbols=occ_sym)
+                        quotes = self.data_client.get_option_latest_quote(req)
+                        q = quotes.get(occ_sym) or (list(quotes.values())[0] if quotes else None)
+                        if q and q.bid_price and q.ask_price:
+                            lp = round((q.bid_price + q.ask_price) / 2.0, 2)
+                    except Exception:
+                        pass
+                    results.append(await self.submit_single_leg_order(
+                        option_symbol=occ_sym, side=internal_side, quantity=quantity,
+                        limit_price=lp, with_bracket=False,
+                    ))
+                all_ok = all(r.success for r in results)
+                order_ids = [r.order_id for r in results if r.order_id]
+                return ExecutionResult(
+                    success=all_ok,
+                    order_id=",".join(order_ids) if order_ids else None,
+                    status=OrderStatus.FILLED if all_ok else OrderStatus.PARTIAL,
+                    filled_quantity=quantity if all_ok else 0,
+                    average_fill_price=0.0,
+                    timestamp=datetime.now(),
+                    error_message="" if all_ok else "Partial fill on single-leg straddle fallback",
+                    legs=internal_legs,
+                )
+
             return ExecutionResult(
                 success=False,
                 order_id=None,
@@ -491,7 +626,7 @@ class AlpacaOptionsExecutor:
                 filled_quantity=0,
                 average_fill_price=0.0,
                 timestamp=datetime.now(),
-                error_message=str(e),
+                error_message=err_str,
                 legs=internal_legs,
             )
     

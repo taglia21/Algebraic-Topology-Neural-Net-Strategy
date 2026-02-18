@@ -380,14 +380,21 @@ class EquityEngine:
             try:
                 self.nn_predictor = NeuralNetPredictor(sequence_length=20, n_features=6)
                 self.nn_predictor.compile_model()
-                # Try to load pre-trained weights
+                # Try to load pre-trained weights (bootstrap path first, then results/)
                 import glob
+                _bootstrap_path = PROJECT_ROOT / "models" / "nn_predictor_weights.h5"
                 weight_files = glob.glob(str(PROJECT_ROOT / "results" / "*weights*.h5"))
-                if weight_files:
+                _weight_path = None
+                if _bootstrap_path.exists():
+                    _weight_path = str(_bootstrap_path)
+                elif weight_files:
+                    _weight_path = weight_files[0]
+
+                if _weight_path:
                     try:
-                        self.nn_predictor.load_checkpoint(weight_files[0])
+                        self.nn_predictor.load_checkpoint(_weight_path)
                         self._nn_trained = True
-                        self.logger.info(f"NeuralNetPredictor loaded with weights: {weight_files[0]}")
+                        self.logger.info(f"NeuralNetPredictor loaded with weights: {_weight_path}")
                     except Exception as e:
                         self.logger.warning(f"NeuralNetPredictor weight load failed: {e}")
                         self.logger.info("NeuralNetPredictor loaded (untrained — skipping ML gate)")

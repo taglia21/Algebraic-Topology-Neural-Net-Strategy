@@ -386,15 +386,19 @@ class AutonomousTradingEngine:
             total_delta = 0.0
             for ap in alpaca_positions:
                 # Only count OPTIONS positions toward options engine delta.
-                # Equity positions are managed by the equity engine and
-                # should not block the options risk check.
                 sym = ap.symbol or ""
                 is_option = len(sym) > 6 and any(c.isdigit() for c in sym[:6])
                 if not is_option:
                     continue  # skip equity positions
 
                 qty = float(ap.qty) if ap.qty else 0
-                total_delta += qty * 50  # 1 option contract ≈ 50 delta (0.50 * 100 shares)
+                # Sign-aware delta:
+                #   Long call  = +delta,  Long put  = -delta
+                #   Short call = -delta,  Short put = +delta
+                # OCC: AAPL260320P00230000 — 'P' or 'C' after date digits
+                is_put = "P" in sym[6:8] or "P" in sym[-9:-8]
+                delta_per_contract = -50 if is_put else 50  # ~0.50 delta
+                total_delta += qty * delta_per_contract
             self.portfolio_delta = total_delta
         except Exception as e:
             self.logger.warning(f"Could not refresh portfolio delta: {e}")

@@ -16,7 +16,7 @@ from typing import Dict, Any
 
 RISK_CONFIG: Dict[str, Any] = {
     # Portfolio-level risk limits
-    "max_portfolio_delta": 50.0,  # Maximum net delta exposure (shares equivalent)
+    "max_portfolio_delta": 500.0,  # Maximum net delta exposure (shares equiv; ~7% of $73K)
     "max_position_size_pct": 0.03,  # 3% max per position (was 5%)
     "max_daily_loss_pct": 0.02,  # 2% max daily drawdown (was 3%)
     "max_portfolio_heat": 0.08,  # 8% max total risk exposure (was 10%)

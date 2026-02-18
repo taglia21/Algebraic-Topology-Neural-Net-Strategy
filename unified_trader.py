@@ -2185,7 +2185,7 @@ class UnifiedTrader:
         # 9f. Tier 2: Volatility surface analysis (SPY proxy)
         if self.vol_surface is not None:
             try:
-                spy_bars = bar_windows_cache.get("SPY") if hasattr(self, '_bar_cache') else get_bars("SPY", limit=100)
+                spy_bars = self._bar_cache.get("SPY") if hasattr(self, '_bar_cache') and self._bar_cache else get_bars("SPY", limit=100)
                 if spy_bars and len(spy_bars) >= 60:
                     vol_signal = self.vol_surface.get_vol_signal("SPY", spy_bars)
                     logger.info(

@@ -1,8 +1,25 @@
 #!/usr/bin/env python3
 """
-Unified Production Trader — Single Entry Point
-================================================
+Unified Production Trader — DEPRECATED
+========================================
 
+⚠️  DEPRECATED: This file is NO LONGER the production entry point.
+    The canonical production entry is: run_v28_production.py
+    (launched via run_bot.py)
+
+    run_v28_production.py now wires ALL protections that were previously
+    only in this file:
+      - RiskGuardian (bracket stops, drawdown circuit breaker)
+      - StrategyEngine (improved MR params, freefall/death-cross filters)
+      - Anti-churn (15% daily turnover cap, 6-bar min hold)
+      - Universe filter (BANNED_SYMBOLS, volume, correlation)
+      - Regime-gated sizing (bull/neutral/bear position scaling)
+
+    This file is kept for reference and backtesting utilities only.
+    DO NOT run this in production.
+
+Original description:
+~~~~~~~~~~~~~~~~~~~~~
 This is the ONE production trading bot. It replaces profit_trader.py,
 smart_trader.py, continuous_trader.py, etc.
 

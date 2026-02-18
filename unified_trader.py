@@ -1823,6 +1823,10 @@ class UnifiedTrader:
         self._bar_count: int = 0
         self._last_trading_date: Optional[date] = None
 
+        # Phase 4: Regime-gated position sizing
+        self._regime_size_scale: float = 0.70       # default conservative
+        self._max_positions_regime: int = 6          # default conservative cap
+
         # Phase 3-9 components
         self.news_sentiment = _news_sentiment_cls() if _news_sentiment_cls else None
         self.economic_calendar = _economic_calendar_cls() if _economic_calendar_cls else None
@@ -2032,6 +2036,22 @@ class UnifiedTrader:
         self._last_regime = regime.regime  # Store for ML retrainer feedback
         logger.info(f"Market regime: {regime.regime} (confidence={regime.confidence:.0%})")
 
+        # Phase 4: Set regime-gated position sizing
+        regime_label = regime.regime.lower()
+        if regime_label in ("trending_up", "trending_bull", "low_vol"):
+            self._regime_size_scale = 1.0
+            self._max_positions_regime = self.cfg.max_open_positions
+        elif regime_label in ("neutral", "mean_reverting", "unknown"):
+            self._regime_size_scale = 0.70
+            self._max_positions_regime = 6
+        else:  # bearish, high_vol, crisis, etc.
+            self._regime_size_scale = 0.40
+            self._max_positions_regime = 4
+        logger.info(
+            f"Regime sizing: scale={self._regime_size_scale:.0%}, "
+            f"max_pos={self._max_positions_regime}"
+        )
+
         # 5b. ML Regime Detection (Tier 1) — enriches position sizing
         ml_regime_scale = 1.0
         if self.ml_regime is not None:
@@ -2163,13 +2183,13 @@ class UnifiedTrader:
 
         # 9d. Mean-reversion & pairs-trading scans (legacy, only if no strategy engine)
         if (not skip_new_longs
-                and len(self.positions) < self.cfg.max_open_positions
+                and len(self.positions) < self._max_positions_regime
                 and self.strategy_engine is None):
             self._scan_mean_reversion(equity, cash, regime, econ_size_mult)
             self._scan_pairs(equity, cash, regime, econ_size_mult)
 
         # 10. Scan for new entries: prefer strategy_engine, fall back to legacy
-        if not skip_new_longs and len(self.positions) < self.cfg.max_open_positions:
+        if not skip_new_longs and len(self.positions) < self._max_positions_regime:
             if self.strategy_engine is not None:
                 self._scan_for_entries_v2(
                     equity, cash, regime,
@@ -2185,7 +2205,7 @@ class UnifiedTrader:
         elif skip_new_longs:
             logger.info("Skipping new entries — bearish regime")
         else:
-            logger.info(f"At max positions ({len(self.positions)}/{self.cfg.max_open_positions})")
+            logger.info(f"At max positions ({len(self.positions)}/{self._max_positions_regime})")
 
         # 11. Check if retraining is due (midnight EST)
         self._check_retraining()
@@ -2269,14 +2289,14 @@ class UnifiedTrader:
 
         signals = self.mean_reversion.scan_universe(bars_map)
         for sig in signals[:3]:  # Max 3 MR entries per scan
-            if sig.direction != "LONG" or len(self.positions) >= self.cfg.max_open_positions:
+            if sig.direction != "LONG" or len(self.positions) >= self._max_positions_regime:
                 continue
             # Anti-churn: skip if already holding same direction
             if sig.symbol in self.positions:
                 continue
             price = float(bars_map[sig.symbol][-1]["c"])
             size_pct = self.cfg.default_position_pct * econ_size_mult
-            proposed_cost = equity * size_pct
+            proposed_cost = equity * size_pct * self._regime_size_scale
             # Anti-churn: turnover gate
             if not self._turnover_allows_trade(proposed_cost, equity):
                 logger.info(f"Turnover cap reached — skipping MR entry {sig.symbol}")
@@ -2346,11 +2366,11 @@ class UnifiedTrader:
             # short-selling support which depends on account type.
             # Long-leg entry is supported:
             if sig.action == "LONG_A_SHORT_B" and sig.sym_a not in self.positions:
-                if len(self.positions) >= self.cfg.max_open_positions:
+                if len(self.positions) >= self._max_positions_regime:
                     continue
                 price = float(bars_map[sig.sym_a][-1]["c"])
                 size_pct = self.cfg.default_position_pct * econ_size_mult * 0.5  # half-size for pair leg
-                proposed_cost = equity * size_pct
+                proposed_cost = equity * size_pct * self._regime_size_scale
                 # Anti-churn: turnover gate
                 if not self._turnover_allows_trade(proposed_cost, equity):
                     logger.info(f"Turnover cap reached — skipping pairs entry {sig.sym_a}")
@@ -2853,7 +2873,7 @@ class UnifiedTrader:
 
         executed = 0
         for sig in sized_signals:
-            if len(self.positions) >= self.cfg.max_open_positions:
+            if len(self.positions) >= self._max_positions_regime:
                 break
 
             # Handle CLOSE signals: exit existing positions
@@ -2903,6 +2923,12 @@ class UnifiedTrader:
                 continue
 
             proposed_cost = qty * sig.entry_price
+
+            # Phase 4: regime-gated position sizing
+            proposed_cost *= self._regime_size_scale
+            qty = int(proposed_cost / sig.entry_price) if sig.entry_price > 0 else 0
+            if qty <= 0:
+                continue
 
             # Anti-churn: turnover gate
             if not self._turnover_allows_trade(proposed_cost, equity):
@@ -3281,11 +3307,14 @@ class UnifiedTrader:
 
         # Execute top signals
         for sig in signals:
-            if len(self.positions) >= self.cfg.max_open_positions:
+            if len(self.positions) >= self._max_positions_regime:
                 break
 
             # Sector cap check (NON-OPTIONAL)
             proposed_cost = equity * sig.position_size_pct
+
+            # Phase 4: regime-gated position sizing
+            proposed_cost *= self._regime_size_scale
 
             # Anti-churn: turnover gate
             if not self._turnover_allows_trade(proposed_cost, equity):

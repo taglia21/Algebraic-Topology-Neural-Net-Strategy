@@ -45,6 +45,18 @@ from enum import Enum
 import numpy as np
 from dotenv import load_dotenv
 
+try:
+    from src.factor_monitor import FactorMonitor
+    HAS_FACTOR_MONITOR = True
+except ImportError:
+    HAS_FACTOR_MONITOR = False
+
+try:
+    from src.correlation_manager import CrossAssetCorrelationMonitor
+    _CROSS_CORR_AVAILABLE = True
+except ImportError:
+    _CROSS_CORR_AVAILABLE = False
+
 load_dotenv()
 
 logger = logging.getLogger("risk_guardian")
@@ -327,6 +339,326 @@ class CorrelationChecker:
 
 
 # ============================================================================
+# KELLY + VOLATILITY TARGETING + DRAWDOWN DAMPER
+# ============================================================================
+
+@dataclass
+class SizingResult:
+    """Output of the unified position-sizing pipeline."""
+    symbol: str
+    raw_kelly_frac: float          # Full Kelly fraction
+    half_kelly_frac: float         # Half-Kelly (what we use)
+    vol_target_scale: float        # Volatility targeting multiplier
+    drawdown_damper: float         # Drawdown-based reduction [0, 1]
+    vix_scale: float               # VIX-based reduction [0, 1]
+    final_size_pct: float          # Final position size as % of equity
+    capped: bool                   # True if size was capped at floor/ceiling
+    rejected: bool                 # True if sizing pipeline rejected the trade
+    reject_reason: str = ""
+
+
+class KellyVolSizer:
+    """
+    Unified position-sizing pipeline: Kelly → Volatility Target → Drawdown Damper.
+
+    Every trade signal passes through this pipeline before execution:
+      1. Kelly Criterion (half-Kelly default) → raw fraction of equity
+      2. Volatility targeting → scale so portfolio vol ≈ target (12% ann.)
+      3. Drawdown damper → linearly reduce sizing as DD increases
+      4. Floor/ceiling enforcement → [0.5%, 3%] of equity
+
+    Usage:
+        sizer = KellyVolSizer()
+        result = sizer.compute_position_size(
+            symbol="AAPL", equity=100000, symbol_vol=0.25,
+            portfolio_vol=0.10, win_rate=0.55, avg_win=0.03, avg_loss=0.02,
+            current_drawdown=0.05,
+        )
+        if not result.rejected:
+            shares = int(result.final_size_pct * equity / price)
+    """
+
+    def __init__(
+        self,
+        kelly_fraction: float = 0.5,
+        target_vol: float = 0.12,
+        max_drawdown: float = 0.15,
+        dd_full_scale_at: float = 0.0,
+        dd_min_scale_at: float = 0.10,
+        dd_zero_scale_at: float = 0.15,
+        dd_min_scale: float = 0.25,
+        floor_pct: float = 0.005,
+        ceiling_pct: float = 0.03,
+        vol_lookback: int = 20,
+    ):
+        """
+        Parameters
+        ----------
+        kelly_fraction : float
+            Fraction of full Kelly to use (0.5 = half-Kelly).
+        target_vol : float
+            Target annualized portfolio volatility (default 12%).
+        max_drawdown : float
+            Drawdown at which ALL new entries are rejected.
+        dd_full_scale_at : float
+            Drawdown level with 100% sizing (default 0%).
+        dd_min_scale_at : float
+            Drawdown level with minimum sizing (default 10%).
+        dd_min_scale : float
+            Minimum scaling at dd_min_scale_at (default 25%).
+        dd_zero_scale_at : float
+            Drawdown level with 0% sizing — reject all (default 15%).
+        floor_pct : float
+            Minimum position size as fraction of equity.
+        ceiling_pct : float
+            Maximum position size as fraction of equity.
+        vol_lookback : int
+            Lookback for realized vol computation (days).
+        """
+        self.kelly_fraction = kelly_fraction
+        self.target_vol = target_vol
+        self.max_drawdown = max_drawdown
+        self.dd_full_scale_at = dd_full_scale_at
+        self.dd_min_scale_at = dd_min_scale_at
+        self.dd_zero_scale_at = dd_zero_scale_at
+        self.dd_min_scale = dd_min_scale
+        self.floor_pct = floor_pct
+        self.ceiling_pct = ceiling_pct
+        self.vol_lookback = vol_lookback
+
+        # Track historical trade results for Kelly estimation
+        self._trade_results: List[float] = []  # list of trade P&L percentages
+
+    def compute_kelly_fraction(
+        self,
+        win_rate: float = 0.55,
+        avg_win: float = 0.03,
+        avg_loss: float = 0.02,
+    ) -> float:
+        """
+        Compute Kelly fraction: f* = (p * b - q) / b
+        where p=win_rate, q=1-p, b=avg_win/avg_loss.
+
+        Returns half-Kelly by default (multiplied by kelly_fraction).
+        """
+        if avg_loss <= 0 or avg_win <= 0:
+            return self.floor_pct
+        b = avg_win / avg_loss  # Win/loss ratio
+        q = 1.0 - win_rate
+        kelly = (win_rate * b - q) / b
+        # Kelly can be negative (edge is negative → don't trade)
+        kelly = max(0.0, kelly)
+        return kelly * self.kelly_fraction
+
+    def volatility_target_scale(
+        self,
+        symbol_vol: float,
+        portfolio_vol: float,
+        target_vol: Optional[float] = None,
+    ) -> float:
+        """
+        Scale position so portfolio vol stays near target.
+
+        If portfolio vol is already at target, scale = 1.0.
+        If portfolio vol is low, we can size larger (scale > 1).
+        If portfolio vol is high, reduce (scale < 1).
+
+        Also penalizes very-high-vol symbols.
+
+        Returns multiplier in [0.25, 2.0].
+        """
+        tv = target_vol if target_vol is not None else self.target_vol
+        if portfolio_vol <= 0:
+            portfolio_vol = 0.01  # assume 1% if unknown
+
+        # How much vol budget remains?
+        vol_ratio = tv / portfolio_vol if portfolio_vol > 0 else 1.0
+
+        # If portfolio vol is already above target, reduce aggressively
+        if portfolio_vol >= tv:
+            scale = max(0.25, tv / portfolio_vol)
+        else:
+            # Some room — scale up moderately
+            scale = min(2.0, vol_ratio)
+
+        # Additional penalty for very volatile symbols
+        if symbol_vol > 0:
+            # Symbol contributing more than 2x portfolio vol gets penalized
+            sym_penalty = min(1.0, (tv * 1.5) / symbol_vol) if symbol_vol > tv else 1.0
+            scale *= sym_penalty
+
+        return float(np.clip(scale, 0.25, 2.0))
+
+    def drawdown_damper(
+        self,
+        current_drawdown: float,
+        max_allowed: Optional[float] = None,
+    ) -> float:
+        """
+        Linearly reduce sizing as drawdown increases.
+
+        DD = 0%  → 100% sizing
+        DD = 10% → 25% sizing
+        DD ≥ 15% → 0% sizing (reject)
+
+        Returns multiplier in [0.0, 1.0].
+        """
+        dd = abs(current_drawdown)  # Ensure positive
+
+        if dd <= self.dd_full_scale_at:
+            return 1.0
+        if dd >= self.dd_zero_scale_at:
+            return 0.0
+
+        # Linear interpolation between full and min
+        if dd <= self.dd_min_scale_at:
+            # From full_scale_at to min_scale_at: 1.0 → dd_min_scale
+            t = (dd - self.dd_full_scale_at) / (self.dd_min_scale_at - self.dd_full_scale_at)
+            return 1.0 - t * (1.0 - self.dd_min_scale)
+        else:
+            # From min_scale_at to zero_scale_at: dd_min_scale → 0.0
+            t = (dd - self.dd_min_scale_at) / (self.dd_zero_scale_at - self.dd_min_scale_at)
+            return self.dd_min_scale * (1.0 - t)
+
+    def compute_realized_vol(self, close_prices: np.ndarray) -> float:
+        """Compute annualized realized vol from close prices (20-day default)."""
+        if len(close_prices) < 3:
+            return 0.20  # Default assumption
+        returns = np.diff(np.log(close_prices[-self.vol_lookback - 1:]))
+        if len(returns) < 2:
+            return 0.20
+        return float(np.std(returns) * np.sqrt(252))
+
+    def record_trade_result(self, pnl_pct: float):
+        """Record a trade result for adaptive Kelly estimation."""
+        self._trade_results.append(pnl_pct)
+        if len(self._trade_results) > 200:
+            self._trade_results = self._trade_results[-200:]
+
+    def get_adaptive_kelly_params(self) -> Tuple[float, float, float]:
+        """
+        Compute win_rate, avg_win, avg_loss from recent trade history.
+        Returns (win_rate, avg_win, avg_loss).
+        Falls back to conservative defaults if insufficient history.
+        """
+        if len(self._trade_results) < 10:
+            return 0.50, 0.02, 0.02  # Conservative defaults
+
+        results = np.array(self._trade_results[-100:])  # Last 100 trades
+        wins = results[results > 0]
+        losses = results[results <= 0]
+
+        win_rate = len(wins) / len(results)
+        avg_win = float(np.mean(wins)) if len(wins) > 0 else 0.02
+        avg_loss = float(np.mean(np.abs(losses))) if len(losses) > 0 else 0.02
+
+        return win_rate, avg_win, avg_loss
+
+    def compute_position_size(
+        self,
+        symbol: str,
+        equity: float,
+        symbol_vol: float = 0.25,
+        portfolio_vol: float = 0.10,
+        win_rate: Optional[float] = None,
+        avg_win: Optional[float] = None,
+        avg_loss: Optional[float] = None,
+        current_drawdown: float = 0.0,
+        vix_scale: float = 1.0,
+        signal_confidence: float = 0.5,
+    ) -> SizingResult:
+        """
+        Full position-sizing pipeline: Kelly → VolTarget → DD Damper → Clamp.
+
+        Parameters
+        ----------
+        symbol : str
+            Ticker symbol.
+        equity : float
+            Current portfolio equity.
+        symbol_vol : float
+            Annualized realized vol of the symbol.
+        portfolio_vol : float
+            Current annualized portfolio vol.
+        win_rate, avg_win, avg_loss : float, optional
+            If None, uses adaptive estimates from trade history.
+        current_drawdown : float
+            Current drawdown from equity peak (0.0 = at peak, 0.10 = -10%).
+        vix_scale : float
+            VIX-based modifier (from VIXMonitor).
+        signal_confidence : float
+            Signal confidence [0, 1] to modulate sizing.
+
+        Returns
+        -------
+        SizingResult
+            Full sizing breakdown with final_size_pct.
+        """
+        # Get Kelly params
+        if win_rate is None or avg_win is None or avg_loss is None:
+            win_rate, avg_win, avg_loss = self.get_adaptive_kelly_params()
+
+        # 1. Kelly fraction
+        raw_kelly = self.compute_kelly_fraction(win_rate, avg_win, avg_loss)
+        full_kelly = raw_kelly / self.kelly_fraction  # Undo half-kelly for reporting
+        half_kelly = raw_kelly
+
+        # 2. Volatility targeting
+        vol_scale = self.volatility_target_scale(symbol_vol, portfolio_vol)
+
+        # 3. Drawdown damper
+        dd_scale = self.drawdown_damper(current_drawdown)
+
+        # Reject if drawdown kills sizing
+        if dd_scale <= 0:
+            return SizingResult(
+                symbol=symbol,
+                raw_kelly_frac=full_kelly,
+                half_kelly_frac=half_kelly,
+                vol_target_scale=vol_scale,
+                drawdown_damper=dd_scale,
+                vix_scale=vix_scale,
+                final_size_pct=0.0,
+                capped=False,
+                rejected=True,
+                reject_reason=f"Drawdown {current_drawdown:.1%} exceeds limit — sizing=0",
+            )
+
+        # 4. Combine: kelly * vol_scale * dd_damper * vix_scale * confidence
+        raw_size = half_kelly * vol_scale * dd_scale * vix_scale
+        # Modulate by signal confidence (high confidence → full size, low → reduced)
+        raw_size *= (0.5 + 0.5 * signal_confidence)
+
+        # 5. Floor / ceiling
+        capped = False
+        if raw_size < self.floor_pct:
+            raw_size = self.floor_pct
+            capped = True
+        elif raw_size > self.ceiling_pct:
+            raw_size = self.ceiling_pct
+            capped = True
+
+        logger.debug(
+            f"KellyVolSizer {symbol}: kelly={half_kelly:.3f} "
+            f"vol_scale={vol_scale:.2f} dd={dd_scale:.2f} vix={vix_scale:.2f} "
+            f"conf={signal_confidence:.2f} → {raw_size:.3f} "
+            f"{'(capped)' if capped else ''}"
+        )
+
+        return SizingResult(
+            symbol=symbol,
+            raw_kelly_frac=full_kelly,
+            half_kelly_frac=half_kelly,
+            vol_target_scale=vol_scale,
+            drawdown_damper=dd_scale,
+            vix_scale=vix_scale,
+            final_size_pct=round(raw_size, 5),
+            capped=capped,
+            rejected=False,
+        )
+
+
+# ============================================================================
 # RISK GUARDIAN — Main Class
 # ============================================================================
 
@@ -392,6 +724,30 @@ class RiskGuardian:
         # Sub-modules
         self.vix_monitor = VIXMonitor()
         self.correlation_checker = CorrelationChecker(max_correlation=max_correlation)
+        self.kelly_vol_sizer = KellyVolSizer(
+            kelly_fraction=0.5,
+            target_vol=0.12,
+            max_drawdown=max_drawdown_pct,
+            dd_zero_scale_at=max_drawdown_pct,
+        )
+        self.factor_monitor: Optional['FactorMonitor'] = None
+        if HAS_FACTOR_MONITOR:
+            self.factor_monitor = FactorMonitor(
+                neutral_tolerance=0.25,
+                mkt_tolerance=0.35,
+                max_single_factor=0.45,
+            )
+            logger.info("🛡️ Factor exposure monitor enabled")
+
+        self.cross_corr_monitor: Optional['CrossAssetCorrelationMonitor'] = None
+        if _CROSS_CORR_AVAILABLE:
+            self.cross_corr_monitor = CrossAssetCorrelationMonitor(
+                short_window=21,
+                medium_window=63,
+                breakdown_threshold=0.70,
+                risk_score_threshold=70.0,
+            )
+            logger.info("🛡️ Cross-asset correlation monitor enabled")
 
         # State persistence
         self._state_file = Path("state/risk_guardian_state.json")
@@ -652,11 +1008,111 @@ class RiskGuardian:
         if not corr_ok:
             return False, f"Corr filter: {corr_reason}"
 
+        # Cross-asset correlation risk check
+        if self.cross_corr_monitor is not None and existing_positions:
+            block, cross_reason = self.cross_corr_monitor.should_block_entry(
+                existing_positions
+            )
+            if block:
+                return False, f"Cross-corr: {cross_reason}"
+
+        # Factor exposure check: warn but don't block (soft gate)
+        if self.factor_monitor is not None and existing_positions:
+            hypothetical = existing_positions + [symbol]
+            exposure = self.factor_monitor.get_factor_exposures(hypothetical)
+            if not exposure.is_neutral:
+                violations_str = "; ".join(exposure.violations[:2])
+                logger.warning(
+                    f"⚠️ Factor tilt if adding {symbol}: {violations_str}"
+                )
+                # Hard block only if any single factor exceeds hard limit
+                for f_name, beta in exposure.factor_betas.items():
+                    if f_name != "MKT-RF" and abs(beta) > self.factor_monitor.max_single_factor:
+                        return False, (
+                            f"Factor exposure hard limit: {f_name}={beta:+.3f} "
+                            f"exceeds ±{self.factor_monitor.max_single_factor}"
+                        )
+
         return True, "ok"
 
     def get_vix_position_scale(self) -> float:
         """Get position size multiplier based on VIX."""
         return self.vix_monitor.get_position_scale()
+
+    # ── Kelly Position Sizing ───────────────────────────────────────
+
+    def size_position(
+        self,
+        symbol: str,
+        equity: float,
+        signal_confidence: float = 0.5,
+        symbol_vol: float = 0.25,
+        portfolio_vol: float = 0.10,
+    ) -> SizingResult:
+        """
+        Size a position using the full Kelly+VolTarget+DD pipeline.
+
+        Uses current equity high-water mark and VIX for drawdown
+        and volatility adjustments automatically.
+        """
+        current_dd = (
+            (self.peak_equity - self.current_equity) / self.peak_equity
+            if self.peak_equity > 0 else 0.0
+        )
+        vix_scale = self.vix_monitor.get_position_scale()
+
+        return self.kelly_vol_sizer.compute_position_size(
+            symbol=symbol,
+            equity=equity,
+            symbol_vol=symbol_vol,
+            portfolio_vol=portfolio_vol,
+            current_drawdown=current_dd,
+            vix_scale=vix_scale,
+            signal_confidence=signal_confidence,
+        )
+
+    def record_trade_for_kelly(self, pnl_pct: float):
+        """Record trade P&L for adaptive Kelly estimation."""
+        self.kelly_vol_sizer.record_trade_result(pnl_pct)
+
+    def get_current_drawdown(self) -> float:
+        """Get current drawdown from equity high-water mark."""
+        if self.peak_equity <= 0:
+            return 0.0
+        return (self.peak_equity - self.current_equity) / self.peak_equity
+
+    # ── Factor Exposure Helpers ─────────────────────────────────────
+
+    def get_factor_exposures(
+        self, positions: List[str], weights: Optional[Dict[str, float]] = None
+    ) -> Optional[dict]:
+        """
+        Get current factor exposures for the portfolio.
+        Returns dict with factor_betas, is_neutral, violations, etc.
+        Returns None if FactorMonitor is not available.
+        """
+        if self.factor_monitor is None:
+            return None
+        exposure = self.factor_monitor.get_factor_exposures(positions, weights)
+        return exposure.to_dict()
+
+    def check_factor_risk(self, positions: List[str]) -> Tuple[bool, str]:
+        """
+        Quick factor risk check. Returns (is_ok, message).
+        is_ok=True if factor-neutral or monitor unavailable.
+        """
+        if self.factor_monitor is None:
+            return True, "Factor monitor not available"
+        exposure = self.factor_monitor.get_factor_exposures(positions)
+        if exposure.is_neutral:
+            return True, "Factor-neutral"
+        return False, f"Factor tilts: {'; '.join(exposure.violations[:3])}"
+
+    def print_factor_report(self, positions: List[str]):
+        """Print a formatted factor exposure report to console."""
+        if self.factor_monitor is not None:
+            self.factor_monitor.get_factor_exposures(positions)
+            self.factor_monitor.print_report()
 
     # ── Query Methods ───────────────────────────────────────────────
 
@@ -736,6 +1192,7 @@ class RiskGuardian:
         base_pct: float,
         atr_pct: float,
         confidence: float,
+        regime_scale: float = 1.0,
     ) -> float:
         """
         Compute position size with all safety adjustments.
@@ -746,6 +1203,7 @@ class RiskGuardian:
           3. VIX scaling
           4. Volatility inverse scaling (ATR-based)
           5. Confidence scaling
+          6. Regime scaling (Phase 4)
         """
         # Start with base
         size_pct = base_pct
@@ -766,6 +1224,9 @@ class RiskGuardian:
         # Confidence scaling: lower confidence → smaller size
         conf_scale = max(0.5, min(confidence, 1.0))
         size_pct *= conf_scale
+
+        # Phase 4: Regime scaling
+        size_pct *= max(0.1, min(regime_scale, 1.5))
 
         # Floor at 0.5%
         size_pct = max(size_pct, 0.005)

@@ -336,12 +336,15 @@ class EquityEngine:
         if self.risk_guardian is None:
             return True
         try:
-            existing = list(self._position_entry_bar.keys())
+            existing = [s for s in self._position_entry_bar.keys()]
             if not existing:
                 return True
-            return self.risk_guardian.correlation_checker.check_correlation(
+            allowed, max_corr, reason = self.risk_guardian.correlation_checker.check_correlation(
                 symbol, existing
             )
+            if not allowed:
+                self.logger.info(f"Correlation block: {symbol} — {reason}")
+            return allowed
         except Exception:
             return True  # allow on error
 
@@ -424,12 +427,21 @@ class EquityEngine:
                 await self._monitor_equity_positions(equity)
                 return
 
-        # Update FactorMonitor
-        if self.factor_monitor:
+        # Update FactorMonitor — check factor exposures
+        factor_tilt_warning = ""
+        if self.factor_monitor and existing_symbols:
             try:
-                self.factor_monitor.update_positions(pos_values, equity)
+                weights = {}
+                total_val = sum(pos_values.values()) or 1.0
+                for sym, val in pos_values.items():
+                    weights[sym] = val / total_val
+                exposure = self.factor_monitor.get_factor_exposures(existing_symbols, weights)
+                largest_factor, largest_beta = self.factor_monitor.get_largest_tilt()
+                if abs(largest_beta) > 0.30:
+                    factor_tilt_warning = f"{largest_factor}={largest_beta:+.2f}"
+                    self.logger.info(f"⚠️ Factor tilt: {factor_tilt_warning}")
             except Exception as e:
-                self.logger.debug(f"FactorMonitor update error: {e}")
+                self.logger.debug(f"FactorMonitor error: {e}")
 
         # Monitor existing positions (SL/TP/trailing)
         if self.client:

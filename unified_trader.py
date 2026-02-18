@@ -154,6 +154,10 @@ class UnifiedConfig:
     market_close_hour: int = 15
     market_close_min: int = 50         # Stop 10 min before close
 
+    # Anti-churn controls
+    max_daily_turnover_pct: float = 0.15   # max 15% of portfolio per day
+    min_hold_bars: int = 6                  # minimum 6 scan cycles (~30 min)
+
     # Position sizing (Quarter-Kelly, capped at 5%)
     max_position_pct: float = 0.05     # 5% max per position (was 8%)
     min_position_pct: float = 0.005    # 0.5% min
@@ -1813,6 +1817,12 @@ class UnifiedTrader:
         # Partial exit tracking (scaled exits)
         self._partial_exits_done: set = set()
 
+        # Anti-churn state
+        self._daily_turnover_used: float = 0.0
+        self._position_entry_bar: dict = {}   # symbol -> scan bar count
+        self._bar_count: int = 0
+        self._last_trading_date: Optional[date] = None
+
         # Phase 3-9 components
         self.news_sentiment = _news_sentiment_cls() if _news_sentiment_cls else None
         self.economic_calendar = _economic_calendar_cls() if _economic_calendar_cls else None
@@ -1942,6 +1952,7 @@ class UnifiedTrader:
     def _scan_cycle(self):
         """Execute one full scan cycle."""
         self.scan_count += 1
+        self._bar_count += 1
         logger.info(f"{'─' * 40} Scan #{self.scan_count} {'─' * 40}")
 
         # 1. Check market open
@@ -1966,6 +1977,13 @@ class UnifiedTrader:
             return
 
         logger.info(f"Account: equity=${equity:,.2f}  cash=${cash:,.2f}  buying_power=${buying_power:,.2f}")
+
+        # 2b. Reset daily turnover at start of each new trading day
+        today = date.today()
+        if self._last_trading_date != today:
+            self._daily_turnover_used = 0.0
+            self._last_trading_date = today
+            logger.info("Daily turnover reset for new trading day")
 
         # 3. Risk Guardian check (drawdown, daily loss, consecutive losses)
         if self.guardian is not None:
@@ -2253,9 +2271,16 @@ class UnifiedTrader:
         for sig in signals[:3]:  # Max 3 MR entries per scan
             if sig.direction != "LONG" or len(self.positions) >= self.cfg.max_open_positions:
                 continue
+            # Anti-churn: skip if already holding same direction
+            if sig.symbol in self.positions:
+                continue
             price = float(bars_map[sig.symbol][-1]["c"])
             size_pct = self.cfg.default_position_pct * econ_size_mult
             proposed_cost = equity * size_pct
+            # Anti-churn: turnover gate
+            if not self._turnover_allows_trade(proposed_cost, equity):
+                logger.info(f"Turnover cap reached — skipping MR entry {sig.symbol}")
+                return
             if proposed_cost > cash * 0.95:
                 continue
             qty = int(proposed_cost / price)
@@ -2281,6 +2306,8 @@ class UnifiedTrader:
                 trailing_stop=0, highest_price=price,
                 sector=get_sector(sig.symbol),
             )
+            self._record_fill(sig.symbol, proposed_cost, equity)
+            self._position_entry_bar[sig.symbol] = self._bar_count
             cash -= proposed_cost
             self.daily_trades += 1
             logger.info(
@@ -2324,6 +2351,10 @@ class UnifiedTrader:
                 price = float(bars_map[sig.sym_a][-1]["c"])
                 size_pct = self.cfg.default_position_pct * econ_size_mult * 0.5  # half-size for pair leg
                 proposed_cost = equity * size_pct
+                # Anti-churn: turnover gate
+                if not self._turnover_allows_trade(proposed_cost, equity):
+                    logger.info(f"Turnover cap reached — skipping pairs entry {sig.sym_a}")
+                    return
                 if proposed_cost > cash * 0.95:
                     continue
                 qty = int(proposed_cost / price)
@@ -2346,6 +2377,8 @@ class UnifiedTrader:
                     trailing_stop=0, highest_price=price,
                     sector=get_sector(sig.sym_a),
                 )
+                self._record_fill(sig.sym_a, proposed_cost, equity)
+                self._position_entry_bar[sig.sym_a] = self._bar_count
                 cash -= proposed_cost
                 self.daily_trades += 1
                 logger.info(f"✅ PAIR LONG {sig.sym_a} (vs {sig.sym_b}) {qty} @ ${price:.2f}")
@@ -2408,6 +2441,8 @@ class UnifiedTrader:
             # ── Check 3: Time-based exit (no profit after 5 days) ──
             if days_held >= self.cfg.time_exit_days and gain_pct <= 0.005:
                 reason = f"TIME EXIT: {days_held}d held, P&L={gain_pct:+.1%}"
+                if not self._min_hold_allows_exit(sym, reason):
+                    continue
                 logger.info(f"⏱️ [{sym}]: {reason}")
                 to_close.append((sym, price, reason))
                 continue
@@ -2417,12 +2452,17 @@ class UnifiedTrader:
                 atr_target = pos.entry_price + (pos.atr_at_entry * 3.0)
                 if price >= atr_target:
                     reason = f"ATR TARGET (3x): ${price:.2f} >= ${atr_target:.2f}"
+                    if not self._min_hold_allows_exit(sym, reason):
+                        continue
                     logger.info(f"🎯 [{sym}]: {reason}")
                     to_close.append((sym, price, reason))
                     continue
 
             # ── Check 5: Original profit target hit ──
             if price >= pos.target_price:
+                reason = f"profit target"
+                if not self._min_hold_allows_exit(sym, reason):
+                    continue
                 logger.info(
                     f"🎯 TARGET HIT [{sym}]: ${price:.2f} >= ${pos.target_price:.2f} "
                     f"(P&L: {gain_pct:+.2%})"
@@ -2436,6 +2476,8 @@ class UnifiedTrader:
                     and pos.qty >= 2):
                 partial_qty = max(1, int(pos.qty * self.cfg.scaled_exit_fraction))
                 reason = f"SCALED EXIT: +{gain_pct:.1%} >= +{self.cfg.scaled_exit_pct:.0%}, sell {partial_qty}/{pos.qty}"
+                if not self._min_hold_allows_exit(sym, reason):
+                    continue
                 logger.info(f"📊 [{sym}]: {reason}")
                 to_partial_close.append((sym, price, partial_qty, reason))
                 continue
@@ -2473,6 +2515,42 @@ class UnifiedTrader:
                 if new_stop > old_stop:
                     pos.stop_price = round(new_stop, 2)
                     logger.info(f"Tightened stop [{sym}]: ${old_stop:.2f} → ${pos.stop_price:.2f}")
+
+    # ── Anti-churn helpers ──────────────────────────────────────────
+    def _turnover_allows_trade(self, trade_value: float, equity: float) -> bool:
+        """Check if daily turnover budget allows this trade."""
+        max_turnover = self.cfg.max_daily_turnover_pct * equity
+        if self._daily_turnover_used + trade_value > max_turnover:
+            logger.warning(
+                f"⚠️ TURNOVER GATE: used ${self._daily_turnover_used:,.0f} + "
+                f"${trade_value:,.0f} > ${max_turnover:,.0f} limit "
+                f"({self.cfg.max_daily_turnover_pct:.0%} of equity)"
+            )
+            return False
+        return True
+
+    def _record_fill(self, symbol: str, fill_value: float, equity: float):
+        """Record a fill for turnover tracking and entry bar."""
+        self._daily_turnover_used += fill_value
+        self._position_entry_bar[symbol] = self._bar_count
+
+    def _min_hold_allows_exit(self, symbol: str, reason: str, is_pairs_zscore: bool = False) -> bool:
+        """Check if minimum hold period allows exit. Stop-losses and pairs z-score exits are exempt."""
+        # Stop-losses are always allowed
+        stop_reasons = ("HARD STOP", "trailing stop", "ATR stop", "stop", "EMERGENCY", "liquidat")
+        if any(r in reason for r in stop_reasons):
+            return True
+        # Pairs z-score exits are exempt
+        if is_pairs_zscore:
+            return True
+        bars_held = self._bar_count - self._position_entry_bar.get(symbol, 0)
+        if bars_held < self.cfg.min_hold_bars:
+            logger.info(
+                f"⏳ MIN HOLD: {symbol} held {bars_held}/{self.cfg.min_hold_bars} bars — "
+                f"skipping exit ({reason})"
+            )
+            return False
+        return True
 
     # ── Close position ──────────────────────────────────────────────
     def _close_position(self, symbol: str, price: float, reason: str):
@@ -2573,6 +2651,7 @@ class UnifiedTrader:
         self.daily_trades += 1
 
         del self.positions[symbol]
+        self._position_entry_bar.pop(symbol, None)
         logger.info(f"Position closed: {symbol} P&L={pnl_pct:+.2%} ({reason})")
 
     # ── Close partial position (scaled exit) ────────────────────────
@@ -2780,6 +2859,11 @@ class UnifiedTrader:
             # Handle CLOSE signals: exit existing positions
             if sig.direction == SignalDirection.CLOSE:
                 if sig.symbol in self.positions:
+                    # Anti-churn: respect min hold period for non-stop exits
+                    is_pairs = (sig.strategy == StrategyType.PAIRS)
+                    if not self._min_hold_allows_exit(sig.symbol, is_pairs_zscore=is_pairs):
+                        logger.info(f"Min-hold gate: skipping CLOSE for {sig.symbol}")
+                        continue
                     pos = self.positions[sig.symbol]
                     limit_price = round(sig.entry_price * 0.999, 2)  # Slight discount for fills
                     if not self.dry_run:
@@ -2798,6 +2882,7 @@ class UnifiedTrader:
                             if self.portfolio_alloc:
                                 self.portfolio_alloc.record_trade(sig.strategy.value, pnl_pct)
                             del self.positions[sig.symbol]
+                            self._position_entry_bar.pop(sig.symbol, None)
                     else:
                         logger.info(f"[DRY RUN] Would CLOSE {pos.qty} {sig.symbol} @ ${limit_price:.2f}")
                 continue
@@ -2818,6 +2903,11 @@ class UnifiedTrader:
                 continue
 
             proposed_cost = qty * sig.entry_price
+
+            # Anti-churn: turnover gate
+            if not self._turnover_allows_trade(proposed_cost, equity):
+                logger.info(f"Turnover cap reached — skipping v2 entry {sig.symbol}")
+                return
 
             # ── GUARDIAN: entry validation ──
             if self.guardian is not None:
@@ -2928,6 +3018,8 @@ class UnifiedTrader:
                 atr_at_entry=sig.atr,
                 sector=get_sector(sig.symbol),
             )
+            self._record_fill(sig.symbol, proposed_cost, equity)
+            self._position_entry_bar[sig.symbol] = self._bar_count
 
             current_pos_values[sig.symbol] = proposed_cost
             cash -= proposed_cost
@@ -3194,6 +3286,11 @@ class UnifiedTrader:
 
             # Sector cap check (NON-OPTIONAL)
             proposed_cost = equity * sig.position_size_pct
+
+            # Anti-churn: turnover gate
+            if not self._turnover_allows_trade(proposed_cost, equity):
+                logger.info(f"Turnover cap reached — stopping legacy entries")
+                return
             allowed, reason = sector_allows_trade_check(
                 sig.symbol, proposed_cost, current_pos_values, equity
             )
@@ -3354,6 +3451,8 @@ class UnifiedTrader:
                 atr_at_entry=sig.atr,
                 sector=get_sector(sig.symbol),
             )
+            self._record_fill(sig.symbol, proposed_cost, equity)
+            self._position_entry_bar[sig.symbol] = self._bar_count
             logger.info(
                 f"  → Entry {sig.symbol}: stop=${safe_stop:.2f} "
                 f"target=${target:.2f} ATR=${sig.atr:.2f} "

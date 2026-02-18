@@ -21,3 +21,6 @@ vaderSentiment>=3.3.2
 hmmlearn>=0.3.0
 PyWavelets>=1.4.0
 scipy>=1.11.0
+
+# Monitoring
+prometheus-client>=0.20.0

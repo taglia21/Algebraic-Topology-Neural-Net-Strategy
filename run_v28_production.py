@@ -173,6 +173,12 @@ try:
 except ImportError:
     _tf = None
 
+try:
+    from src.metrics.daily_performance import DailyPerformanceLogger
+    HAS_DAILY_PERF = True
+except ImportError:
+    HAS_DAILY_PERF = False
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -305,6 +311,9 @@ class EquityEngine:
         # Phase C: Kalman + TCA + retraining
         self.tca_model = None
         self.retrain_scheduler = None
+
+        # Phase 6: Daily performance logger
+        self.daily_perf = None
 
         self.logger = logging.getLogger("equity_engine")
         self._high_water_marks: dict[str, float] = {}
@@ -461,6 +470,17 @@ class EquityEngine:
             except Exception as e:
                 self.logger.warning(f"RetrainingScheduler init failed: {e}")
 
+        # 14. Daily Performance Logger
+        if HAS_DAILY_PERF:
+            try:
+                self.daily_perf = DailyPerformanceLogger(
+                    log_dir=str(LOG_DIR),
+                    initial_equity=float(init_equity),
+                )
+                self.logger.info("DailyPerformanceLogger loaded")
+            except Exception as e:
+                self.logger.warning(f"DailyPerformanceLogger init failed: {e}")
+
         _phase_b = []
         if self.signal_aggregator: _phase_b.append("SignalAgg")
         if self.nn_predictor: _phase_b.append("NNPredictor")
@@ -469,6 +489,7 @@ class EquityEngine:
         if self.tda_engine: _phase_b.append("TDA")
         if self.tca_model: _phase_b.append("TCA")
         if self.retrain_scheduler: _phase_b.append("Retrain")
+        if self.daily_perf: _phase_b.append("DailyPerf")
 
         self.logger.info(
             f"Equity engine initialized (mode={self.mode}) with "
@@ -898,6 +919,20 @@ class EquityEngine:
                     )
             except Exception as e:
                 self.logger.debug(f"RetrainingScheduler check error: {e}")
+
+        # ── Daily performance logging (once per cycle, deduped per day) ──
+        if self.daily_perf:
+            try:
+                _turnover = (self._daily_turnover_used / equity * 100) if equity > 0 else 0
+                self.daily_perf.log_daily(
+                    equity=equity,
+                    daily_pnl=0.0,  # computed inside logger from equity delta
+                    n_positions=n_positions,
+                    n_trades=_filter_counts.get("scanned", 0) - _filter_counts.get("no_signal", 0),
+                    turnover_pct=_turnover,
+                )
+            except Exception as e:
+                self.logger.debug(f"DailyPerformanceLogger error: {e}")
 
     def _fetch_price_array(self, symbol: str) -> Optional[np.ndarray]:
         """Fetch recent close prices as numpy array."""

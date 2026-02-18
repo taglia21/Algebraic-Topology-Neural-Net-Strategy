@@ -320,32 +320,80 @@ class AlpacaOptionsExecutor:
         net_credit: float = None,
         net_debit: float = None,
     ) -> ExecutionResult:
-        """Fallback: submit spread as two separate single-leg limit orders."""
+        """Fallback: submit spread as two separate single-leg limit orders.
+
+        BUY leg is submitted first so the long option is in the account
+        before attempting the SELL leg.  If the SELL leg is rejected as
+        'uncovered', we keep the long-only position (defined risk) and
+        still report success.
+        """
         legs_results = []
 
-        # Determine limit prices from mid-market via data client
-        for occ_sym, side in [(long_symbol, OrderSide.BUY), (short_symbol, OrderSide.SELL)]:
-            limit_price = None
+        # --- 1. BUY the long (protective) leg first ---
+        long_lp = None
+        try:
+            req = OptionLatestQuoteRequest(symbol_or_symbols=long_symbol)
+            quotes = self.data_client.get_option_latest_quote(req)
+            q = quotes.get(long_symbol) or (list(quotes.values())[0] if quotes else None)
+            if q and q.bid_price and q.ask_price:
+                long_lp = round((q.bid_price + q.ask_price) / 2.0, 2)
+        except Exception:
+            pass
+
+        long_result = await self.submit_single_leg_order(
+            option_symbol=long_symbol,
+            side=OrderSide.BUY,
+            quantity=quantity,
+            limit_price=long_lp,
+            with_bracket=False,
+        )
+        legs_results.append(long_result)
+
+        # --- 2. SELL the short leg only if the long leg succeeded ---
+        short_result = None
+        if long_result.success:
+            short_lp = None
             try:
-                req = OptionLatestQuoteRequest(symbol_or_symbols=occ_sym)
+                req = OptionLatestQuoteRequest(symbol_or_symbols=short_symbol)
                 quotes = self.data_client.get_option_latest_quote(req)
-                q = quotes.get(occ_sym) or (list(quotes.values())[0] if quotes else None)
+                q = quotes.get(short_symbol) or (list(quotes.values())[0] if quotes else None)
                 if q and q.bid_price and q.ask_price:
-                    limit_price = round((q.bid_price + q.ask_price) / 2.0, 2)
+                    short_lp = round((q.bid_price + q.ask_price) / 2.0, 2)
             except Exception:
                 pass
 
-            result = await self.submit_single_leg_order(
-                option_symbol=occ_sym,
-                side=side,
+            short_result = await self.submit_single_leg_order(
+                option_symbol=short_symbol,
+                side=OrderSide.SELL,
                 quantity=quantity,
-                limit_price=limit_price,
-                with_bracket=False,  # no bracket on individual spread legs
+                limit_price=short_lp,
+                with_bracket=False,
             )
-            legs_results.append(result)
+            legs_results.append(short_result)
+
+            if not short_result.success:
+                err = short_result.error_message or ""
+                if "uncovered" in err.lower() or "not eligible" in err.lower():
+                    self.logger.warning(
+                        f"SELL leg rejected (uncovered) — keeping long-only position: {long_symbol}"
+                    )
+                    # Long-only is defined risk; treat as success
+                    order_ids = [str(long_result.order_id)]
+                    return ExecutionResult(
+                        success=True,
+                        order_id=",".join(order_ids),
+                        status=OrderStatus.FILLED,
+                        filled_quantity=quantity,
+                        average_fill_price=long_result.average_fill_price or 0.0,
+                        timestamp=datetime.now(),
+                        error_message="Long-only (SELL leg uncovered)",
+                        legs=[
+                            OrderLeg(symbol=long_symbol, side=OrderSide.BUY, quantity=quantity),
+                        ],
+                    )
 
         all_ok = all(r.success for r in legs_results)
-        order_ids = [r.order_id for r in legs_results if r.order_id]
+        order_ids = [str(r.order_id) for r in legs_results if r.order_id]
         return ExecutionResult(
             success=all_ok,
             order_id=",".join(order_ids) if order_ids else None,
@@ -456,42 +504,109 @@ class AlpacaOptionsExecutor:
             self.logger.error(f"MLEG iron condor submission failed: {err_str}")
 
             # ── Fallback: submit each leg individually ──
+            # BUY (protective) legs first so the account owns them before
+            # attempting SELL legs.  If SELL legs are rejected as
+            # "uncovered", we keep the long-only strangle (defined risk).
             if "not allowed for mleg" in err_str.lower() or "mleg" in err_str.lower():
                 self.logger.info(
                     "MLEG not supported — falling back to single-leg IC execution"
                 )
-                all_legs = [
-                    (put_long_occ, OrderSide.BUY),
-                    (put_short_occ, OrderSide.SELL),
-                    (call_short_occ, OrderSide.SELL),
-                    (call_long_occ, OrderSide.BUY),
-                ]
-                results = []
-                for occ_sym, side in all_legs:
-                    lp = None
+
+                async def _get_mid(occ_sym: str):
                     try:
                         req = OptionLatestQuoteRequest(symbol_or_symbols=occ_sym)
                         quotes = self.data_client.get_option_latest_quote(req)
                         q = quotes.get(occ_sym) or (list(quotes.values())[0] if quotes else None)
                         if q and q.bid_price and q.ask_price:
-                            lp = round((q.bid_price + q.ask_price) / 2.0, 2)
+                            return round((q.bid_price + q.ask_price) / 2.0, 2)
                     except Exception:
                         pass
-                    results.append(await self.submit_single_leg_order(
+                    return None
+
+                # ── Phase 1: BUY protective legs ──
+                buy_legs = [
+                    (put_long_occ, OrderSide.BUY),
+                    (call_long_occ, OrderSide.BUY),
+                ]
+                buy_results = []
+                for occ_sym, side in buy_legs:
+                    lp = await _get_mid(occ_sym)
+                    buy_results.append(await self.submit_single_leg_order(
                         option_symbol=occ_sym, side=side, quantity=quantity,
                         limit_price=lp, with_bracket=False,
                     ))
-                all_ok = all(r.success for r in results)
-                order_ids = [r.order_id for r in results if r.order_id]
+
+                buy_ok = any(r.success for r in buy_results)
+                if not buy_ok:
+                    order_ids = [str(r.order_id) for r in buy_results if r.order_id]
+                    return ExecutionResult(
+                        success=False,
+                        order_id=",".join(order_ids) if order_ids else None,
+                        status=OrderStatus.REJECTED,
+                        filled_quantity=0,
+                        average_fill_price=0.0,
+                        timestamp=datetime.now(),
+                        error_message="All BUY legs failed in IC fallback",
+                        legs=internal_legs,
+                    )
+
+                # ── Phase 2: SELL short legs (may fail as uncovered) ──
+                sell_legs = [
+                    (put_short_occ, OrderSide.SELL),
+                    (call_short_occ, OrderSide.SELL),
+                ]
+                sell_results = []
+                uncovered_count = 0
+                for occ_sym, side in sell_legs:
+                    lp = await _get_mid(occ_sym)
+                    res = await self.submit_single_leg_order(
+                        option_symbol=occ_sym, side=side, quantity=quantity,
+                        limit_price=lp, with_bracket=False,
+                    )
+                    sell_results.append(res)
+                    if not res.success:
+                        err = res.error_message or ""
+                        if "uncovered" in err.lower() or "not eligible" in err.lower():
+                            uncovered_count += 1
+                            self.logger.warning(
+                                f"SELL leg rejected (uncovered): {occ_sym} — keeping long-only"
+                            )
+
+                all_results = buy_results + sell_results
+                filled = [r for r in all_results if r.success]
+                order_ids = [str(r.order_id) for r in filled if r.order_id]
+                filled_legs = [
+                    OrderLeg(symbol=occ_sym, side=side, quantity=quantity)
+                    for (occ_sym, side), r in zip(buy_legs + sell_legs, all_results)
+                    if r.success
+                ]
+
+                if uncovered_count == len(sell_legs) and buy_ok:
+                    # All SELL legs uncovered → long strangle (defined risk)
+                    self.logger.info(
+                        f"IC → long strangle (SELL legs uncovered) on {underlying}"
+                    )
+                    return ExecutionResult(
+                        success=True,
+                        order_id=",".join(order_ids) if order_ids else None,
+                        status=OrderStatus.FILLED,
+                        filled_quantity=quantity,
+                        average_fill_price=0.0,
+                        timestamp=datetime.now(),
+                        error_message="Long strangle only (SELL legs uncovered)",
+                        legs=filled_legs,
+                    )
+
+                all_ok = all(r.success for r in all_results)
                 return ExecutionResult(
-                    success=all_ok,
+                    success=all_ok or len(filled) >= 2,
                     order_id=",".join(order_ids) if order_ids else None,
                     status=OrderStatus.FILLED if all_ok else OrderStatus.PARTIAL,
                     filled_quantity=quantity if all_ok else 0,
                     average_fill_price=0.0,
                     timestamp=datetime.now(),
-                    error_message="" if all_ok else "Partial fill on single-leg IC fallback",
-                    legs=internal_legs,
+                    error_message="" if all_ok else f"Partial IC: {len(filled)}/4 legs filled",
+                    legs=filled_legs,
                 )
 
             return ExecutionResult(
@@ -588,6 +703,23 @@ class AlpacaOptionsExecutor:
             self.logger.error(f"MLEG straddle submission failed: {err_str}")
 
             if "not allowed for mleg" in err_str.lower() or "mleg" in err_str.lower():
+                # Short straddles will be rejected as uncovered on paper
+                if not buy:
+                    self.logger.warning(
+                        f"Short straddle on {underlying} skipped — "
+                        "paper account cannot sell uncovered options"
+                    )
+                    return ExecutionResult(
+                        success=False,
+                        order_id=None,
+                        status=OrderStatus.REJECTED,
+                        filled_quantity=0,
+                        average_fill_price=0.0,
+                        timestamp=datetime.now(),
+                        error_message="Short straddle blocked (uncovered options not allowed)",
+                        legs=internal_legs,
+                    )
+
                 self.logger.info(
                     "MLEG not supported — falling back to single-leg straddle execution"
                 )
@@ -607,7 +739,7 @@ class AlpacaOptionsExecutor:
                         limit_price=lp, with_bracket=False,
                     ))
                 all_ok = all(r.success for r in results)
-                order_ids = [r.order_id for r in results if r.order_id]
+                order_ids = [str(r.order_id) for r in results if r.order_id]
                 return ExecutionResult(
                     success=all_ok,
                     order_id=",".join(order_ids) if order_ids else None,

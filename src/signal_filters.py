@@ -10,8 +10,13 @@ V1.0: RSI + Volatility filters for signal quality improvement
 import logging
 import pandas as pd
 import numpy as np
-from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
+
+try:
+    from ta.momentum import RSIIndicator
+    from ta.volatility import AverageTrueRange
+    HAS_TA = True
+except ImportError:
+    HAS_TA = False
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -89,6 +94,17 @@ class SignalFilter:
         if len(close_prices) < self.rsi_period + 1:
             return 50.0
         
+        if not HAS_TA:
+            # Manual RSI fallback when ta library is unavailable
+            delta = close_prices.diff()
+            gain = delta.clip(lower=0).rolling(window=self.rsi_period).mean()
+            loss = (-delta.clip(upper=0)).rolling(window=self.rsi_period).mean()
+            rs = gain / loss.replace(0, 1e-10)
+            rsi_val = 100 - (100 / (1 + rs))
+            if len(rsi_val) == 0 or pd.isna(rsi_val.iloc[-1]):
+                return 50.0
+            return float(rsi_val.iloc[-1])
+
         rsi_indicator = RSIIndicator(close_prices, window=self.rsi_period)
         rsi = rsi_indicator.rsi()
         

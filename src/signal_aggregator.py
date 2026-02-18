@@ -579,7 +579,8 @@ class SignalAggregator:
                 np.std(ret_1d[-5:]) * np.sqrt(252) if len(ret_1d) >= 5 else 0,  # 5d vol
             ]])
             return features
-        except Exception:
+        except Exception as e:
+            logger.warning(f"ML feature extraction failed: {e}")
             return None
 
     @staticmethod
@@ -628,7 +629,8 @@ class SignalAggregator:
                 confidence=float(np.clip(confidence, 0.3, 0.9)),
                 metadata={"ret_5d": ret_5d, "ret_20d": ret_20d, "rsi": rsi},
             )
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Momentum model signal failed: {e}")
             return None
 
     def _fetch_manifold_inputs(self, symbol: str):
@@ -652,8 +654,8 @@ class SignalAggregator:
                     vix = yf.download("^VIX", period="5d", interval="1d", progress=False)
                     if not vix.empty:
                         implied_vol = float(vix["Close"].values.flatten()[-1]) / 100.0
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"VIX fetch failed for implied vol: {e}")
             return close, realized_vol, implied_vol
         except Exception as e:
             logger.debug(f"Failed to fetch manifold inputs for {symbol}: {e}")

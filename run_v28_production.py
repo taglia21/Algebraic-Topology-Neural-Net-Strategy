@@ -323,7 +323,8 @@ class EquityEngine:
         try:
             acct = self.client.get_account()
             init_equity = acct.equity
-        except Exception:
+        except Exception as e:
+            self.logger.warning(f"Account fetch failed, using default equity: {e}")
             init_equity = 100_000.0
         self.risk_guardian = RiskGuardian(
             initial_equity=init_equity,
@@ -377,7 +378,8 @@ class EquityEngine:
                         self.nn_predictor.load_checkpoint(weight_files[0])
                         self._nn_trained = True
                         self.logger.info(f"NeuralNetPredictor loaded with weights: {weight_files[0]}")
-                    except Exception:
+                    except Exception as e:
+                        self.logger.warning(f"NeuralNetPredictor weight load failed: {e}")
                         self.logger.info("NeuralNetPredictor loaded (untrained — skipping ML gate)")
                 else:
                     self.logger.info("NeuralNetPredictor loaded (no weights found — skipping ML gate)")
@@ -533,7 +535,8 @@ class EquityEngine:
             if not allowed:
                 self.logger.info(f"Correlation block: {symbol} — {reason}")
             return allowed
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"Correlation check error for {symbol}: {e}")
             return True  # allow on error
 
     # ── Regime detection ────────────────────────────────────────────
@@ -547,8 +550,8 @@ class EquityEngine:
                     regime_label = "bull"
                 else:
                     regime_label = "bear"
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Regime detection failed: {e}")
 
         if regime_label == "bull":
             self._regime_size_scale = 1.0
@@ -604,8 +607,8 @@ class EquityEngine:
                     if len(p.symbol) <= 6 and not any(ch.isdigit() for ch in p.symbol[:4]):
                         pos_values[p.symbol] = abs(p.market_value)
                         existing_symbols.append(p.symbol)
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Position fetch failed, using stale data: {e}")
 
         # Update RiskGuardian with current equity
         if self.risk_guardian:
@@ -859,8 +862,8 @@ class EquityEngine:
             if self.risk_guardian:
                 try:
                     dd_pct = self.risk_guardian._current_drawdown_pct * 100
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.debug(f"Drawdown calc error: {e}")
             update_portfolio_metrics(
                 equity=equity,
                 n_positions=n_positions,
@@ -888,8 +891,8 @@ class EquityEngine:
             data = yf.download(symbol, period="1y", interval="1d", progress=False)
             if data is not None and len(data) >= 50:
                 return data["Close"].values.flatten().astype(float)
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.debug(f"Close array fetch failed for symbol: {e}")
         return None
 
     def _fetch_volume_array(self, symbol: str) -> Optional[np.ndarray]:
@@ -899,8 +902,8 @@ class EquityEngine:
             data = yf.download(symbol, period="2mo", interval="1d", progress=False)
             if data is not None and len(data) >= 21:
                 return data["Volume"].values.flatten().astype(float)
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.debug(f"Volume array fetch failed: {e}")
         return None
 
     async def _monitor_equity_positions(self, equity: float):

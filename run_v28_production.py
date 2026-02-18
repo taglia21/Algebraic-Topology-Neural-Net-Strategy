@@ -108,6 +108,40 @@ except ImportError:
     HAS_METRICS = False
 
 # ---------------------------------------------------------------------------
+# Phase B: Signal quality + ML + execution enhancements
+# ---------------------------------------------------------------------------
+
+try:
+    from src.signal_aggregator import SignalAggregator
+    HAS_SIGNAL_AGGREGATOR = True
+except ImportError:
+    HAS_SIGNAL_AGGREGATOR = False
+
+try:
+    from src.nn_predictor import NeuralNetPredictor
+    HAS_NN_PREDICTOR = True
+except ImportError:
+    HAS_NN_PREDICTOR = False
+
+try:
+    from src.smart_execution import SmartExecutor, SmartExecConfig
+    HAS_SMART_EXEC = True
+except ImportError:
+    HAS_SMART_EXEC = False
+
+try:
+    from src.signal_filters import SignalFilter
+    HAS_SIGNAL_FILTER = True
+except ImportError:
+    HAS_SIGNAL_FILTER = False
+
+try:
+    from src.tda_features import TDAFeatureGenerator
+    HAS_TDA = True
+except ImportError:
+    HAS_TDA = False
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
@@ -227,6 +261,15 @@ class EquityEngine:
         self.strategy_engine = None  # StrategyEngine (improved MR/pairs/momentum)
         self.pair_finder = None      # PairFinder (stat-arb)
         self.factor_monitor = None   # FactorMonitor (factor exposure)
+
+        # Phase B: Signal quality + ML + execution
+        self.signal_aggregator = None
+        self.nn_predictor = None
+        self.smart_executor = None
+        self.signal_filter = None
+        self.tda_engine = None
+        self._nn_trained = False
+
         self.logger = logging.getLogger("equity_engine")
         self._high_water_marks: dict[str, float] = {}
 
@@ -286,9 +329,81 @@ class EquityEngine:
             except Exception as e:
                 self.logger.warning(f"FactorMonitor init failed: {e}")
 
+        # 7. Signal Aggregator (Phase B) — ensemble signal quality
+        if HAS_SIGNAL_AGGREGATOR:
+            try:
+                self.signal_aggregator = SignalAggregator(min_confidence=0.55, min_models=2)
+                self.signal_aggregator.initialize()
+                self.logger.info("SignalAggregator loaded (ensemble signal quality)")
+            except Exception as e:
+                self.logger.warning(f"SignalAggregator init failed: {e}")
+
+        # 8. NN Predictor (Phase B) — LSTM ML confidence filter
+        if HAS_NN_PREDICTOR:
+            try:
+                self.nn_predictor = NeuralNetPredictor(sequence_length=20, n_features=6)
+                self.nn_predictor.compile_model()
+                # Try to load pre-trained weights
+                import glob
+                weight_files = glob.glob(str(PROJECT_ROOT / "results" / "*weights*.h5"))
+                if weight_files:
+                    try:
+                        self.nn_predictor.load_checkpoint(weight_files[0])
+                        self._nn_trained = True
+                        self.logger.info(f"NeuralNetPredictor loaded with weights: {weight_files[0]}")
+                    except Exception:
+                        self.logger.info("NeuralNetPredictor loaded (untrained — skipping ML gate)")
+                else:
+                    self.logger.info("NeuralNetPredictor loaded (no weights found — skipping ML gate)")
+            except Exception as e:
+                self.logger.warning(f"NeuralNetPredictor init failed: {e}")
+
+        # 9. Smart Execution (Phase B) — TWAP/VWAP order splitting
+        if HAS_SMART_EXEC:
+            try:
+                def _sync_submit(symbol, qty, side, limit_price):
+                    """Sync bridge: SmartExecutor → AlpacaClient."""
+                    from src.trading.alpaca_client import OrderSide, OrderType
+                    _side = OrderSide.BUY if side == "buy" else OrderSide.SELL
+                    return self.client.submit_order(
+                        symbol=symbol, qty=qty, side=_side,
+                        order_type=OrderType.LIMIT, limit_price=limit_price,
+                    )
+                self.smart_executor = SmartExecutor(
+                    submit_fn=_sync_submit,
+                    config=SmartExecConfig(default_duration_sec=120.0, max_slices=5),
+                )
+                self.logger.info("SmartExecutor loaded (TWAP/VWAP order splitting)")
+            except Exception as e:
+                self.logger.warning(f"SmartExecutor init failed: {e}")
+
+        # 10. Signal Filter (Phase B) — RSI + volatility pre-filter
+        if HAS_SIGNAL_FILTER:
+            try:
+                self.signal_filter = SignalFilter(rsi_period=14, vol_threshold=0.30)
+                self.logger.info("SignalFilter loaded (RSI + volatility filter)")
+            except Exception as e:
+                self.logger.warning(f"SignalFilter init failed: {e}")
+
+        # 11. TDA Feature Generator (Phase B) — Topological Data Analysis
+        if HAS_TDA:
+            try:
+                self.tda_engine = TDAFeatureGenerator(window=30, embedding_dim=3, feature_mode='v1.3')
+                self.logger.info("TDAFeatureGenerator loaded (topological features)")
+            except Exception as e:
+                self.logger.warning(f"TDAFeatureGenerator init failed: {e}")
+
+        _phase_b = []
+        if self.signal_aggregator: _phase_b.append("SignalAgg")
+        if self.nn_predictor: _phase_b.append("NNPredictor")
+        if self.smart_executor: _phase_b.append("SmartExec")
+        if self.signal_filter: _phase_b.append("SigFilter")
+        if self.tda_engine: _phase_b.append("TDA")
+
         self.logger.info(
             f"Equity engine initialized (mode={self.mode}) with "
             f"RiskGuardian + StrategyEngine + anti-churn + universe filter"
+            + (f" + Phase B: {', '.join(_phase_b)}" if _phase_b else "")
         )
 
     # ── Anti-churn helpers ──────────────────────────────────────────
@@ -530,6 +645,78 @@ class EquityEngine:
                     _filter_counts["not_buy"] += 1
                     continue  # only longs for now
 
+                # ── Phase B: Signal quality enhancements ──
+
+                # B1: TDA topological turbulence check
+                if self.tda_engine and price_data is not None and len(price_data) >= 30:
+                    try:
+                        tda_feats = self.tda_engine.compute_persistence_features(price_data[-60:])
+                        turbulence = np.sqrt(
+                            tda_feats.get('persistence_l0', 0) ** 2
+                            + tda_feats.get('persistence_l1', 0) ** 2
+                        )
+                        if turbulence > 2.0:
+                            decision.confidence *= 0.80
+                            self.logger.debug(f"TDA turbulence {symbol}: {turbulence:.2f} → conf reduced")
+                    except Exception as e:
+                        self.logger.debug(f"TDA error for {symbol}: {e}")
+
+                # B2: Signal Aggregator — ensemble confirmation
+                if self.signal_aggregator:
+                    try:
+                        agg = self.signal_aggregator.aggregate(symbol)
+                        if agg and not agg.is_actionable:
+                            self.logger.debug(
+                                f"SignalAggregator rejected {symbol} "
+                                f"(sig={agg.signal:.2f}, conf={agg.confidence:.2f})"
+                            )
+                            _filter_counts["no_signal"] += 1
+                            continue
+                        if agg and agg.confidence > 0:
+                            decision.confidence = min(
+                                1.0, (decision.confidence + agg.confidence) / 2
+                            )
+                    except Exception as e:
+                        self.logger.debug(f"SignalAggregator error {symbol}: {e}")
+
+                # B3: Signal Filter — RSI + volatility gate
+                if self.signal_filter and price_data is not None and len(price_data) >= 21:
+                    try:
+                        import pandas as _pd
+                        _price_df = _pd.DataFrame({"close": price_data})
+                        filt = self.signal_filter.filter_signal("buy", _price_df)
+                        if filt.get("filtered", False):
+                            self.logger.info(
+                                f"SignalFilter blocked {symbol}: "
+                                f"{filt.get('filter_reason', '?')}"
+                            )
+                            _filter_counts["no_signal"] += 1
+                            continue
+                    except Exception as e:
+                        self.logger.debug(f"SignalFilter error {symbol}: {e}")
+
+                # B4: NN Predictor — ML confidence gate (only with trained weights)
+                if self.nn_predictor and self._nn_trained and price_data is not None and len(price_data) >= 21:
+                    try:
+                        import tensorflow as _tf
+                        _rets = np.diff(price_data[-21:]) / np.maximum(price_data[-21:-1], 1e-8)
+                        _seq = _rets.reshape(1, 20, 1)
+                        _seq = np.pad(_seq, ((0, 0), (0, 0), (0, 5)))  # pad to 6 features
+                        _pred = float(self.nn_predictor(
+                            _tf.constant(_seq, dtype=_tf.float32)
+                        ).numpy().flatten()[0])
+                        if _pred < 0.42:
+                            self.logger.info(
+                                f"NNPredictor LOW conf {symbol}: {_pred:.2f} — skip"
+                            )
+                            _filter_counts["no_signal"] += 1
+                            continue
+                        decision.confidence = min(
+                            1.0, decision.confidence * 0.65 + _pred * 0.35
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"NNPredictor error {symbol}: {e}")
+
                 # Sector cap check
                 cost = decision.recommended_quantity * decision.entry_price
                 if HAS_SECTOR_CAPS:
@@ -769,16 +956,52 @@ class EquityEngine:
                     record_order("buy", "submitted")
             else:
                 # Simple limit order for sells or if no stop/TP available
-                result = self.client.submit_order(
-                    symbol=decision.symbol,
-                    qty=qty,
-                    side=side,
-                    order_type=OrderType.LIMIT,
-                    limit_price=limit_price,
-                )
-                self.logger.info(f"✅ Limit order: {result}")
-                if HAS_METRICS:
-                    record_order(side.value if hasattr(side, 'value') else str(side), "submitted")
+                # Phase B: use SmartExecutor for TWAP splitting on larger orders
+                if self.smart_executor and qty >= 50:
+                    try:
+                        plan = self.smart_executor.plan_execution(
+                            symbol=decision.symbol,
+                            qty=qty,
+                            side="buy" if side == OrderSide.BUY else "sell",
+                            ref_price=limit_price,
+                            strategy="twap",
+                        )
+                        report = self.smart_executor.execute_all_slices(
+                            plan, current_price=limit_price
+                        )
+                        self.logger.info(
+                            f"✅ SmartExec TWAP: {decision.symbol} {qty}sh "
+                            f"in {report.slices_filled} slices, "
+                            f"slippage={report.slippage_bps:+.1f}bps"
+                        )
+                        if HAS_METRICS:
+                            record_order(
+                                side.value if hasattr(side, 'value') else str(side),
+                                "submitted",
+                            )
+                    except Exception as se:
+                        self.logger.warning(f"SmartExec failed, falling back: {se}")
+                        result = self.client.submit_order(
+                            symbol=decision.symbol,
+                            qty=qty,
+                            side=side,
+                            order_type=OrderType.LIMIT,
+                            limit_price=limit_price,
+                        )
+                        self.logger.info(f"✅ Limit order (fallback): {result}")
+                        if HAS_METRICS:
+                            record_order(side.value if hasattr(side, 'value') else str(side), "submitted")
+                else:
+                    result = self.client.submit_order(
+                        symbol=decision.symbol,
+                        qty=qty,
+                        side=side,
+                        order_type=OrderType.LIMIT,
+                        limit_price=limit_price,
+                    )
+                    self.logger.info(f"✅ Limit order: {result}")
+                    if HAS_METRICS:
+                        record_order(side.value if hasattr(side, 'value') else str(side), "submitted")
         except Exception as exc:
             self.logger.error(f"Equity execution failed: {exc}", exc_info=True)
 

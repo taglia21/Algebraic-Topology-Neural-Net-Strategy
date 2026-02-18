@@ -337,13 +337,21 @@ class EquityEngine:
         return True
 
     def _passes_volume_check(self, volumes: Optional[np.ndarray]) -> bool:
-        """Require volume ≥ 1.5x the 20-period average."""
+        """Liquidity gate: avg daily volume > 500K and today's volume > 30% avg.
+
+        Original 1.5x filter blocked ALL symbols because we check mid-day
+        (partial volume) against full-day averages.  Replaced with a
+        liquidity floor + dead-day filter.
+        """
         if volumes is None or len(volumes) < 21:
             return True  # insufficient data → allow (don't block on missing data)
         avg_20 = float(np.mean(volumes[-21:-1]))
+        if avg_20 < 500_000:
+            return False  # illiquid stock
         if avg_20 <= 0:
             return True
-        return float(volumes[-1]) >= 1.5 * avg_20
+        # Block abnormally dead days (< 30% of average, accounts for mid-day check)
+        return float(volumes[-1]) >= 0.3 * avg_20
 
     def _passes_correlation_check(self, symbol: str) -> bool:
         """Check correlation vs. existing holdings using RiskGuardian."""
@@ -476,16 +484,20 @@ class EquityEngine:
             return
 
         # Analyze each symbol
+        _filter_counts = {"universe": 0, "volume": 0, "correlation": 0,
+                          "no_signal": 0, "not_buy": 0, "scanned": 0}
         for symbol in symbols:
             if n_positions >= self._max_positions_regime:
                 break
             if symbol in existing_symbols:
                 continue
+            _filter_counts["scanned"] += 1
 
             try:
                 # Universe filter (banned, freefall, death-cross)
                 price_data = self._fetch_price_array(symbol)
                 if not self._passes_universe_filter(symbol, price_data):
+                    _filter_counts["universe"] += 1
                     if HAS_METRICS:
                         record_filter_block("universe")
                     continue
@@ -493,6 +505,7 @@ class EquityEngine:
                 # Volume confirmation
                 vol_data = self._fetch_volume_array(symbol)
                 if not self._passes_volume_check(vol_data):
+                    _filter_counts["volume"] += 1
                     self.logger.debug(f"Skipping {symbol}: low volume")
                     if HAS_METRICS:
                         record_filter_block("volume")
@@ -500,6 +513,7 @@ class EquityEngine:
 
                 # Correlation check vs existing holdings
                 if not self._passes_correlation_check(symbol):
+                    _filter_counts["correlation"] += 1
                     self.logger.info(f"Skipping {symbol}: too correlated with existing holdings")
                     if HAS_METRICS:
                         record_filter_block("correlation")
@@ -508,10 +522,12 @@ class EquityEngine:
                 # Get signal from EnhancedTradingEngine
                 decision = self.engine.analyze(symbol)
                 if not decision or not decision.is_tradeable:
+                    _filter_counts["no_signal"] += 1
                     continue
 
                 is_buy = decision.signal.name in ("STRONG_BUY", "BUY")
                 if not is_buy:
+                    _filter_counts["not_buy"] += 1
                     continue  # only longs for now
 
                 # Sector cap check
@@ -562,6 +578,14 @@ class EquityEngine:
 
             except Exception as exc:
                 self.logger.error(f"Equity cycle error for {symbol}: {exc}", exc_info=True)
+
+        # Log cycle summary
+        self.logger.info(
+            f"Scan: {_filter_counts['scanned']} symbols | "
+            f"universe={_filter_counts['universe']} vol={_filter_counts['volume']} "
+            f"corr={_filter_counts['correlation']} no_sig={_filter_counts['no_signal']} "
+            f"not_buy={_filter_counts['not_buy']} | positions={n_positions}/{self._max_positions_regime}"
+        )
 
         # ── End-of-cycle metrics update ──
         if HAS_METRICS:

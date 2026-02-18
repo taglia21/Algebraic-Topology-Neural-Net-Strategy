@@ -237,20 +237,25 @@ def test_universe_filter():
 
 
 def test_volume_check():
-    """Volume confirmation requires 1.5x 20-period average."""
+    """Volume filter: avg > 500K and today > 0.3x avg (liquidity gate)."""
     print("\n── Volume Check ──")
     from run_v28_production import EquityEngine
     e = EquityEngine("paper")
 
-    # 20 bars of volume=1000 then current bar=500 → below 1.5x
-    low_vol = np.array([1000.0] * 20 + [500.0])
-    check("Low volume (0.5x avg) blocked",
-          not e._passes_volume_check(low_vol))
+    # Illiquid stock: avg vol = 100K (< 500K minimum)
+    illiquid = np.array([100_000.0] * 20 + [100_000.0])
+    check("Illiquid stock (avg 100K) blocked",
+          not e._passes_volume_check(illiquid))
 
-    # Current bar = 2000 → 2.0x ≥ 1.5x
-    high_vol = np.array([1000.0] * 20 + [2000.0])
-    check("High volume (2.0x avg) passes",
-          e._passes_volume_check(high_vol))
+    # Dead day: today vol = 0.1x avg (< 0.3x threshold)
+    dead_day = np.array([1_000_000.0] * 20 + [100_000.0])
+    check("Dead day (0.1x avg) blocked",
+          not e._passes_volume_check(dead_day))
+
+    # Normal day: today vol = 0.5x avg (>= 0.3x threshold)
+    normal = np.array([1_000_000.0] * 20 + [500_000.0])
+    check("Normal volume (0.5x avg) passes",
+          e._passes_volume_check(normal))
 
     # None → allow (no data to check)
     check("None volumes → passes (no data)",

@@ -93,6 +93,20 @@ try:
 except ImportError:
     HAS_PORTFOLIO_ALLOCATOR = False
 
+# Prometheus metrics
+try:
+    from src.metrics import (
+        MetricsServer,
+        update_portfolio_metrics,
+        record_order,
+        record_signal,
+        record_filter_block,
+        CYCLE_DURATION,
+    )
+    HAS_METRICS = True
+except ImportError:
+    HAS_METRICS = False
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -382,6 +396,9 @@ class EquityEngine:
         if self.engine is None:
             return
 
+        import time as _time
+        _cycle_start = _time.monotonic()
+
         self._bar_count += 1
 
         # Reset daily turnover at start of new trading day
@@ -469,17 +486,23 @@ class EquityEngine:
                 # Universe filter (banned, freefall, death-cross)
                 price_data = self._fetch_price_array(symbol)
                 if not self._passes_universe_filter(symbol, price_data):
+                    if HAS_METRICS:
+                        record_filter_block("universe")
                     continue
 
                 # Volume confirmation
                 vol_data = self._fetch_volume_array(symbol)
                 if not self._passes_volume_check(vol_data):
                     self.logger.debug(f"Skipping {symbol}: low volume")
+                    if HAS_METRICS:
+                        record_filter_block("volume")
                     continue
 
                 # Correlation check vs existing holdings
                 if not self._passes_correlation_check(symbol):
                     self.logger.info(f"Skipping {symbol}: too correlated with existing holdings")
+                    if HAS_METRICS:
+                        record_filter_block("correlation")
                     continue
 
                 # Get signal from EnhancedTradingEngine
@@ -528,6 +551,8 @@ class EquityEngine:
                     f"(conf={decision.confidence:.2f}, combined={decision.combined_score:.2f}, "
                     f"qty={decision.recommended_quantity}, cost=${proposed_cost:,.0f})"
                 )
+                if HAS_METRICS:
+                    record_signal(decision.signal.name)
 
                 await self._execute_equity_trade(decision, self._regime_size_scale)
 
@@ -537,6 +562,25 @@ class EquityEngine:
 
             except Exception as exc:
                 self.logger.error(f"Equity cycle error for {symbol}: {exc}", exc_info=True)
+
+        # ── End-of-cycle metrics update ──
+        if HAS_METRICS:
+            _cycle_elapsed = _time.monotonic() - _cycle_start
+            CYCLE_DURATION.observe(_cycle_elapsed)
+            turnover_pct = (self._daily_turnover_used / equity * 100) if equity > 0 else 0
+            dd_pct = 0.0
+            if self.risk_guardian:
+                try:
+                    dd_pct = self.risk_guardian._current_drawdown_pct * 100
+                except Exception:
+                    pass
+            update_portfolio_metrics(
+                equity=equity,
+                n_positions=n_positions,
+                turnover_pct=turnover_pct,
+                regime_scale=self._regime_size_scale,
+                max_dd_pct=dd_pct,
+            )
 
     def _fetch_price_array(self, symbol: str) -> Optional[np.ndarray]:
         """Fetch recent close prices as numpy array."""
@@ -697,6 +741,8 @@ class EquityEngine:
                     f"limit=${limit_price} SL=${stop_price} TP=${tp_price} "
                     f"→ {data.get('id', '?')}"
                 )
+                if HAS_METRICS:
+                    record_order("buy", "submitted")
             else:
                 # Simple limit order for sells or if no stop/TP available
                 result = self.client.submit_order(
@@ -707,6 +753,8 @@ class EquityEngine:
                     limit_price=limit_price,
                 )
                 self.logger.info(f"✅ Limit order: {result}")
+                if HAS_METRICS:
+                    record_order(side.value if hasattr(side, 'value') else str(side), "submitted")
         except Exception as exc:
             self.logger.error(f"Equity execution failed: {exc}", exc_info=True)
 
@@ -853,6 +901,12 @@ async def main(mode: str):
 
     await equity.initialize()
     await options.initialize()
+
+    # Start Prometheus metrics server
+    if HAS_METRICS:
+        metrics_port = int(os.getenv("METRICS_PORT", "9090"))
+        metrics_server = MetricsServer(port=metrics_port)
+        metrics_server.start()
 
     # Pre-market analysis if in window
     if in_premarket_window():

@@ -349,6 +349,28 @@ def submit_limit_order(symbol: str, qty: int, side: str, limit_price: float,
     return alpaca_post("/v2/orders", order)
 
 
+def submit_bracket_order(symbol: str, qty: int, side: str, limit_price: float,
+                         stop_price: float, take_profit_price: float,
+                         time_in_force: str = "gtc") -> Optional[dict]:
+    """Submit a bracket order: limit entry + stop-loss + take-profit at broker."""
+    order = {
+        "symbol": symbol,
+        "qty": str(qty),
+        "side": side,
+        "type": "limit",
+        "limit_price": str(round(limit_price, 2)),
+        "time_in_force": time_in_force,
+        "order_class": "bracket",
+        "stop_loss": {"stop_price": str(round(stop_price, 2))},
+        "take_profit": {"limit_price": str(round(take_profit_price, 2))},
+    }
+    logger.info(
+        f"BRACKET ORDER: {side.upper()} {qty} {symbol} @ ${limit_price:.2f} "
+        f"stop=${stop_price:.2f} tp=${take_profit_price:.2f}"
+    )
+    return alpaca_post("/v2/orders", order)
+
+
 def is_market_open() -> bool:
     """Check if market is currently open."""
     clock = alpaca_get("/v2/clock")
@@ -805,12 +827,14 @@ except Exception as e:
 # ── Greeks Manager & Delta Hedger ───────────────────────────────────
 _greeks_manager = None
 _delta_hedger = None
+_greeks_aggregator = None
 try:
-    from src.greeks_manager import GreeksManager, GreeksConfig
+    from src.greeks_manager import GreeksManager, GreeksConfig, PortfolioGreeksAggregator
     from src.delta_hedger import DeltaHedger, HedgeConfig
     _greeks_manager = GreeksManager()
     _delta_hedger = DeltaHedger()
-    logger.info("✅ Greeks manager & delta hedger loaded")
+    _greeks_aggregator = PortfolioGreeksAggregator()
+    logger.info("✅ Greeks manager, delta hedger & aggregator loaded")
 except Exception as e:
     logger.warning(f"⚠️ Greeks/hedger import failed: {e} — delta hedging disabled")
 
@@ -2239,15 +2263,17 @@ class UnifiedTrader:
                 continue
 
             limit_price = round(price * (1 + self.cfg.limit_buffer_pct), 2)
+            target = round(price * 1.04, 2)   # 4% target for MR
+            stop = round(price * 0.97, 2)     # 3% stop for MR
             if not self.dry_run:
-                result = submit_limit_order(sig.symbol, qty, "buy", limit_price)
+                result = submit_bracket_order(
+                    sig.symbol, qty, "buy", limit_price,
+                    stop_price=stop, take_profit_price=target,
+                )
                 if result is None:
                     continue
             else:
                 logger.info(f"[DRY RUN] MR BUY {qty} {sig.symbol} @ ${limit_price:.2f}")
-
-            target = round(price * 1.04, 2)   # 4% target for MR
-            stop = round(price * 0.97, 2)     # 3% stop for MR
             self.positions[sig.symbol] = TrackedPosition(
                 symbol=sig.symbol, entry_price=price,
                 entry_time=datetime.now(), qty=qty,
@@ -2304,12 +2330,15 @@ class UnifiedTrader:
                 if qty <= 0:
                     continue
                 limit_price = round(price * (1 + self.cfg.limit_buffer_pct), 2)
-                if not self.dry_run:
-                    result = submit_limit_order(sig.sym_a, qty, "buy", limit_price)
-                    if result is None:
-                        continue
                 target = round(price * 1.03, 2)
                 stop = round(price * 0.97, 2)
+                if not self.dry_run:
+                    result = submit_bracket_order(
+                        sig.sym_a, qty, "buy", limit_price,
+                        stop_price=stop, take_profit_price=target,
+                    )
+                    if result is None:
+                        continue
                 self.positions[sig.sym_a] = TrackedPosition(
                     symbol=sig.sym_a, entry_price=price,
                     entry_time=datetime.now(), qty=qty,
@@ -2447,7 +2476,7 @@ class UnifiedTrader:
 
     # ── Close position ──────────────────────────────────────────────
     def _close_position(self, symbol: str, price: float, reason: str):
-        """Close a position via limit sell order."""
+        """Close a position via limit sell order at bid × 0.999."""
         pos = self.positions.get(symbol)
         if pos is None:
             return
@@ -2455,14 +2484,20 @@ class UnifiedTrader:
         if self.dry_run:
             logger.info(f"[DRY RUN] Would sell {pos.qty} {symbol} @ ${price:.2f} ({reason})")
         else:
-            # Limit sell slightly below market
-            limit_price = round(price * (1 - self.cfg.limit_buffer_pct), 2)
-            result = submit_limit_order(symbol, pos.qty, "sell", limit_price)
+            # Limit sell at bid × 0.999 (slightly below mid) with day TIF
+            limit_price = round(price * 0.999, 2)
+            result = submit_limit_order(symbol, pos.qty, "sell", limit_price, time_in_force="day")
             if result:
                 logger.info(f"SELL order submitted: {pos.qty} {symbol} @ ${limit_price:.2f} ({reason})")
             else:
-                logger.error(f"Failed to submit sell order for {symbol}")
-                return
+                # Fallback: market-equivalent via very aggressive limit
+                fallback_price = round(price * 0.995, 2)
+                result = submit_limit_order(symbol, pos.qty, "sell", fallback_price, time_in_force="day")
+                if result:
+                    logger.warning(f"SELL fallback order: {pos.qty} {symbol} @ ${fallback_price:.2f} ({reason})")
+                else:
+                    logger.error(f"Failed to submit sell order for {symbol}")
+                    return
 
         # Track trade result for Kelly
         pnl_pct = (price - pos.entry_price) / pos.entry_price
@@ -2560,8 +2595,8 @@ class UnifiedTrader:
                 f"[DRY RUN] Would sell {sell_qty}/{pos.qty} {symbol} @ ${price:.2f} ({reason})"
             )
         else:
-            limit_price = round(price * (1 - self.cfg.limit_buffer_pct), 2)
-            result = submit_limit_order(symbol, sell_qty, "sell", limit_price)
+            limit_price = round(price * 0.999, 2)
+            result = submit_limit_order(symbol, sell_qty, "sell", limit_price, time_in_force="day")
             if result:
                 logger.info(
                     f"PARTIAL SELL: {sell_qty}/{pos.qty} {symbol} @ ${limit_price:.2f} ({reason})"
@@ -2748,7 +2783,7 @@ class UnifiedTrader:
                     pos = self.positions[sig.symbol]
                     limit_price = round(sig.entry_price * 0.999, 2)  # Slight discount for fills
                     if not self.dry_run:
-                        result = submit_limit_order(sig.symbol, pos.qty, "sell", limit_price)
+                        result = submit_limit_order(sig.symbol, pos.qty, "sell", limit_price, time_in_force="day")
                         if result:
                             pnl_pct = (sig.entry_price - pos.entry_price) / pos.entry_price
                             logger.info(
@@ -2840,24 +2875,7 @@ class UnifiedTrader:
                 # For short entries, limit below current price
                 limit_price = round(sig.entry_price * (1 - self.cfg.limit_buffer_pct), 2)
 
-            if self.dry_run:
-                logger.info(
-                    f"[DRY RUN] Would {side.upper()} {qty} {sig.symbol} @ ${limit_price:.2f} "
-                    f"| stop=${sig.stop_price:.2f} target=${sig.target_price:.2f} "
-                    f"| {sig.strategy.value} conf={sig.confidence:.2f} "
-                    f"| {sig.strategy_source}"
-                )
-            else:
-                result = submit_limit_order(sig.symbol, qty, side, limit_price)
-                if result is None:
-                    logger.error(f"Failed to submit {side} order for {sig.symbol}")
-                    continue
-                logger.info(
-                    f"{side.upper()} order: {qty} {sig.symbol} @ ${limit_price:.2f} "
-                    f"| {sig.strategy.value}"
-                )
-
-            # Compute safe stop
+            # Compute safe stop and target BEFORE order submission
             if sig.stop_price > 0:
                 hard_floor = round(sig.entry_price * (1 - self.cfg.hard_stop_pct), 2)
                 safe_stop = max(sig.stop_price, hard_floor)
@@ -2868,6 +2886,35 @@ class UnifiedTrader:
             target = sig.target_price if sig.target_price > 0 else round(
                 sig.entry_price * (1 + self.cfg.profit_target_pct), 2
             )
+
+            if self.dry_run:
+                logger.info(
+                    f"[DRY RUN] Would {side.upper()} {qty} {sig.symbol} @ ${limit_price:.2f} "
+                    f"| stop=${safe_stop:.2f} target=${target:.2f} "
+                    f"| {sig.strategy.value} conf={sig.confidence:.2f} "
+                    f"| {sig.strategy_source}"
+                )
+            elif side == "buy":
+                result = submit_bracket_order(
+                    sig.symbol, qty, side, limit_price,
+                    stop_price=safe_stop, take_profit_price=target,
+                )
+                if result is None:
+                    logger.error(f"Failed to submit bracket order for {sig.symbol}")
+                    continue
+                logger.info(
+                    f"BRACKET BUY: {qty} {sig.symbol} @ ${limit_price:.2f} "
+                    f"stop=${safe_stop:.2f} tp=${target:.2f} | {sig.strategy.value}"
+                )
+            else:
+                result = submit_limit_order(sig.symbol, qty, side, limit_price)
+                if result is None:
+                    logger.error(f"Failed to submit {side} order for {sig.symbol}")
+                    continue
+                logger.info(
+                    f"{side.upper()} order: {qty} {sig.symbol} @ ${limit_price:.2f} "
+                    f"| {sig.strategy.value}"
+                )
 
             self.positions[sig.symbol] = TrackedPosition(
                 symbol=sig.symbol,
@@ -3240,9 +3287,18 @@ class UnifiedTrader:
                     )
                 except Exception as e:
                     logger.warning(f"Tier 4 exec fallback for {sig.symbol}: {e}")
-                    result = submit_limit_order(sig.symbol, qty, "buy", limit_price)
+                    # Compute stop & target for bracket order fallback
+                    _pct_tgt = sig.price * (1 + self.cfg.profit_target_pct)
+                    _atr_tgt = sig.price + sig.atr * 3.0 if sig.atr > 0 else _pct_tgt
+                    _fallback_target = round(min(_pct_tgt, _atr_tgt), 2)
+                    _hard_floor = round(sig.price * (1 - self.cfg.hard_stop_pct), 2)
+                    _fallback_stop = max(sig.stop_price, _hard_floor) if sig.stop_price > 0 else _hard_floor
+                    result = submit_bracket_order(
+                        sig.symbol, qty, "buy", limit_price,
+                        stop_price=_fallback_stop, take_profit_price=_fallback_target,
+                    )
                     if result is None:
-                        logger.error(f"Failed to submit order for {sig.symbol}")
+                        logger.error(f"Failed to submit fallback bracket order for {sig.symbol}")
                         continue
             elif self.smart_executor is not None and qty >= 30:
                 # Use TWAP for larger orders
@@ -3258,11 +3314,24 @@ class UnifiedTrader:
                     f"avg=${report.avg_fill_price:.2f} slip={report.slippage_bps:+.1f}bps"
                 )
             else:
-                result = submit_limit_order(sig.symbol, qty, "buy", limit_price)
+                # Compute stop & target BEFORE order so bracket has them
+                pct_target = sig.price * (1 + self.cfg.profit_target_pct)
+                atr_target = sig.price + sig.atr * 3.0 if sig.atr > 0 else pct_target
+                target = round(min(pct_target, atr_target), 2)
+                hard_floor = round(sig.price * (1 - self.cfg.hard_stop_pct), 2)
+                safe_stop = max(sig.stop_price, hard_floor) if sig.stop_price > 0 else hard_floor
+
+                result = submit_bracket_order(
+                    sig.symbol, qty, "buy", limit_price,
+                    stop_price=safe_stop, take_profit_price=target,
+                )
                 if result is None:
-                    logger.error(f"Failed to submit buy order for {sig.symbol}")
+                    logger.error(f"Failed to submit bracket order for {sig.symbol}")
                     continue
-                logger.info(f"BUY order submitted: {qty} {sig.symbol} @ ${limit_price:.2f}")
+                logger.info(
+                    f"BRACKET BUY submitted: {qty} {sig.symbol} @ ${limit_price:.2f} "
+                    f"stop=${safe_stop:.2f} tp=${target:.2f}"
+                )
 
             # Track position — target is the LESSER of pct target and 3x ATR
             pct_target = sig.price * (1 + self.cfg.profit_target_pct)

@@ -554,6 +554,33 @@ class AlpacaClient:
             }
 
 
+    def submit_bracket_order(
+        self, symbol: str, qty: int, side: str,
+        limit_price: float, stop_price: float, take_profit_price: float,
+        time_in_force: str = "gtc"
+    ):
+        """Submit a limit buy with attached stop-loss and take-profit."""
+        from alpaca.trading.requests import (
+            LimitOrderRequest, TakeProfitRequest, StopLossRequest
+        )
+        from alpaca.trading.enums import (
+            OrderSide, TimeInForce, OrderClass
+        )
+        order_data = LimitOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+            time_in_force=TimeInForce.GTC,
+            limit_price=round(limit_price, 2),
+            order_class=OrderClass.BRACKET,
+            stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
+            take_profit=TakeProfitRequest(
+                limit_price=round(take_profit_price, 2)
+            ),
+        )
+        return self._trading_client.submit_order(order_data)
+
+
 def test_connection():
     """Test Alpaca connection."""
     print("=" * 60)

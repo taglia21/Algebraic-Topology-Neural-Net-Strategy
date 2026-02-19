@@ -109,7 +109,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=10, help="Training epochs")
     parser.add_argument("--symbols", type=int, default=50, help="Number of symbols to use")
     parser.add_argument("--output", type=str,
-                        default=str(PROJECT_ROOT / "models" / "nn_predictor_weights.h5"),
+                        default=str(PROJECT_ROOT / "models" / "nn_predictor.weights.h5"),
                         help="Output weights path")
     args = parser.parse_args()
 

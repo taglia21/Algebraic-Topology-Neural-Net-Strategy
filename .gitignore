@@ -73,6 +73,8 @@ tmp/
 state/
 models/*.pt
 models/*.h5
+# Keep bootstrap NN weights
+!models/nn_predictor.weights.h5
 cache/
 data/cache/
 data/tda_cache/

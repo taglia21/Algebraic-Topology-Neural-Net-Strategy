@@ -391,7 +391,7 @@ class EquityEngine:
                 self.nn_predictor.compile_model()
                 # Try to load pre-trained weights (bootstrap path first, then results/)
                 import glob
-                _bootstrap_path = PROJECT_ROOT / "models" / "nn_predictor_weights.h5"
+                _bootstrap_path = PROJECT_ROOT / "models" / "nn_predictor.weights.h5"
                 weight_files = glob.glob(str(PROJECT_ROOT / "results" / "*weights*.h5"))
                 _weight_path = None
                 if _bootstrap_path.exists():

@@ -60,7 +60,7 @@ def check_signal_aggregator():
     from src.signal_aggregator import SignalAggregator
     sa = SignalAggregator(min_confidence=0.55, min_models=2)
     sa.initialize()
-    return f"initialized, {len(sa.models)} models loaded"
+    return f"initialized, min_models={sa.min_models}"
 
 
 def check_daily_performance_logger():
@@ -73,8 +73,8 @@ def check_daily_performance_logger():
 def check_transaction_cost_model():
     from src.risk.transaction_costs import TransactionCostModel
     tcm = TransactionCostModel()
-    cost = tcm.estimate_cost(symbol="AAPL", shares=100, price=185.0, daily_volume=50_000_000)
-    return f"AAPL 100sh cost={cost.total_bps:.1f}bps (${cost.total_bps * 185 * 100 / 10000:.2f})"
+    cost = tcm.estimate_cost(symbol="AAPL", qty=100, price=185.0)
+    return f"AAPL 100sh cost={cost.total_bps:.1f}bps"
 
 
 def check_retraining_scheduler():
@@ -94,13 +94,15 @@ def check_nn_weights_exist():
 
 
 def check_nn_weights_loadable():
+    import numpy as np
     from src.nn_predictor import NeuralNetPredictor
     model = NeuralNetPredictor(sequence_length=20, n_features=6)
     model.compile_model()
+    # Build the model first by calling it on dummy data
+    dummy = np.random.randn(1, 20, 6).astype("float32")
+    _ = model(dummy)
     wpath = str(PROJECT_ROOT / "models" / "nn_predictor.weights.h5")
     model.load_checkpoint(wpath)
-    import numpy as np
-    dummy = np.random.randn(1, 20, 6).astype("float32")
     pred = float(model(dummy).numpy().flatten()[0])
     return f"loaded & predicted: {pred:.4f}"
 
@@ -116,7 +118,7 @@ def check_alpaca_connectivity():
     from src.trading.alpaca_client import AlpacaClient
     client = AlpacaClient()
     acct = client.get_account()
-    return f"connected, equity=${acct.equity:,.2f}, status={acct.status}"
+    return f"connected, equity=${acct.equity:,.2f}, blocked={acct.trading_blocked}"
 
 
 def check_equity_engine_import():
@@ -135,7 +137,7 @@ def check_signal_filter():
 def check_risk_guardian():
     from risk_guardian import RiskGuardian
     rg = RiskGuardian(initial_equity=100_000)
-    return f"initialized, peak=${rg._peak_equity:,.0f}"
+    return f"initialized, peak=${rg.peak_equity:,.0f}"
 
 
 # ── Main ────────────────────────────────────────────────────────────────────

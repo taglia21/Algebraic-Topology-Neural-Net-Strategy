@@ -189,17 +189,17 @@ class OptionContractResolver:
                 return None
 
             # Determine the target strike price
+            current_price = await self._get_underlying_price(symbol)
+            if current_price is None:
+                self.logger.warning(f"Cannot get price for {symbol}, cannot resolve")
+                return None
             if target_strike is None:
-                current_price = await self._get_underlying_price(symbol)
-                if current_price is None:
-                    self.logger.warning(f"Cannot get price for {symbol}, cannot resolve")
-                    return None
                 target_strike = self._estimate_strike(
                     current_price, option_type, target_delta
                 )
 
-            # Pick best contract
-            best = self._select_best_contract(contracts, target_strike)
+            # Pick best contract (with OTM safety filter)
+            best = self._select_best_contract(contracts, target_strike, current_price=current_price)
             if best is None:
                 self.logger.warning(f"No suitable contract after filtering for {symbol}")
                 return None
@@ -208,6 +208,21 @@ class OptionContractResolver:
             resolved = await self._hydrate_contract(best, symbol, option_type)
             if resolved is None:
                 return None
+
+            # SAFETY (2026-02-20): Reject if resolved strike is too far OTM
+            # Approximate delta from moneyness; reject if |delta| < MIN_DELTA
+            MIN_DELTA = 0.15
+            if current_price > 0:
+                moneyness = abs(resolved.strike - current_price) / current_price
+                # Rough delta approximation: ATM=0.50, each 1% OTM reduces delta ~0.07
+                approx_delta = max(0.50 - moneyness * 7.0, 0.0)
+                if approx_delta < MIN_DELTA:
+                    self.logger.warning(
+                        f"Rejecting {resolved.occ_symbol}: approx delta "
+                        f"{approx_delta:.2f} < {MIN_DELTA} (strike={resolved.strike}, "
+                        f"price={current_price:.2f}, {moneyness:.1%} OTM)"
+                    )
+                    return None
 
             self.logger.info(
                 f"Resolved {symbol} {option_type}: {resolved.occ_symbol} "
@@ -585,6 +600,9 @@ class OptionContractResolver:
         Assumption: A delta of 0.30 corresponds to roughly ±8% OTM for 30-DTE.
         This is a heuristic; real delta would require a full BSM calculation.
 
+        SAFETY CAP (2026-02-20): OTM percentage is clamped to MAX_OTM_PCT
+        (5%) to prevent buying far-OTM contracts that bleed on theta decay.
+
         Args:
             current_price: Current underlying price.
             option_type: "call" or "put".
@@ -593,9 +611,12 @@ class OptionContractResolver:
         Returns:
             Estimated strike price.
         """
+        MAX_OTM_PCT = 0.05  # HARD CAP: never go more than 5% OTM
+
         # Map delta to approximate OTM percentage
         # delta ~0.50 -> ATM, delta ~0.30 -> ~5-8% OTM, delta ~0.16 -> ~10-15% OTM
         otm_pct = (0.50 - target_delta) * 0.30  # Rough mapping
+        otm_pct = min(otm_pct, MAX_OTM_PCT)     # Clamp to safety cap
 
         if option_type.lower() == "put":
             return round(current_price * (1 - otm_pct), 2)
@@ -606,13 +627,18 @@ class OptionContractResolver:
         self,
         contracts: List,
         target_strike: float,
+        current_price: Optional[float] = None,
     ) -> Optional[object]:
         """
         Select the contract with strike closest to target.
 
+        SAFETY (2026-02-20): rejects any contract whose strike is >5% from
+        the current underlying price (prevents far-OTM buys).
+
         Args:
             contracts: Filtered list of OptionContract objects.
             target_strike: Desired strike price.
+            current_price: Current price of the underlying (for OTM filter).
 
         Returns:
             Best OptionContract or None.
@@ -620,8 +646,23 @@ class OptionContractResolver:
         if not contracts:
             return None
 
+        MAX_OTM_PCT = 0.05  # 5% max OTM
+
+        eligible = contracts
+        if current_price and current_price > 0:
+            eligible = [
+                c for c in contracts
+                if abs(float(getattr(c, "strike_price", 0)) - current_price) / current_price <= MAX_OTM_PCT
+            ]
+            if not eligible:
+                self.logger.warning(
+                    f"All contracts rejected: none within {MAX_OTM_PCT:.0%} of "
+                    f"underlying price ${current_price:.2f}"
+                )
+                return None
+
         best = min(
-            contracts,
+            eligible,
             key=lambda c: abs(float(getattr(c, "strike_price", 0)) - target_strike),
         )
         return best

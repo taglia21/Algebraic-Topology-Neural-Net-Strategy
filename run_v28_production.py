@@ -1261,7 +1261,7 @@ EQUITY_UNIVERSE = [
 ]
 
 EQUITY_CYCLE_INTERVAL = 300  # 5 minutes
-OPTIONS_CYCLE_INTERVAL = 300  # 5 minutes
+OPTIONS_CYCLE_INTERVAL = 1800  # 30 minutes (was 300s — caused excessive trading)
 
 
 async def equity_loop(engine: EquityEngine, stop_event: asyncio.Event):

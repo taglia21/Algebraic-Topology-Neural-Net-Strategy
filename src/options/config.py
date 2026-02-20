@@ -129,8 +129,8 @@ LOGGING_CONFIG = {
 # ============================================================================
 
 MONITORING_CONFIG = {
-    "signal_scan_interval": 60,  # Scan for signals every 60 seconds
-    "signal_scan_interval_seconds": 60,  # Alias for compatibility
+    "signal_scan_interval": 300,  # Scan for signals every 300 seconds (was 60 — too aggressive)
+    "signal_scan_interval_seconds": 300,  # Alias for compatibility
     "position_check_interval": 30,  # Check positions every 30 seconds
     "risk_check_interval": 15,  # Check risk every 15 seconds
     "heartbeat_interval": 300,  # Log heartbeat every 5 minutes

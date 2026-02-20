@@ -31,6 +31,12 @@ from typing import Optional, Dict, List, Any
 
 import numpy as np
 
+# ===========================================================================
+# EMERGENCY OPTIONS ENGINE KILL SWITCH (2026-02-20)
+# Set to True ONLY after risk controls in autonomous_engine.py are verified.
+# ===========================================================================
+OPTIONS_ENGINE_ENABLED = False
+
 # Ensure project root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -1159,6 +1165,9 @@ class OptionsEngine:
         self.logger = logging.getLogger("options_engine")
 
     async def initialize(self):
+        if not OPTIONS_ENGINE_ENABLED:
+            self.logger.warning("Options engine disabled — skipping initialization")
+            return
         paper = self.mode == "paper"
         try:
             from src.options.autonomous_engine import AutonomousTradingEngine
@@ -1173,6 +1182,13 @@ class OptionsEngine:
 
     async def run_forever(self):
         """Delegate to the autonomous engine's own run_forever."""
+        if not OPTIONS_ENGINE_ENABLED:
+            self.logger.warning(
+                "⛔ Options engine DISABLED (OPTIONS_ENGINE_ENABLED=False) — "
+                "emergency stop to prevent further losses. "
+                "Re-enable only after risk controls are verified."
+            )
+            return
         if self.engine is None:
             self.logger.error("Options engine not initialized - skipping")
             return

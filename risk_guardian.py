@@ -894,7 +894,7 @@ class RiskGuardian:
             return risk
 
         # ── Check 2: ATR trailing stop hit ──
-        if current_price <= effective_stop and pnl_pct < 0:
+        if current_price <= effective_stop:
             risk.action = GuardianAction.CLOSE_POSITION
             risk.reason = f"ATR STOP: ${current_price:.2f} <= ${effective_stop:.2f}"
             logger.warning(f"🛑 {symbol}: {risk.reason}")

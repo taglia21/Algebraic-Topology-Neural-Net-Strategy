@@ -897,7 +897,7 @@ class EquityEngine:
             dd_pct = 0.0
             if self.risk_guardian:
                 try:
-                    dd_pct = self.risk_guardian._current_drawdown_pct * 100
+                    dd_pct = self.risk_guardian.get_current_drawdown() * 100
                 except Exception as e:
                     self.logger.debug(f"Drawdown calc error: {e}")
             update_portfolio_metrics(
@@ -996,7 +996,8 @@ class EquityEngine:
                     self.client.close_position(pos.symbol)
                     self._position_entry_bar.pop(pos.symbol, None)
                     if self.risk_guardian:
-                        self.risk_guardian.record_trade_result(pnl_pct)
+                        self.risk_guardian.record_trade_result(pnl_pct > 0)
+                        self.risk_guardian.record_trade_for_kelly(pnl_pct)
 
                 # ── Soft exits below require min-hold check ──
                 elif not self._min_hold_allows_exit(pos.symbol):
@@ -1017,7 +1018,8 @@ class EquityEngine:
                     self.client.close_position(pos.symbol)
                     self._position_entry_bar.pop(pos.symbol, None)
                     if self.risk_guardian:
-                        self.risk_guardian.record_trade_result(pnl_pct)
+                        self.risk_guardian.record_trade_result(pnl_pct > 0)
+                        self.risk_guardian.record_trade_for_kelly(pnl_pct)
 
                 # 3. Hard take profit
                 elif pnl_pct >= self.EQUITY_TAKE_PROFIT_PCT:
@@ -1028,7 +1030,8 @@ class EquityEngine:
                     self.client.close_position(pos.symbol)
                     self._position_entry_bar.pop(pos.symbol, None)
                     if self.risk_guardian:
-                        self.risk_guardian.record_trade_result(pnl_pct)
+                        self.risk_guardian.record_trade_result(pnl_pct > 0)
+                        self.risk_guardian.record_trade_for_kelly(pnl_pct)
 
                 else:
                     self.logger.debug(

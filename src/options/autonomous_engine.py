@@ -153,6 +153,18 @@ def safe_entry_window() -> bool:
 
 
 # ============================================================================
+# OPTIONS RISK CONTROLS (2026-02-20 emergency fix)
+# ============================================================================
+
+MAX_DAILY_OPTIONS_SPEND = 500       # Max $500/day total spend on options
+MAX_OPTIONS_POSITIONS = 5            # Max 5 open option positions at once
+MAX_DAILY_OPTIONS_TRADES = 10        # Max 10 option trades per day
+DAILY_LOSS_STOP = -1000              # Stop ALL trading if daily P/L < -$1,000
+MAX_STRIKE_OTM_PCT = 0.05            # Max 5% OTM for strike selection
+MIN_OPTION_DELTA = 0.15              # Min |delta| for tradable options
+
+
+# ============================================================================
 # AUTONOMOUS TRADING ENGINE
 # ============================================================================
 
@@ -196,7 +208,14 @@ class AutonomousTradingEngine:
         self.paper = paper
         self.state_file = state_file
         self._stop_event = asyncio.Event()
-        
+
+        # --- Daily risk-control counters (reset each trading day) ---
+        self._daily_options_spent = 0.0       # $ spent on options today
+        self._daily_options_trades = 0        # number of option trades today
+        self._daily_tracking_date = None      # date these counters apply to
+        self._day_start_portfolio = portfolio_value  # portfolio value at day start
+        self._executed_occ_symbols: set = set()      # OCC symbols already bought today
+
         # Initialize components
         self.signal_generator = SignalGenerator()
         self.position_sizer = MedallionPositionSizer()
@@ -362,12 +381,21 @@ class AutonomousTradingEngine:
         Execute one complete trading cycle (6 steps).
         
         ENHANCED: Now includes regime detection and dynamic weight optimization.
+        SAFETY:   Daily budget cap, trade limit, duplicate & loss-stop checks.
         """
+        # --- Daily risk-control reset ---
+        self._reset_daily_counters_if_needed()
+
         self.stats["cycles_run"] += 1
         cycle_num = self.stats["cycles_run"]
         
         self.logger.info(f"{'='*60}")
         self.logger.info(f"CYCLE #{cycle_num} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self.logger.info(
+            f"  Options budget: ${self._daily_options_spent:.0f}"
+            f"/${MAX_DAILY_OPTIONS_SPEND} | "
+            f"Trades: {self._daily_options_trades}/{MAX_DAILY_OPTIONS_TRADES}"
+        )
         self.logger.info(f"{'='*60}")
         
         # STEP 0a: Refresh portfolio value from Alpaca (issue #5)
@@ -379,6 +407,11 @@ class AutonomousTradingEngine:
                 self.logger.info(f"Portfolio value refreshed: ${self.portfolio_value:,.2f}")
         except Exception as e:
             self.logger.warning(f"Could not refresh portfolio value: {e}")
+
+        # STEP 0a-bis: Daily loss stop check (halt ALL trading)
+        if self._daily_loss_exceeded():
+            self.logger.critical("Cycle aborted — daily loss stop active.")
+            return
         
         # STEP 0b: Refresh portfolio delta from Alpaca positions (issue #10)
         try:
@@ -605,8 +638,25 @@ class AutonomousTradingEngine:
 
         for signal, position_size in sized_signals:
             try:
-                # Skip if estimated cost exceeds buying power (avoid 40310000 errors)
+                # --- RISK GATE: daily loss stop ---
+                if self._daily_loss_exceeded():
+                    self.logger.critical("Daily loss stop — aborting remaining executions.")
+                    break
+
+                # --- RISK GATE: daily trade count ---
+                if not self._options_trade_count_allows():
+                    break
+
+                # --- RISK GATE: open positions limit ---
+                if not self._options_position_count_allows():
+                    break
+
+                # --- RISK GATE: daily budget ---
                 estimated_cost = getattr(position_size, 'max_risk', 0) or 500.0
+                if not self._options_budget_allows(estimated_cost):
+                    break
+
+                # Skip if estimated cost exceeds buying power (avoid 40310000 errors)
                 if estimated_cost > available_bp:
                     self.logger.warning(
                         f"⚠️ Skipping {signal.symbol} {signal.strategy}: "
@@ -617,6 +667,13 @@ class AutonomousTradingEngine:
 
                 result = await self._resolve_and_execute(signal, position_size)
                 if result is not None:
+                    # --- Track daily counters on successful submission ---
+                    occ = getattr(signal, "occ_symbol", None) or ""
+                    if result.success:
+                        self._daily_options_trades += 1
+                        self._daily_options_spent += estimated_cost
+                        if occ:
+                            self._executed_occ_symbols.add(occ)
                     executions.append(result)
                     # PHASE 5: Log signal with execution result + Discord
                     await self._log_signal_with_reasoning(signal, execution_result=result)
@@ -685,6 +742,10 @@ class AutonomousTradingEngine:
             signal.occ_symbol = resolved.short_leg.occ_symbol
             signal.expiration_date = resolved.short_leg.expiration
 
+            # Duplicate prevention
+            if self._is_duplicate_contract(resolved.short_leg.occ_symbol):
+                return None
+
             self.logger.info(
                 f"Executing spread {signal.symbol}: "
                 f"short={resolved.short_leg.occ_symbol} (${resolved.short_leg.mid_price:.2f}) "
@@ -717,6 +778,10 @@ class AutonomousTradingEngine:
 
             signal.occ_symbol = resolved.put_spread.short_leg.occ_symbol
             signal.expiration_date = resolved.put_spread.short_leg.expiration
+
+            # Duplicate prevention
+            if self._is_duplicate_contract(resolved.put_spread.short_leg.occ_symbol):
+                return None
 
             self.logger.info(
                 f"Executing iron condor {signal.symbol}: "
@@ -756,6 +821,10 @@ class AutonomousTradingEngine:
 
             signal.occ_symbol = resolved.occ_symbol
             signal.expiration_date = resolved.expiration
+
+            # Duplicate prevention
+            if self._is_duplicate_contract(resolved.occ_symbol):
+                return None
 
             self.logger.info(
                 f"Executing single leg {signal.symbol}: {resolved.occ_symbol} "
@@ -995,6 +1064,94 @@ class AutonomousTradingEngine:
                 return True
         return False
     
+    # ------------------------------------------------------------------ #
+    # DAILY RISK-CONTROL HELPERS  (2026-02-20 emergency fix)
+    # ------------------------------------------------------------------ #
+
+    def _reset_daily_counters_if_needed(self):
+        """Reset daily counters at the start of each new trading day."""
+        today = datetime.now(ZoneInfo("America/New_York")).date()
+        if self._daily_tracking_date != today:
+            self.logger.info(
+                f"New trading day {today} — resetting daily options counters "
+                f"(prev spent=${self._daily_options_spent:.0f}, "
+                f"trades={self._daily_options_trades})"
+            )
+            self._daily_options_spent = 0.0
+            self._daily_options_trades = 0
+            self._daily_tracking_date = today
+            self._day_start_portfolio = self.portfolio_value
+            self._executed_occ_symbols.clear()
+
+    def _daily_loss_exceeded(self) -> bool:
+        """Return True if daily P/L has breached the DAILY_LOSS_STOP."""
+        daily_pnl = self.portfolio_value - self._day_start_portfolio
+        if daily_pnl < DAILY_LOSS_STOP:
+            self.logger.critical(
+                f"⛔ DAILY LOSS STOP triggered: P/L=${daily_pnl:,.0f} "
+                f"(limit={DAILY_LOSS_STOP}). All trading halted for today."
+            )
+            return True
+        return False
+
+    def _options_budget_allows(self, estimated_cost: float) -> bool:
+        """Check whether we can afford *estimated_cost* within today's budget."""
+        if self._daily_options_spent + estimated_cost > MAX_DAILY_OPTIONS_SPEND:
+            self.logger.warning(
+                f"⚠️ Daily options budget exhausted: "
+                f"spent=${self._daily_options_spent:.0f} + "
+                f"new=${estimated_cost:.0f} > "
+                f"limit=${MAX_DAILY_OPTIONS_SPEND}"
+            )
+            return False
+        return True
+
+    def _options_trade_count_allows(self) -> bool:
+        """Check whether we haven't exceeded MAX_DAILY_OPTIONS_TRADES."""
+        if self._daily_options_trades >= MAX_DAILY_OPTIONS_TRADES:
+            self.logger.warning(
+                f"⚠️ Daily options trade limit reached: "
+                f"{self._daily_options_trades}/{MAX_DAILY_OPTIONS_TRADES}"
+            )
+            return False
+        return True
+
+    def _options_position_count_allows(self) -> bool:
+        """Check open options positions < MAX_OPTIONS_POSITIONS."""
+        # Count option positions from Alpaca (OCC symbols are > 6 chars)
+        option_count = sum(
+            1 for p in self.current_positions
+            if isinstance(p, dict)
+            and len(str((p.get("signal") and getattr(p["signal"], "occ_symbol", "")) or "")) > 6
+        )
+        if option_count >= MAX_OPTIONS_POSITIONS:
+            self.logger.warning(
+                f"⚠️ Max options positions reached: "
+                f"{option_count}/{MAX_OPTIONS_POSITIONS}"
+            )
+            return False
+        return True
+
+    def _is_duplicate_contract(self, occ_symbol: str) -> bool:
+        """Return True if we already traded or hold *occ_symbol* today."""
+        if not occ_symbol:
+            return False
+        if occ_symbol in self._executed_occ_symbols:
+            self.logger.warning(
+                f"⚠️ Duplicate contract blocked: {occ_symbol} already traded today"
+            )
+            return True
+        # Also check current Alpaca positions
+        for pos in self.current_positions:
+            if isinstance(pos, dict):
+                sig = pos.get("signal")
+                if sig and getattr(sig, "occ_symbol", None) == occ_symbol:
+                    self.logger.warning(
+                        f"⚠️ Duplicate contract blocked: already holding {occ_symbol}"
+                    )
+                    return True
+        return False
+
     def _log_cycle_summary(self):
         """Log summary of current cycle."""
         self.logger.info(f"Portfolio Value: ${self.portfolio_value:,.0f}")

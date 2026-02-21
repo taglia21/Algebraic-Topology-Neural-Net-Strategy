@@ -137,6 +137,7 @@ class AlpacaOptionsExecutor:
         quantity: int,
         limit_price: Optional[float] = None,
         with_bracket: bool = True,
+        client_order_id: Optional[str] = None,
     ) -> ExecutionResult:
         """
         Submit single-leg option order.
@@ -147,6 +148,7 @@ class AlpacaOptionsExecutor:
             quantity: Number of contracts
             limit_price: Limit price (None for market)
             with_bracket: Add stop-loss and take-profit
+            client_order_id: Deterministic ID for idempotent orders
             
         Returns:
             ExecutionResult
@@ -171,6 +173,9 @@ class AlpacaOptionsExecutor:
             "time_in_force": "day",
         }
         
+        if client_order_id:
+            order_data["client_order_id"] = client_order_id
+
         if limit_price:
             order_data["limit_price"] = limit_price
         
@@ -202,6 +207,7 @@ class AlpacaOptionsExecutor:
         quantity: int,
         net_credit: float = None,
         net_debit: float = None,
+        client_order_id: Optional[str] = None,
     ) -> ExecutionResult:
         """
         Submit 2-leg spread order using Alpaca MLEG OrderClass.
@@ -212,6 +218,7 @@ class AlpacaOptionsExecutor:
             quantity: Number of spreads
             net_credit: Net credit received (for credit spreads)
             net_debit: Net debit paid (for debit spreads)
+            client_order_id: Deterministic ID for idempotent orders
             
         Returns:
             ExecutionResult
@@ -258,7 +265,7 @@ class AlpacaOptionsExecutor:
             net_side = AlpacaOrderSide.BUY
         
         try:
-            order_request = LimitOrderRequest(
+            mleg_kwargs = dict(
                 symbol=underlying,
                 qty=quantity,
                 side=net_side,
@@ -267,6 +274,9 @@ class AlpacaOptionsExecutor:
                 limit_price=limit_price,
                 legs=mleg_legs,
             )
+            if client_order_id:
+                mleg_kwargs["client_order_id"] = client_order_id
+            order_request = LimitOrderRequest(**mleg_kwargs)
             
             order = self.trading_client.submit_order(order_request)
             self.logger.info(f"MLEG spread order submitted: {order.id}")
@@ -1003,22 +1013,29 @@ class AlpacaOptionsExecutor:
             alpaca_side = AlpacaOrderSide.BUY if side == "buy" else AlpacaOrderSide.SELL
             
             # Build order request
+            cid = order_data.get("client_order_id")
             if order_type == "market":
-                order_request = MarketOrderRequest(
+                mkt_kwargs = dict(
                     symbol=symbol,
                     qty=quantity,
                     side=alpaca_side,
                     time_in_force=TimeInForce.DAY,
                 )
+                if cid:
+                    mkt_kwargs["client_order_id"] = cid
+                order_request = MarketOrderRequest(**mkt_kwargs)
             else:
                 # Limit order
-                order_request = LimitOrderRequest(
+                lmt_kwargs = dict(
                     symbol=symbol,
                     qty=quantity,
                     side=alpaca_side,
                     time_in_force=TimeInForce.DAY,
                     limit_price=limit_price,
                 )
+                if cid:
+                    lmt_kwargs["client_order_id"] = cid
+                order_request = LimitOrderRequest(**lmt_kwargs)
             
             # Submit order
             self.logger.info(f"Submitting REAL order: {side.upper()} {quantity} {symbol} @ ${limit_price:.2f}")

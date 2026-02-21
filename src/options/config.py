@@ -23,8 +23,8 @@ RISK_CONFIG: Dict[str, Any] = {
     
     # Position-level risk limits
     "max_risk_per_trade_pct": 0.02,  # 2% max risk per trade
-    "max_contracts_per_trade": 5,  # Maximum contracts per order
-    "max_positions": 15,  # Maximum concurrent positions
+    "max_contracts_per_trade": 3,  # Maximum contracts per order (was 5)
+    "max_positions": 8,  # Maximum concurrent positions (was 15)
     
     # Time-based parameters
     "min_dte": 7,  # Minimum days to expiration
@@ -34,7 +34,7 @@ RISK_CONFIG: Dict[str, Any] = {
     
     # Profit/loss targets — options need wider stops due to gamma/IV swings
     "target_profit_pct": 0.50,  # Take profit at 50% of max gain
-    "stop_loss_pct": 0.75,  # Stop loss at 75% loss (was 25% — fired on normal IV movement)
+    "stop_loss_pct": 0.50,  # Stop loss at 50% loss (was 75% — too loose for small acct)
     "trailing_stop_pct": 0.50,  # Trailing stop at 50% (was 35%)
     
     # IV-based thresholds

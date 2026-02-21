@@ -340,6 +340,9 @@ class AutonomousTradingEngine:
     async def run_forever(self) -> None:
         """Run continuously until a shutdown is requested."""
         self.logger.info("🚀 AUTONOMOUS TRADING ENGINE STARTED")
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 5
+        ERROR_COOLDOWN_SECONDS = 900  # 15 minutes
 
         try:
             while not self._stop_event.is_set():
@@ -349,8 +352,26 @@ class AutonomousTradingEngine:
                     await self._sleep_or_stop(60)
                     continue
 
-                # Run trading cycle
-                await self._trading_cycle()
+                # Run trading cycle with per-cycle error handling
+                try:
+                    await self._trading_cycle()
+                    consecutive_errors = 0  # reset on success
+                except asyncio.CancelledError:
+                    raise  # propagate cancellation
+                except Exception as cycle_err:
+                    consecutive_errors += 1
+                    self.logger.error(
+                        f"Trading cycle error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): "
+                        f"{cycle_err}",
+                        exc_info=True,
+                    )
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        self.logger.critical(
+                            f"{MAX_CONSECUTIVE_ERRORS} consecutive errors — "
+                            f"entering {ERROR_COOLDOWN_SECONDS}s cooldown"
+                        )
+                        await self._sleep_or_stop(ERROR_COOLDOWN_SECONDS)
+                        consecutive_errors = 0  # reset after cooldown
 
                 # Save state
                 self._save_state()
@@ -621,9 +642,41 @@ class AutonomousTradingEngine:
         3. Pass the real OCC symbol to trade_executor (not "{symbol}_CALL_100").
         4. If resolution fails, log a warning and skip (never crash).
         
-        ENHANCED: Post-trade feedback to ContinuousLearner + Discord notifications.
+        ENHANCED: Alpaca-sourced position guards, duplicate prevention,
+                  portfolio heat check, budget cap, daily loss stop.
         """
         executions: List[ExecutionResult] = []
+
+        # ── ALPACA-SOURCED STATE (survives restarts) ──
+        alpaca_opts = self._get_alpaca_option_positions()
+        alpaca_option_count = len(alpaca_opts)
+        held_occ_symbols: set = set(alpaca_opts.keys())
+        total_options_exposure = sum(abs(p["cost_basis"]) for p in alpaca_opts.values())
+
+        self.logger.info(
+            f"Alpaca options state: {alpaca_option_count} positions, "
+            f"${total_options_exposure:,.0f} exposure, "
+            f"held={list(held_occ_symbols)[:5]}{'...' if len(held_occ_symbols) > 5 else ''}"
+        )
+
+        # ── RISK GATE: Alpaca position count ──
+        if alpaca_option_count >= MAX_OPTIONS_POSITIONS:
+            self.logger.warning(
+                f"⚠️ Alpaca option position limit reached: "
+                f"{alpaca_option_count}/{MAX_OPTIONS_POSITIONS} — blocking new entries"
+            )
+            return executions
+
+        # ── RISK GATE: portfolio heat ──
+        max_heat = self.config.get("max_portfolio_heat", 0.08)
+        if self.portfolio_value > 0 and total_options_exposure > self.portfolio_value * max_heat:
+            self.logger.warning(
+                f"⚠️ Portfolio heat exceeded: options exposure "
+                f"${total_options_exposure:,.0f} > "
+                f"{max_heat:.0%} of ${self.portfolio_value:,.0f} "
+                f"(${self.portfolio_value * max_heat:,.0f}) — blocking new entries"
+            )
+            return executions
 
         # Pre-check buying power to avoid wasting API calls on orders that will fail
         available_bp = 0.0
@@ -636,6 +689,8 @@ class AutonomousTradingEngine:
             self.logger.warning(f"Could not check buying power: {e}")
             available_bp = float('inf')  # Proceed if check fails
 
+        cycle_num = self.stats.get("cycles_run", 0)
+
         for signal, position_size in sized_signals:
             try:
                 # --- RISK GATE: daily loss stop ---
@@ -647,8 +702,12 @@ class AutonomousTradingEngine:
                 if not self._options_trade_count_allows():
                     break
 
-                # --- RISK GATE: open positions limit ---
-                if not self._options_position_count_allows():
+                # --- RISK GATE: Alpaca position count (re-check as we go) ---
+                if alpaca_option_count >= MAX_OPTIONS_POSITIONS:
+                    self.logger.warning(
+                        f"⚠️ Alpaca option position limit reached mid-loop: "
+                        f"{alpaca_option_count}/{MAX_OPTIONS_POSITIONS}"
+                    )
                     break
 
                 # --- RISK GATE: daily budget ---
@@ -665,15 +724,21 @@ class AutonomousTradingEngine:
                     self.stats["trades_failed"] += 1
                     continue
 
-                result = await self._resolve_and_execute(signal, position_size)
+                result = await self._resolve_and_execute(
+                    signal, position_size,
+                    held_occ_symbols=held_occ_symbols,
+                    cycle_num=cycle_num,
+                )
                 if result is not None:
                     # --- Track daily counters on successful submission ---
                     occ = getattr(signal, "occ_symbol", None) or ""
                     if result.success:
                         self._daily_options_trades += 1
                         self._daily_options_spent += estimated_cost
+                        alpaca_option_count += 1  # local counter for this loop
                         if occ:
                             self._executed_occ_symbols.add(occ)
+                            held_occ_symbols.add(occ)
                     executions.append(result)
                     # PHASE 5: Log signal with execution result + Discord
                     await self._log_signal_with_reasoning(signal, execution_result=result)
@@ -713,13 +778,24 @@ class AutonomousTradingEngine:
         return executions
 
     async def _resolve_and_execute(
-        self, signal: Signal, position_size
+        self, signal: Signal, position_size,
+        held_occ_symbols: set = None,
+        cycle_num: int = 0,
     ) -> Optional[ExecutionResult]:
         """Resolve a single signal to real contracts, then execute.
+
+        Args:
+            signal: Trading signal
+            position_size: Calculated position size
+            held_occ_symbols: Set of OCC symbols currently held on Alpaca
+                              (Alpaca-sourced, survives restarts)
+            cycle_num: Current cycle number for idempotent order IDs
 
         Returns:
             ExecutionResult on success/failure, or None if resolution fails.
         """
+        if held_occ_symbols is None:
+            held_occ_symbols = set()
         target_dte = signal.dte or 30
 
         # ---------------------------------------------------------------- #
@@ -742,8 +818,11 @@ class AutonomousTradingEngine:
             signal.occ_symbol = resolved.short_leg.occ_symbol
             signal.expiration_date = resolved.short_leg.expiration
 
-            # Duplicate prevention
-            if self._is_duplicate_contract(resolved.short_leg.occ_symbol):
+            # Alpaca-sourced duplicate prevention
+            if resolved.short_leg.occ_symbol in held_occ_symbols:
+                self.logger.warning(
+                    f"⚠️ Duplicate blocked (Alpaca): already hold {resolved.short_leg.occ_symbol}"
+                )
                 return None
 
             self.logger.info(
@@ -759,6 +838,9 @@ class AutonomousTradingEngine:
                 quantity=position_size.contracts,
                 net_credit=resolved.net_credit if resolved.net_credit > 0 else None,
                 net_debit=abs(resolved.net_credit) if resolved.net_credit <= 0 else None,
+                client_order_id=self._make_client_order_id(
+                    resolved.short_leg.occ_symbol, cycle_num
+                ),
             )
 
         # ---------------------------------------------------------------- #
@@ -779,8 +861,11 @@ class AutonomousTradingEngine:
             signal.occ_symbol = resolved.put_spread.short_leg.occ_symbol
             signal.expiration_date = resolved.put_spread.short_leg.expiration
 
-            # Duplicate prevention
-            if self._is_duplicate_contract(resolved.put_spread.short_leg.occ_symbol):
+            # Alpaca-sourced duplicate prevention
+            if resolved.put_spread.short_leg.occ_symbol in held_occ_symbols:
+                self.logger.warning(
+                    f"⚠️ Duplicate blocked (Alpaca): already hold {resolved.put_spread.short_leg.occ_symbol}"
+                )
                 return None
 
             self.logger.info(
@@ -822,8 +907,11 @@ class AutonomousTradingEngine:
             signal.occ_symbol = resolved.occ_symbol
             signal.expiration_date = resolved.expiration
 
-            # Duplicate prevention
-            if self._is_duplicate_contract(resolved.occ_symbol):
+            # Alpaca-sourced duplicate prevention
+            if resolved.occ_symbol in held_occ_symbols:
+                self.logger.warning(
+                    f"⚠️ Duplicate blocked (Alpaca): already hold {resolved.occ_symbol}"
+                )
                 return None
 
             self.logger.info(
@@ -838,6 +926,9 @@ class AutonomousTradingEngine:
                 side=OrderSide.BUY if signal.signal_type == SignalType.BUY else OrderSide.SELL,
                 quantity=position_size.contracts,
                 limit_price=resolved.mid_price,
+                client_order_id=self._make_client_order_id(
+                    resolved.occ_symbol, cycle_num
+                ),
             )
 
         # ---------------------------------------------------------------- #
@@ -881,7 +972,7 @@ class AutonomousTradingEngine:
         stop_loss = RISK_CONFIG.get("stop_loss_pct", 0.75)
         trailing_stop_activate = 0.20  # Activate trailing stop at +20% gain
         trailing_stop_trail = 0.40     # Give back at most 40% of peak
-        dte_threshold = 21
+        dte_close_threshold = 7  # Close positions with < 7 DTE regardless of P&L
 
         # Initialize high-water marks dict if not present
         if not hasattr(self, '_options_hwm'):
@@ -988,6 +1079,29 @@ class AutonomousTradingEngine:
                         f"P&L: ${unrealized_pnl:+,.2f} ({unrealized_pnl_pct:+.1%})"
                     )
                 
+                # DTE-based time exit: close positions nearing expiration
+                if close_reason is None:
+                    from datetime import date as _date_cls
+                    today = _date_cls.today()
+                    for occ_sym in alpaca_map:
+                        occ_underlying = ''
+                        for ch in occ_sym:
+                            if ch.isdigit():
+                                break
+                            occ_underlying += ch
+                        if occ_underlying.upper() != (symbol or '').upper():
+                            continue
+                        exp_date = self._parse_occ_expiration(occ_sym)
+                        if exp_date is not None:
+                            dte = (exp_date - today).days
+                            if dte < dte_close_threshold:
+                                close_reason = "DTE_EXIT"
+                                self.logger.warning(
+                                    f"DTE EXIT for {symbol} ({occ_sym}): "
+                                    f"only {dte} DTE remaining (threshold={dte_close_threshold})"
+                                )
+                                break
+                
                 if close_reason:
                     positions_to_close.append((position, close_reason, unrealized_pnl))
                     # Clean up HWM on close
@@ -1064,6 +1178,84 @@ class AutonomousTradingEngine:
                 return True
         return False
     
+    # ------------------------------------------------------------------ #
+    # ALPACA-SOURCED POSITION HELPERS (2026-02-21 — survive restarts)
+    # ------------------------------------------------------------------ #
+
+    def _get_alpaca_option_positions(self) -> Dict[str, dict]:
+        """Return a dict of OCC symbol -> position data from Alpaca.
+
+        Only includes option positions (symbol length > 6, contains digits).
+        This is the SINGLE SOURCE OF TRUTH for position state — never rely
+        on self.current_positions which drifts on service restart.
+
+        Returns:
+            {occ_symbol: {"qty": float, "cost_basis": float,
+                          "market_value": float, "unrealized_pl": float}} 
+        """
+        result: Dict[str, dict] = {}
+        try:
+            alpaca_positions = self.trade_executor.trading_client.get_all_positions()
+            for ap in alpaca_positions:
+                sym = ap.symbol or ""
+                # OCC option symbols are >6 chars and contain digits in first 6
+                if len(sym) <= 6:
+                    continue
+                has_digit = any(c.isdigit() for c in sym[:8])
+                if not has_digit:
+                    continue
+                result[sym] = {
+                    "qty": float(ap.qty) if ap.qty else 0,
+                    "cost_basis": float(ap.cost_basis) if ap.cost_basis else 0.0,
+                    "market_value": float(ap.market_value) if ap.market_value else 0.0,
+                    "unrealized_pl": float(ap.unrealized_pl) if ap.unrealized_pl else 0.0,
+                    "unrealized_plpc": float(ap.unrealized_plpc) if ap.unrealized_plpc else 0.0,
+                    "symbol": sym,
+                }
+        except Exception as e:
+            self.logger.error(f"Failed to query Alpaca positions: {e}")
+        return result
+
+    @staticmethod
+    def _parse_occ_expiration(occ_symbol: str):
+        """Extract expiration date from OCC symbol.
+
+        OCC format: AAPL260320P00230000
+                     ^^^^------  underlying
+                         ^^^^^^  YYMMDD
+        Returns datetime.date or None on failure.
+        """
+        from datetime import date as _date
+        try:
+            # Find where digits start (end of underlying ticker)
+            idx = 0
+            for ch in occ_symbol:
+                if ch.isdigit():
+                    break
+                idx += 1
+            date_str = occ_symbol[idx:idx + 6]  # YYMMDD
+            if len(date_str) < 6:
+                return None
+            yy = int(date_str[0:2])
+            mm = int(date_str[2:4])
+            dd = int(date_str[4:6])
+            return _date(2000 + yy, mm, dd)
+        except (ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _make_client_order_id(occ_symbol: str, cycle_num: int) -> str:
+        """Generate a deterministic client_order_id for idempotent orders.
+
+        Format: {occ_symbol}_{date}_{cycle} — Alpaca rejects duplicate
+        client_order_ids, so retries within the same cycle are no-ops.
+        Truncated to 48 chars (Alpaca limit).
+        """
+        from datetime import date as _date
+        day_str = _date.today().isoformat()
+        raw = f"{occ_symbol}_{day_str}_{cycle_num}"
+        return raw[:48]
+
     # ------------------------------------------------------------------ #
     # DAILY RISK-CONTROL HELPERS  (2026-02-20 emergency fix)
     # ------------------------------------------------------------------ #

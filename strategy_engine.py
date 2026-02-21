@@ -50,6 +50,7 @@ from pair_finder import (
     PairFinder,
     PairFinderConfig,
     CointegrationResult,
+    KalmanSpreadTracker,
     SECTOR_UNIVERSE,
     ALL_SYMBOLS,
 )
@@ -351,6 +352,17 @@ class EngineConfig:
     mr_allocation: float = 0.30         # 30% to mean reversion
     momentum_allocation: float = 0.20   # 20% to momentum (only when A+B idle)
 
+    # --- Dynamic Strategy Allocation ---
+    use_dynamic_allocation: bool = True
+    dynamic_alloc_min_trades: int = 10  # Min trades per strategy before dynamic kicks in
+    dynamic_alloc_floor: float = 0.10   # 10% minimum per strategy
+    dynamic_alloc_lookback: int = 30    # Last 30 trades for rolling Sharpe
+
+    # --- Drawdown-Responsive Position Sizing ---
+    drawdown_scale_threshold: float = 0.05   # Start scaling at 5% drawdown
+    drawdown_half_threshold: float = 0.10    # Halve sizes at 10% drawdown
+    drawdown_halt_threshold: float = 0.15    # Stop new positions at 15% drawdown
+
     # --- STRATEGY A: Pairs Trading ---
     pairs_entry_z: float = 2.0          # Enter when |z-score| > 2.0 (2 std from mean)
     pairs_exit_z: float = 0.5           # Exit when |z-score| < 0.5 (close to mean)
@@ -438,6 +450,21 @@ class StrategyEngine:
             "mean_reversion": {"wins": 0, "losses": 0, "total_pnl": 0.0},
             "momentum_regime": {"wins": 0, "losses": 0, "total_pnl": 0.0},
         }
+
+        # --- Drawdown tracking ---
+        self._peak_equity: float = 0.0
+        self._current_drawdown_pct: float = 0.0
+
+        # --- Dynamic allocation: per-strategy PnL history ---
+        self._trade_pnls: Dict[str, List[float]] = {
+            "pairs_trading": [],
+            "mean_reversion": [],
+            "momentum_regime": [],
+        }
+
+        # --- Kalman spread tracker cache (per pair_id) ---
+        self._kalman_trackers: Dict[str, 'KalmanSpreadTracker'] = {}
+        self._kalman_data_lengths: Dict[str, int] = {}  # track data size at bootstrap
 
         # --- Advanced module instances (None when unavailable) ---
         self._hmm: Optional[Any] = None
@@ -715,6 +742,235 @@ class StrategyEngine:
             self._rt_flow_tracker.on_trade(symbol, price, size)
 
     # ------------------------------------------------------------------
+    # Drawdown-Responsive Position Sizing
+    # ------------------------------------------------------------------
+
+    def _update_drawdown_state(self, equity: float) -> float:
+        """
+        Update peak equity tracker and compute current drawdown percentage.
+
+        Called at the start of every signal generation cycle to track
+        the portfolio's high-water mark and current drawdown.
+
+        Returns the current drawdown as a positive fraction
+        (0.0 = no drawdown, 0.15 = 15% from peak).
+        """
+        if equity <= 0:
+            return self._current_drawdown_pct
+
+        if equity > self._peak_equity:
+            self._peak_equity = equity
+
+        if self._peak_equity > 0:
+            self._current_drawdown_pct = (self._peak_equity - equity) / self._peak_equity
+        else:
+            self._current_drawdown_pct = 0.0
+
+        return self._current_drawdown_pct
+
+    def _get_drawdown_scale_factor(self, drawdown_pct: float) -> float:
+        """
+        Compute position size scaling factor based on current drawdown.
+
+        Implements a tiered drawdown response:
+          - drawdown < 5%:   1.0  (full size, no adjustment)
+          - drawdown 5-10%:  linear scale from 1.0 → 0.5
+          - drawdown 10-15%: 0.5  (halved positions)
+          - drawdown > 15%:  0.0  (circuit breaker — no new positions)
+
+        This prevents the death spiral of adding risk into a drawdown.
+
+        Returns a multiplier in [0.0, 1.0].
+        """
+        if drawdown_pct >= self.cfg.drawdown_halt_threshold:
+            return 0.0  # Circuit breaker: no new positions
+
+        if drawdown_pct >= self.cfg.drawdown_half_threshold:
+            return 0.5  # Halve all positions
+
+        if drawdown_pct >= self.cfg.drawdown_scale_threshold:
+            # Linear interpolation from 1.0 at scale_threshold to 0.5 at half_threshold
+            range_width = self.cfg.drawdown_half_threshold - self.cfg.drawdown_scale_threshold
+            if range_width > 0:
+                progress = (drawdown_pct - self.cfg.drawdown_scale_threshold) / range_width
+                return 1.0 - 0.5 * progress
+            return 0.5
+
+        return 1.0  # No drawdown scaling needed
+
+    @property
+    def current_drawdown_pct(self) -> float:
+        """Current drawdown as a percentage (0.0 to 1.0)."""
+        return self._current_drawdown_pct
+
+    @property
+    def peak_equity(self) -> float:
+        """High-water mark equity."""
+        return self._peak_equity
+
+    # ------------------------------------------------------------------
+    # Dynamic Strategy Allocation
+    # ------------------------------------------------------------------
+
+    def _compute_dynamic_weights(self) -> Tuple[float, float, float]:
+        """
+        Compute dynamic strategy allocation weights based on realized rolling Sharpe.
+
+        Uses the last N trade PnLs per strategy to estimate a trade-level Sharpe
+        ratio, then reweights capital allocation proportional to Sharpe.
+        Each strategy gets at least `dynamic_alloc_floor` (default 10%).
+
+        When insufficient trade history exists, falls back to static config weights.
+
+        Returns (w_pairs, w_mr, w_mom) that sum to 1.0.
+        """
+        if not self.cfg.use_dynamic_allocation:
+            return self.cfg.pairs_allocation, self.cfg.mr_allocation, self.cfg.momentum_allocation
+
+        strategies = ["pairs_trading", "mean_reversion", "momentum_regime"]
+        sharpes: Dict[str, float] = {}
+        any_has_data = False
+
+        for strat in strategies:
+            pnls = self._trade_pnls.get(strat, [])
+            recent = pnls[-self.cfg.dynamic_alloc_lookback:]
+
+            if len(recent) < self.cfg.dynamic_alloc_min_trades:
+                sharpes[strat] = 0.0  # Not enough data
+                continue
+
+            any_has_data = True
+            arr = np.array(recent, dtype=float)
+            std = float(np.std(arr))
+
+            if std < 1e-10:
+                # Perfect consistency: assign very high Sharpe
+                sharpes[strat] = 10.0 if float(np.mean(arr)) > 0 else 0.0
+            else:
+                sharpes[strat] = max(0.0, float(np.mean(arr)) / std)
+
+        if not any_has_data:
+            # No strategy has enough trade history → use static defaults
+            return self.cfg.pairs_allocation, self.cfg.mr_allocation, self.cfg.momentum_allocation
+
+        total_sharpe = sum(sharpes.values())
+        floor = self.cfg.dynamic_alloc_floor
+
+        if total_sharpe <= 0:
+            # All strategies have zero/negative Sharpe → equal weight
+            n = len(strategies)
+            equal = 1.0 / n
+            logger.info(f"Dynamic allocation: all Sharpes <= 0, using equal {equal:.0%}")
+            return equal, equal, equal
+
+        # Weight proportional to Sharpe, with floor + iterative normalization
+        raw_weights = {}
+        for strat in strategies:
+            raw_weights[strat] = max(floor, sharpes[strat] / total_sharpe)
+
+        # Iterative normalization: normalize, re-clamp floors, repeat
+        for _ in range(3):
+            total_w = sum(raw_weights.values())
+            if total_w > 0:
+                raw_weights = {k: v / total_w for k, v in raw_weights.items()}
+            # Re-enforce floor after normalization
+            for strat in strategies:
+                if raw_weights[strat] < floor:
+                    raw_weights[strat] = floor
+
+        w_pairs = raw_weights["pairs_trading"]
+        w_mr = raw_weights["mean_reversion"]
+        w_mom = raw_weights["momentum_regime"]
+
+        logger.info(
+            f"Dynamic allocation: pairs={w_pairs:.0%} mr={w_mr:.0%} mom={w_mom:.0%} "
+            f"(sharpes: {', '.join(f'{k}={v:.2f}' for k, v in sharpes.items())})"
+        )
+
+        return w_pairs, w_mr, w_mom
+
+    def get_dynamic_weights(self) -> Dict[str, float]:
+        """Get current dynamic strategy allocation weights (for monitoring)."""
+        w_p, w_m, w_mom = self._compute_dynamic_weights()
+        return {"pairs_trading": w_p, "mean_reversion": w_m, "momentum_regime": w_mom}
+
+    # ------------------------------------------------------------------
+    # Kalman Spread Tracker Cache (per-pair streaming z-score)
+    # ------------------------------------------------------------------
+
+    def _compute_kalman_z_score(
+        self,
+        pair_id: str,
+        pair: CointegrationResult,
+        price_a: np.ndarray,
+        price_b: np.ndarray,
+    ) -> Tuple[float, float]:
+        """
+        Compute z-score using cached KalmanSpreadTracker for streaming efficiency.
+
+        Maintains persistent Kalman filter state across trading cycles to
+        avoid full re-fit each time. Falls back to pair_finder.compute_pair_z_score
+        on any error.
+
+        Returns (z_score, hedge_ratio).
+        """
+        n = min(len(price_a), len(price_b))
+        if n < 30:
+            return 0.0, pair.hedge_ratio
+
+        try:
+            log_a = np.log(np.asarray(price_a[-n:], dtype=float))
+            log_b = np.log(np.asarray(price_b[-n:], dtype=float))
+        except (ValueError, RuntimeWarning):
+            return self.pair_finder.compute_pair_z_score(pair, price_a, price_b)
+
+        tracker = self._kalman_trackers.get(pair_id)
+
+        # Re-bootstrap if tracker is missing or data has grown significantly
+        last_n = self._kalman_data_lengths.get(pair_id, 0)
+        needs_bootstrap = (
+            tracker is None
+            or tracker._n_obs < 30
+            or (n - last_n) > 10  # Significant new data since last bootstrap
+        )
+
+        if needs_bootstrap:
+            try:
+                tracker = KalmanSpreadTracker(
+                    entry_z=self.cfg.pairs_entry_z,
+                    exit_z=self.cfg.pairs_exit_z,
+                    stop_z=self.cfg.pairs_stop_z,
+                )
+                # Fit on all but last observation, then stream-update with last
+                lookback = min(n - 1, self.cfg.pairs_lookback)
+                tracker.fit(log_a[-(lookback + 1):-1], log_b[-(lookback + 1):-1])
+                self._kalman_trackers[pair_id] = tracker
+                self._kalman_data_lengths[pair_id] = n
+            except Exception as e:
+                logger.debug(f"Kalman bootstrap failed for {pair_id}: {e}")
+                return self.pair_finder.compute_pair_z_score(pair, price_a, price_b)
+
+        try:
+            result = tracker.update(float(log_a[-1]), float(log_b[-1]))
+            z_score = result.get('z_score', 0.0)
+            hedge_ratio = result.get('hedge_ratio', pair.hedge_ratio)
+
+            if not np.isfinite(z_score):
+                z_score = 0.0
+            if not np.isfinite(hedge_ratio):
+                hedge_ratio = pair.hedge_ratio
+
+            logger.debug(
+                f"Kalman {pair_id}: z={z_score:+.2f} β={hedge_ratio:.3f} "
+                f"HL={result.get('half_life', 'N/A')} n_obs={result.get('n_obs', 0)}"
+            )
+            return z_score, hedge_ratio
+        except Exception as e:
+            logger.debug(f"Kalman update failed for {pair_id}: {e}")
+            self._kalman_trackers.pop(pair_id, None)
+            return self.pair_finder.compute_pair_z_score(pair, price_a, price_b)
+
+    # ------------------------------------------------------------------
     # Main entry point — get all signals
     # ------------------------------------------------------------------
 
@@ -791,17 +1047,30 @@ class StrategyEngine:
         # Refresh cointegrated pairs if needed
         self._refresh_pairs_if_needed(price_data, volume_data)
 
-        # --- Strategy scanning (weights driven by regime) ---
-        # Default weights match EngineConfig allocations
-        w_pairs = self.cfg.pairs_allocation
-        w_mr = self.cfg.mr_allocation
-        w_mom = self.cfg.momentum_allocation
-        if regime_adj is not None:
-            w_pairs = regime_adj.strategy_weights.get("pairs", w_pairs)
-            w_mr = regime_adj.strategy_weights.get("mr", w_mr)
-            w_mom = regime_adj.strategy_weights.get("momentum", w_mom)
+        # --- Drawdown tracking ---
+        drawdown_pct = self._update_drawdown_state(equity)
+        drawdown_scale = self._get_drawdown_scale_factor(drawdown_pct)
+
+        if drawdown_pct >= self.cfg.drawdown_scale_threshold:
             logger.info(
-                f"Regime-weighted allocations: pairs={w_pairs:.0%} "
+                f"Drawdown: {drawdown_pct:.1%} (peak=${self._peak_equity:,.0f} → "
+                f"curr=${equity:,.0f}) scale={drawdown_scale:.2f}"
+            )
+
+        # --- Strategy scanning (weights: dynamic allocation + regime blend) ---
+        # Start with dynamic allocation based on realized Sharpe per strategy
+        w_pairs, w_mr, w_mom = self._compute_dynamic_weights()
+
+        # If regime adjustment available, blend 50/50 with dynamic weights
+        if regime_adj is not None:
+            r_pairs = regime_adj.strategy_weights.get("pairs", w_pairs)
+            r_mr = regime_adj.strategy_weights.get("mr", w_mr)
+            r_mom = regime_adj.strategy_weights.get("momentum", w_mom)
+            w_pairs = 0.5 * w_pairs + 0.5 * r_pairs
+            w_mr = 0.5 * w_mr + 0.5 * r_mr
+            w_mom = 0.5 * w_mom + 0.5 * r_mom
+            logger.info(
+                f"Blended allocations (dynamic+regime): pairs={w_pairs:.0%} "
                 f"mr={w_mr:.0%} mom={w_mom:.0%}"
             )
 
@@ -918,6 +1187,25 @@ class StrategyEngine:
         all_signals = [s for s in all_signals if s.confidence >= self.cfg.min_confidence
                        or s.direction == SignalDirection.CLOSE]
 
+        # --- Drawdown-responsive position sizing ---
+        if drawdown_scale <= 0:
+            # Circuit breaker: block ALL new entries, only allow exits
+            entry_count = len([s for s in all_signals if s.direction != SignalDirection.CLOSE])
+            all_signals = [s for s in all_signals if s.direction == SignalDirection.CLOSE]
+            logger.warning(
+                f"DRAWDOWN HALT: {drawdown_pct:.1%} exceeds "
+                f"{self.cfg.drawdown_halt_threshold:.0%} threshold — "
+                f"blocked {entry_count} new entries"
+            )
+        elif drawdown_scale < 1.0:
+            for sig in all_signals:
+                if sig.direction != SignalDirection.CLOSE:
+                    sig.position_size_pct *= drawdown_scale
+            logger.info(
+                f"Drawdown scaling applied: {drawdown_scale:.2f}x to "
+                f"{len([s for s in all_signals if s.direction != SignalDirection.CLOSE])} entries"
+            )
+
         # Sort by confidence (highest first)
         all_signals.sort(key=lambda s: s.confidence, reverse=True)
 
@@ -986,9 +1274,10 @@ class StrategyEngine:
             if len(pa) < self.cfg.pairs_lookback or len(pb) < self.cfg.pairs_lookback:
                 continue
 
-            # Compute current z-score and rolling hedge ratio
-            z_score, hedge_ratio = self.pair_finder.compute_pair_z_score(pair, pa, pb)
             pair_id = f"{pair.sym_a}_{pair.sym_b}"
+
+            # Compute z-score via cached Kalman spread tracker (streaming, adaptive)
+            z_score, hedge_ratio = self._compute_kalman_z_score(pair_id, pair, pa, pb)
 
             current_price_a = float(pa[-1])
             current_price_b = float(pb[-1])
@@ -1614,6 +1903,14 @@ class StrategyEngine:
                 stats["wins"] += 1
             else:
                 stats["losses"] += 1
+
+        # Track PnL for dynamic allocation (rolling Sharpe estimation)
+        if strategy in self._trade_pnls:
+            self._trade_pnls[strategy].append(pnl)
+            # Keep bounded to avoid unbounded memory growth
+            max_history = self.cfg.dynamic_alloc_lookback * 3
+            if len(self._trade_pnls[strategy]) > max_history:
+                self._trade_pnls[strategy] = self._trade_pnls[strategy][-max_history:]
 
         # Feed adaptive parameter tuner (if available)
         if self._adaptive_tuner is not None and symbol:

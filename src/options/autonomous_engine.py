@@ -68,6 +68,11 @@ from .weight_optimizer import DynamicWeightOptimizer
 from .volatility_surface import VolatilitySurfaceEngine
 from .cointegration_engine import CointegrationEngine
 
+# ==== PHASE 6: EXIT MANAGEMENT, GEX, DAILY P&L ====
+from .exit_manager import ExitManager, ExitAction, ExitReason
+from .gex_analyzer import GammaExposureAnalyzer, GEXProfile
+from src.metrics.daily_performance import DailyPerformanceLogger
+
 # ==== PHASE 4: WIRED ORPHANED MODULES ====
 try:
     from .manifold_regime_detector import ManifoldRegimeDetector
@@ -341,6 +346,38 @@ class AutonomousTradingEngine:
         # ==== PHASE 3: Greeks monitor + VIX overlay ====
         self.greeks_monitor = PortfolioGreeksMonitor()
         self.vix_overlay = VIXRegimeOverlay()
+
+        # ==== PHASE 6: Exit Manager, GEX, Daily P&L ====
+        exit_config = {
+            "profit_target_pct": RISK_CONFIG.get("exit_profit_target_pct", 0.50),
+            "stop_loss_multiplier": RISK_CONFIG.get("exit_stop_loss_multiplier", 2.0),
+            "dte_exit_threshold": RISK_CONFIG.get("exit_dte_threshold", 7),
+            "trailing_stop_activate_pct": RISK_CONFIG.get("exit_trailing_stop_activate", 0.30),
+            "trailing_stop_trail_pct": RISK_CONFIG.get("exit_trailing_stop_trail", 0.50),
+            "time_accel_dte_pct": RISK_CONFIG.get("exit_time_accel_dte_pct", 0.50),
+            "time_accel_profit_pct": RISK_CONFIG.get("exit_time_accel_profit_pct", 0.25),
+            "use_mleg_close": RISK_CONFIG.get("exit_use_mleg_close", True),
+        }
+        self.exit_manager = ExitManager(
+            trading_client=self.trade_executor.trading_client,
+            data_client=self.trade_executor.data_client,
+            config=exit_config,
+        )
+
+        self.gex_analyzer = GammaExposureAnalyzer(
+            data_client=self.trade_executor.data_client,
+            sticky_strike_threshold=RISK_CONFIG.get("gex_sticky_strike_threshold", 0.30),
+            avoidance_radius_pct=RISK_CONFIG.get("gex_avoidance_radius_pct", 0.005),
+            cache_ttl_minutes=RISK_CONFIG.get("gex_cache_ttl_minutes", 15),
+        )
+        self.gex_enabled = RISK_CONFIG.get("gex_enabled", True)
+
+        self.daily_perf_logger = DailyPerformanceLogger(
+            initial_equity=portfolio_value,
+        )
+        self.logger.info(
+            "✓ Phase 6: ExitManager, GEX Analyzer, DailyPerformanceLogger loaded"
+        )
 
         # Backfill IV data on startup
         self._backfill_iv_data()
@@ -621,13 +658,19 @@ class AutonomousTradingEngine:
                 reason.append(f"VIX crisis ({vix_snap.level:.1f})")
             self.logger.info(f"Step 4 (EXECUTE): Skipped — {', '.join(reason)}")
         
-        # STEP 5: MANAGE - Monitor positions
+        # STEP 5: MANAGE - Monitor positions (PHASE 6: ExitManager-driven)
         await self._manage_positions()
         self.logger.info(f"Step 5 (MANAGE): {len(self.current_positions)} positions monitored")
+
+        # STEP 5b (PHASE 6): Run ExitManager checks on all tracked positions
+        await self._run_exit_manager()
         
         # STEP 6: CHECK - Verify risk limits
         risk_ok = await self._check_risk_limits()
         self.logger.info(f"Step 6 (CHECK): Risk limits {'✓ OK' if risk_ok else '✗ EXCEEDED'}")
+
+        # STEP 7 (PHASE 6): Daily P&L logging
+        self._log_daily_performance()
         
         # Log cycle summary
         self._log_cycle_summary()
@@ -1055,6 +1098,34 @@ class AutonomousTradingEngine:
                 )
                 return None
 
+            # --- PHASE 6: GEX FILTER ---
+            if self.gex_enabled:
+                try:
+                    gex_profile = await self.gex_analyzer.compute_gex_profile(
+                        signal.symbol, target_dte=target_dte
+                    )
+                    short_strike = resolved.short_leg.strike if hasattr(resolved.short_leg, 'strike') else 0
+                    if short_strike > 0:
+                        gex_filter = self.gex_analyzer.filter_signal(
+                            gex_profile, short_strike, signal.strategy
+                        )
+                        if not gex_filter.is_safe:
+                            self.logger.warning(
+                                f"GEX BLOCKED: {signal.symbol} {signal.strategy} — {gex_filter.reason}"
+                            )
+                            return None
+                        if gex_filter.recommended_action == "reduce_size" and hasattr(position_size, 'contracts'):
+                            import math
+                            reduce_factor = RISK_CONFIG.get("gex_negative_size_reduction", 0.50)
+                            original = position_size.contracts
+                            position_size.contracts = max(1, math.floor(original * reduce_factor))
+                            if position_size.contracts != original:
+                                self.logger.info(
+                                    f"GEX reduce: {signal.symbol} contracts {original} -> {position_size.contracts}"
+                                )
+                except Exception as e:
+                    self.logger.debug(f"GEX filter failed for {signal.symbol}: {e}")
+
             self.logger.info(
                 f"Executing spread {signal.symbol}: "
                 f"short={resolved.short_leg.occ_symbol} (${resolved.short_leg.mid_price:.2f}) "
@@ -1112,6 +1183,26 @@ class AutonomousTradingEngine:
                     f"⚠️ Duplicate blocked (Alpaca): already hold {resolved.put_spread.short_leg.occ_symbol}"
                 )
                 return None
+
+            # --- PHASE 6: GEX FILTER (Iron Condor) ---
+            if self.gex_enabled:
+                try:
+                    gex_profile = await self.gex_analyzer.compute_gex_profile(
+                        signal.symbol, target_dte=target_dte
+                    )
+                    for spread_leg in (resolved.put_spread.short_leg, resolved.call_spread.short_leg):
+                        short_strike = spread_leg.strike if hasattr(spread_leg, 'strike') else 0
+                        if short_strike > 0:
+                            gex_filter = self.gex_analyzer.filter_signal(
+                                gex_profile, short_strike, "iron_condor"
+                            )
+                            if not gex_filter.is_safe:
+                                self.logger.warning(
+                                    f"GEX BLOCKED IC leg: {signal.symbol} strike={short_strike} — {gex_filter.reason}"
+                                )
+                                return None
+                except Exception as e:
+                    self.logger.debug(f"GEX filter failed for IC {signal.symbol}: {e}")
 
             self.logger.info(
                 f"Executing iron condor {signal.symbol}: "
@@ -1202,6 +1293,9 @@ class AutonomousTradingEngine:
                 "execution": result,
                 "entry_time": datetime.now().isoformat(),
             })
+
+            # PHASE 6: Register position with ExitManager for systematic exits
+            self._register_with_exit_manager(signal, position_size, result)
         else:
             self.stats["trades_failed"] += 1
             self.logger.error(
@@ -1688,7 +1782,205 @@ class AutonomousTradingEngine:
         self.logger.info(f"Portfolio Delta: {self.portfolio_delta:.2f}")
         self.logger.info(f"Total Trades: {self.stats['trades_executed']}")
         self.logger.info(f"Total P&L: ${self.stats['total_pnl']:,.0f}")
-    
+        # Phase 6: Exit manager summary
+        exit_summary = self.exit_manager.get_summary()
+        self.logger.info(
+            f"ExitManager: {exit_summary['open_positions']} tracked, "
+            f"open_pnl=${exit_summary['open_pnl']:+,.2f}, "
+            f"exits={exit_summary['stats']['total_exits']}"
+        )
+
+    # ================================================================== #
+    # PHASE 6: EXIT MANAGER INTEGRATION
+    # ================================================================== #
+
+    def _register_with_exit_manager(self, signal, position_size, result):
+        """Register a newly executed trade with the ExitManager.
+
+        Maps the signal/execution to the correct ExitManager registration
+        method based on strategy type.
+        """
+        try:
+            strategy = signal.strategy
+            underlying = signal.symbol
+            premium_estimate = signal.expected_premium if signal.expected_premium and signal.expected_premium > 0 else 0.50
+            strike_width = 5.0  # Default width
+
+            if strategy in ("credit_spread", "put_spread", "call_spread"):
+                # Spread — 2 legs
+                legs = result.legs if result.legs else []
+                short_occ = ""
+                long_occ = ""
+                for leg in legs:
+                    if hasattr(leg, 'side'):
+                        if leg.side == OrderSide.SELL or str(leg.side).lower() == "sell":
+                            short_occ = leg.symbol
+                        else:
+                            long_occ = leg.symbol
+
+                if short_occ and long_occ:
+                    net_credit = premium_estimate
+                    max_profit = net_credit * 100 * position_size.contracts
+                    max_loss = (strike_width - net_credit) * 100 * position_size.contracts
+                    self.exit_manager.register_spread(
+                        underlying=underlying,
+                        short_occ=short_occ,
+                        long_occ=long_occ,
+                        qty=position_size.contracts,
+                        net_credit=net_credit,
+                        max_profit=max_profit,
+                        max_loss=max_loss,
+                        strategy=strategy,
+                    )
+                    self.logger.info(f"Registered spread with ExitManager: {underlying} ({strategy})")
+
+            elif strategy == "iron_condor":
+                # Iron condor — 4 legs
+                legs = result.legs if result.legs else []
+                put_long = put_short = call_short = call_long = ""
+                for leg in legs:
+                    sym = leg.symbol
+                    side_str = str(getattr(leg, 'side', '')).lower()
+                    is_put = 'P' in sym[6:8] if len(sym) > 8 else False
+                    if is_put and "buy" in side_str:
+                        put_long = sym
+                    elif is_put and "sell" in side_str:
+                        put_short = sym
+                    elif not is_put and "sell" in side_str:
+                        call_short = sym
+                    elif not is_put and "buy" in side_str:
+                        call_long = sym
+
+                if put_long and put_short and call_short and call_long:
+                    net_credit = premium_estimate
+                    max_profit = net_credit * 100 * position_size.contracts
+                    max_loss = (strike_width - net_credit) * 100 * position_size.contracts
+                    self.exit_manager.register_iron_condor(
+                        underlying=underlying,
+                        put_long_occ=put_long,
+                        put_short_occ=put_short,
+                        call_short_occ=call_short,
+                        call_long_occ=call_long,
+                        qty=position_size.contracts,
+                        net_credit=net_credit,
+                        max_profit=max_profit,
+                        max_loss=max_loss,
+                    )
+                    self.logger.info(f"Registered iron condor with ExitManager: {underlying}")
+
+            else:
+                # Single leg
+                occ_sym = getattr(signal, 'occ_symbol', '') or ''
+                side = "buy" if signal.signal_type == SignalType.BUY else "sell"
+                entry_price = premium_estimate
+                max_profit = entry_price * 100 * position_size.contracts
+                max_loss = entry_price * 100 * position_size.contracts
+                if occ_sym:
+                    self.exit_manager.register_single_leg(
+                        underlying=underlying,
+                        occ_symbol=occ_sym,
+                        side=side,
+                        qty=position_size.contracts,
+                        entry_price=entry_price,
+                        max_profit=max_profit,
+                        max_loss=max_loss,
+                        strategy=strategy,
+                    )
+                    self.logger.info(f"Registered single leg with ExitManager: {underlying} ({strategy})")
+
+        except Exception as e:
+            self.logger.warning(f"Failed to register with ExitManager: {e}")
+
+    async def _run_exit_manager(self):
+        """Run the ExitManager to check all tracked positions for exits.
+
+        Syncs orphaned Alpaca positions, checks exit triggers, and
+        executes closing orders (MLEG where possible).
+        """
+        try:
+            # Sync any orphaned Alpaca positions not yet tracked
+            alpaca_opts = self._get_alpaca_option_positions()
+            self.exit_manager.sync_from_alpaca_state(alpaca_opts)
+
+            # Check all positions for exit triggers
+            exit_actions = await self.exit_manager.check_all_positions()
+
+            if exit_actions:
+                self.logger.info(
+                    f"ExitManager: {len(exit_actions)} exit(s) triggered"
+                )
+
+            for action in exit_actions:
+                self.logger.info(
+                    f"  EXIT: {action.underlying} ({action.strategy}) "
+                    f"reason={action.reason.value} P&L=${action.current_pnl:+,.2f}"
+                )
+                success = await self.exit_manager.execute_exit(action)
+                if success:
+                    self.stats["positions_closed"] += 1
+                    self.stats["total_pnl"] += action.current_pnl
+                    # Also remove from current_positions
+                    self.current_positions = [
+                        p for p in self.current_positions
+                        if not self._position_matches_exit(p, action)
+                    ]
+                    await self._send_discord_notification(
+                        f"🔒 Position Closed: {action.underlying} ({action.strategy}) "
+                        f"reason={action.reason.value} P&L=${action.current_pnl:+,.2f} "
+                        f"{action.details}"
+                    )
+                else:
+                    self.logger.error(
+                        f"Failed to execute exit for {action.underlying}"
+                    )
+
+        except Exception as e:
+            self.logger.error(f"ExitManager check failed: {e}", exc_info=True)
+
+    def _position_matches_exit(self, position, action: ExitAction) -> bool:
+        """Check if an in-memory position matches an exit action."""
+        symbol = None
+        if isinstance(position, dict):
+            signal = position.get("signal")
+            symbol = getattr(signal, "symbol", None) or position.get("symbol")
+        elif hasattr(position, "symbol"):
+            symbol = position.symbol
+        return (symbol or "").upper() == action.underlying.upper()
+
+    def _log_daily_performance(self):
+        """Log daily performance metrics (Phase 6).
+
+        Calls DailyPerformanceLogger.log_daily() once per day (idempotent).
+        Computes realized P&L from ExitManager + unrealized from Alpaca.
+        """
+        try:
+            # Daily P&L components
+            realized_pnl = self.exit_manager.stats.get("total_realized_pnl", 0.0)
+            unrealized_pnl = sum(
+                p.current_pnl for p in self.exit_manager.positions.values()
+            )
+            total_daily_pnl = self.portfolio_value - self._day_start_portfolio
+
+            n_trades = self.stats.get("trades_executed", 0)
+            n_positions = len(self.current_positions) + len(self.exit_manager.positions)
+
+            snap = self.daily_perf_logger.log_daily(
+                equity=self.portfolio_value,
+                daily_pnl=total_daily_pnl,
+                n_positions=n_positions,
+                n_trades=n_trades,
+                turnover_pct=0.0,
+            )
+
+            if snap is not None:
+                self.logger.info(
+                    f"Daily P&L: ${total_daily_pnl:+,.2f} "
+                    f"(realized=${realized_pnl:+,.2f}, unrealized=${unrealized_pnl:+,.2f}) "
+                    f"equity=${self.portfolio_value:,.2f}"
+                )
+        except Exception as e:
+            self.logger.debug(f"Daily performance logging failed: {e}")
+
     @staticmethod
     def _to_json_native(v):
         """Convert a value to a JSON-native type preserving numeric precision."""
@@ -1724,6 +2016,7 @@ class AutonomousTradingEngine:
             "current_positions": serializable_positions,
             "stats": self._to_json_native(self.stats),
             "last_update": datetime.now().isoformat(),
+            "exit_manager": self.exit_manager.save_state(),
         }
         
         try:
@@ -1755,6 +2048,17 @@ class AutonomousTradingEngine:
                 self.portfolio_delta = 0.0
             
             self.logger.info(f"Loaded state from {self.state_file}")
+
+            # Phase 6: Restore ExitManager state
+            exit_state = state.get("exit_manager")
+            if exit_state:
+                try:
+                    self.exit_manager.load_state(exit_state)
+                    self.logger.info(
+                        f"Restored ExitManager: {len(self.exit_manager.positions)} tracked positions"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"ExitManager state restore failed: {e}")
         except Exception as e:
             self.logger.error(f"Failed to load state: {e}")
     

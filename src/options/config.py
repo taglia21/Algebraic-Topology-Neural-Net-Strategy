@@ -88,6 +88,23 @@ RISK_CONFIG: Dict[str, Any] = {
     "max_slippage_pct": 0.05,  # Max 5% slippage tolerance
     "retry_attempts": 3,  # Retry failed orders 3 times
     "retry_delay_seconds": 5,  # Wait 5s between retries
+
+    # ===== PHASE 6: EXIT MANAGEMENT =====
+    "exit_profit_target_pct": 0.50,        # Close at 50% of max profit
+    "exit_stop_loss_multiplier": 2.0,      # Close at 2x premium collected
+    "exit_dte_threshold": 7,               # Close at 7 DTE remaining
+    "exit_trailing_stop_activate": 0.30,   # Activate trailing stop at 30% gain
+    "exit_trailing_stop_trail": 0.50,      # Trail 50% of peak profit
+    "exit_time_accel_dte_pct": 0.50,       # Early exit after 50% time elapsed
+    "exit_time_accel_profit_pct": 0.25,    # At 25% profit with time accel
+    "exit_use_mleg_close": True,           # Use MLEG orders for closing spreads
+
+    # ===== PHASE 6: GEX AWARENESS =====
+    "gex_enabled": True,                    # Enable GEX-based filtering
+    "gex_sticky_strike_threshold": 0.30,   # Top 30% GEX = sticky
+    "gex_avoidance_radius_pct": 0.005,     # Avoid strikes within 0.5% of sticky
+    "gex_cache_ttl_minutes": 15,           # Cache GEX for 15 min
+    "gex_negative_size_reduction": 0.50,   # Reduce size 50% in neg GEX
 }
 
 

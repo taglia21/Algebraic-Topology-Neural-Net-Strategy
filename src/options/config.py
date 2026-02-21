@@ -45,8 +45,8 @@ RISK_CONFIG: Dict[str, Any] = {
     
     # Strategy-specific parameters
     "min_probability_of_profit": 0.60,  # Minimum 60% PoP (was 50% — coin-flip too risky)
-    "min_premium_credit": 0.30,  # Minimum $0.30 credit per contract
-    "max_bid_ask_spread_pct": 0.15,  # Max 15% bid-ask spread
+    "min_premium_credit": 0.50,  # Minimum $0.50 credit per contract (was $0.30)
+    "max_bid_ask_spread_pct": 0.10,  # Max 10% bid-ask spread (was 15%)
     
     # Mean reversion
     "z_score_entry": 2.0,  # Enter when z-score exceeds +/-2.0
@@ -57,12 +57,8 @@ RISK_CONFIG: Dict[str, Any] = {
     "delta_hedge_threshold": 25.0,  # Hedge when portfolio delta > +/-25 shares equivalent
     "delta_rebalance_threshold": 10.0,  # Rebalance at +/-10 shares equivalent
     
-    # Kelly Criterion
-    "kelly_fraction": 0.25,  # Quarter-Kelly for safety
-    "max_kelly_fraction": 0.50,  # Absolute maximum Kelly
-    "min_kelly_fraction": 0.01,  # Minimum position size
-    "kelly_max": 0.50,  # Alias for max_kelly_fraction
-    "kelly_min": 0.01,  # Alias for min_kelly_fraction
+    # Position sizing (fixed-fractional — Kelly removed)
+    "fixed_risk_fraction": 0.01,  # 1% of portfolio risked per trade
     
     # Execution
     "order_timeout_seconds": 60,  # Order timeout
@@ -182,9 +178,9 @@ def validate_config() -> bool:
     if RISK_CONFIG["min_dte"] >= RISK_CONFIG["max_dte"]:
         raise ValueError("min_dte must be less than max_dte")
     
-    # Validate Kelly fraction
-    if not 0 < RISK_CONFIG["kelly_fraction"] <= 1:
-        raise ValueError("kelly_fraction must be between 0 and 1")
+    # Validate fixed risk fraction
+    if not 0 < RISK_CONFIG["fixed_risk_fraction"] <= 0.05:
+        raise ValueError("fixed_risk_fraction must be between 0 and 0.05")
     
     return True
 

@@ -30,94 +30,64 @@ class SymbolConfig:
 # ============================================================================
 
 OPTIONS_UNIVERSE: Dict[str, Dict] = {
-    # SPY - S&P 500 ETF (Most liquid)
+    # ── 8 highest-liquidity, tightest-spread names only ──────────────
+    # Removed: IWM, TSLA, DIA (wider spreads, lower option liquidity)
+
     "SPY": {
         "strategies": ["iron_condor", "credit_spread", "straddle", "strangle", "butterfly"],
         "min_price": 300.0,
-        "max_price": 600.0,
+        "max_price": 700.0,
         "sector": "broad_market",
-        "notes": "Highest liquidity, tight spreads, excellent for all strategies"
+        "notes": "Highest liquidity, tight spreads, excellent for all strategies",
     },
-    
-    # QQQ - Nasdaq 100 ETF
     "QQQ": {
         "strategies": ["iron_condor", "credit_spread", "straddle", "calendar_spread"],
         "min_price": 200.0,
-        "max_price": 500.0,
+        "max_price": 600.0,
         "sector": "tech_heavy",
-        "notes": "High tech exposure, good liquidity"
+        "notes": "High tech exposure, good liquidity",
     },
-    
-    # IWM - Russell 2000 ETF
-    "IWM": {
-        "strategies": ["iron_condor", "credit_spread", "put_spread"],
-        "min_price": 150.0,
-        "max_price": 250.0,
-        "sector": "small_cap",
-        "notes": "Small cap exposure, moderate volatility"
-    },
-    
-    # AAPL - Apple
     "AAPL": {
-        "strategies": ["credit_spread", "covered_call", "put_spread", "iron_condor"],
+        "strategies": ["credit_spread", "iron_condor", "put_spread"],
         "min_price": 100.0,
-        "max_price": 250.0,
+        "max_price": 300.0,
         "sector": "technology",
-        "notes": "Mega-cap tech, excellent option liquidity"
+        "notes": "Mega-cap tech, excellent option liquidity",
     },
-    
-    # TSLA - Tesla
-    "TSLA": {
-        "strategies": ["iron_condor", "straddle", "strangle", "credit_spread"],
-        "min_price": 150.0,
-        "max_price": 400.0,
-        "sector": "automotive_tech",
-        "notes": "High volatility, large moves, rich premiums"
+    "MSFT": {
+        "strategies": ["credit_spread", "iron_condor"],
+        "min_price": 250.0,
+        "max_price": 550.0,
+        "sector": "technology",
+        "notes": "Stable mega-cap, moderate volatility",
     },
-    
-    # NVDA - NVIDIA
     "NVDA": {
         "strategies": ["credit_spread", "iron_condor", "put_spread"],
         "min_price": 200.0,
-        "max_price": 1000.0,
+        "max_price": 1500.0,
         "sector": "semiconductors",
-        "notes": "AI leader, high volatility, good liquidity"
+        "notes": "AI leader, high volatility, deep option liquidity",
     },
-    
-    # MSFT - Microsoft
-    "MSFT": {
-        "strategies": ["credit_spread", "iron_condor", "covered_call"],
-        "min_price": 250.0,
-        "max_price": 450.0,
-        "sector": "technology",
-        "notes": "Stable mega-cap, moderate volatility"
-    },
-    
-    # AMZN - Amazon
     "AMZN": {
-        "strategies": ["credit_spread", "iron_condor", "straddle"],
+        "strategies": ["credit_spread", "iron_condor"],
         "min_price": 100.0,
-        "max_price": 200.0,
+        "max_price": 300.0,
         "sector": "e-commerce_cloud",
-        "notes": "High beta, good for premium selling"
+        "notes": "High beta, good for premium selling",
     },
-    
-    # META - Meta Platforms
     "META": {
         "strategies": ["credit_spread", "iron_condor", "strangle"],
         "min_price": 200.0,
-        "max_price": 600.0,
+        "max_price": 800.0,
         "sector": "social_media",
-        "notes": "Elevated volatility, good option volume"
+        "notes": "Elevated volatility, good option volume",
     },
-    
-    # DIA - Dow Jones ETF
-    "DIA": {
-        "strategies": ["iron_condor", "credit_spread"],
-        "min_price": 300.0,
-        "max_price": 450.0,
-        "sector": "blue_chip",
-        "notes": "Lower volatility, stable premium collection"
+    "GOOGL": {
+        "strategies": ["credit_spread", "iron_condor"],
+        "min_price": 100.0,
+        "max_price": 250.0,
+        "sector": "technology",
+        "notes": "Mega-cap, deep option chain liquidity",
     },
 }
 
@@ -234,7 +204,7 @@ def get_high_liquidity_symbols() -> List[str]:
     Returns:
         List of high-liquidity symbols
     """
-    return ["SPY", "QQQ", "IWM", "DIA"]
+    return ["SPY", "QQQ"]
 
 
 def get_tech_symbols() -> List[str]:

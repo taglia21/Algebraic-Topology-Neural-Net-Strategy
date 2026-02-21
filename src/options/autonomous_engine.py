@@ -39,6 +39,7 @@ from .position_sizer import MedallionPositionSizer, PositionSize, calculate_max_
 from .trade_executor import AlpacaOptionsExecutor, OrderSide, ExecutionResult
 from .iv_data_manager import IVDataManager
 from .contract_resolver import OptionContractResolver, ResolvedContract, ResolvedSpread, ResolvedIronCondor
+from .earnings_gate import should_block_for_earnings
 
 # ==== NEW ENHANCED MODULES ====
 from .regime_detector import RegimeDetector, MarketRegime
@@ -590,6 +591,28 @@ class AutonomousTradingEngine:
             if len(self.current_positions) >= max_positions:
                 self.logger.warning(f"Max positions ({max_positions}) reached, skipping new signals")
                 break
+
+            # --- PHASE 2: IV RANK ENFORCEMENT ---
+            iv = signal.iv_rank
+            if iv is not None:
+                if signal.signal_type == SignalType.SELL and iv < 50:
+                    self.logger.info(
+                        f"Skipping SELL {signal.symbol}: IV rank {iv:.0f} < 50 floor"
+                    )
+                    continue
+                if signal.signal_type == SignalType.BUY and iv > 30:
+                    self.logger.info(
+                        f"Skipping BUY {signal.symbol}: IV rank {iv:.0f} > 30 ceiling"
+                    )
+                    continue
+
+            # --- PHASE 2: EARNINGS GATE ---
+            sig_dte = signal.dte or 30
+            if should_block_for_earnings(signal.symbol, sig_dte):
+                self.logger.info(
+                    f"Skipping {signal.symbol}: earnings within {sig_dte}-day DTE window"
+                )
+                continue
             
             valid_signals.append(signal)
         
@@ -818,6 +841,18 @@ class AutonomousTradingEngine:
             signal.occ_symbol = resolved.short_leg.occ_symbol
             signal.expiration_date = resolved.short_leg.expiration
 
+            # --- BID-ASK SPREAD QUALITY FILTER (Phase 2, Change #5) ---
+            max_ba_ratio = RISK_CONFIG.get("max_bid_ask_spread_pct", 0.10)
+            for leg in (resolved.short_leg, resolved.long_leg):
+                if leg.mid_price > 0:
+                    ba_ratio = (leg.ask - leg.bid) / leg.mid_price
+                    if ba_ratio > max_ba_ratio:
+                        self.logger.warning(
+                            f"Bid-ask too wide on {leg.occ_symbol}: "
+                            f"{ba_ratio:.1%} > {max_ba_ratio:.0%} — skipping"
+                        )
+                        return None
+
             # Alpaca-sourced duplicate prevention
             if resolved.short_leg.occ_symbol in held_occ_symbols:
                 self.logger.warning(
@@ -860,6 +895,21 @@ class AutonomousTradingEngine:
 
             signal.occ_symbol = resolved.put_spread.short_leg.occ_symbol
             signal.expiration_date = resolved.put_spread.short_leg.expiration
+
+            # --- BID-ASK SPREAD QUALITY FILTER (Phase 2, Change #5) ---
+            max_ba_ratio = RISK_CONFIG.get("max_bid_ask_spread_pct", 0.10)
+            for leg in (
+                resolved.put_spread.short_leg, resolved.put_spread.long_leg,
+                resolved.call_spread.short_leg, resolved.call_spread.long_leg,
+            ):
+                if leg.mid_price > 0:
+                    ba_ratio = (leg.ask - leg.bid) / leg.mid_price
+                    if ba_ratio > max_ba_ratio:
+                        self.logger.warning(
+                            f"Bid-ask too wide on {leg.occ_symbol}: "
+                            f"{ba_ratio:.1%} > {max_ba_ratio:.0%} — skipping IC"
+                        )
+                        return None
 
             # Alpaca-sourced duplicate prevention
             if resolved.put_spread.short_leg.occ_symbol in held_occ_symbols:
@@ -906,6 +956,17 @@ class AutonomousTradingEngine:
 
             signal.occ_symbol = resolved.occ_symbol
             signal.expiration_date = resolved.expiration
+
+            # --- BID-ASK SPREAD QUALITY FILTER (Phase 2, Change #5) ---
+            max_ba_ratio = RISK_CONFIG.get("max_bid_ask_spread_pct", 0.10)
+            if resolved.mid_price > 0:
+                ba_ratio = (resolved.ask - resolved.bid) / resolved.mid_price
+                if ba_ratio > max_ba_ratio:
+                    self.logger.warning(
+                        f"Bid-ask too wide on {resolved.occ_symbol}: "
+                        f"{ba_ratio:.1%} > {max_ba_ratio:.0%} — skipping"
+                    )
+                    return None
 
             # Alpaca-sourced duplicate prevention
             if resolved.occ_symbol in held_occ_symbols:
@@ -1079,6 +1140,31 @@ class AutonomousTradingEngine:
                         f"P&L: ${unrealized_pnl:+,.2f} ({unrealized_pnl_pct:+.1%})"
                     )
                 
+                # --- PHASE 2: TIME-BASED PROFIT ACCELERATION ---
+                # If held > 50% of DTE and at +25% profit, close early
+                if close_reason is None and unrealized_pnl_pct >= 0.25:
+                    entry_time_str = None
+                    sig_dte = None
+                    if isinstance(position, dict):
+                        entry_time_str = position.get("entry_time")
+                        sig = position.get("signal")
+                        if sig:
+                            sig_dte = getattr(sig, "dte", None)
+                    if entry_time_str and sig_dte and sig_dte > 0:
+                        try:
+                            entry_dt = datetime.fromisoformat(entry_time_str)
+                            held_days = (datetime.now() - entry_dt).days
+                            half_dte = sig_dte / 2.0
+                            if held_days >= half_dte:
+                                close_reason = "TIME_ACCEL_PROFIT"
+                                self.logger.info(
+                                    f"TIME-ACCEL profit for {symbol}: "
+                                    f"+{unrealized_pnl_pct:.0%} after {held_days}d "
+                                    f"(>{half_dte:.0f}d = 50% of {sig_dte}DTE)"
+                                )
+                        except (ValueError, TypeError):
+                            pass
+
                 # DTE-based time exit: close positions nearing expiration
                 if close_reason is None:
                     from datetime import date as _date_cls

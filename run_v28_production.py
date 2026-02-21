@@ -21,6 +21,7 @@ Usage:
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -205,6 +206,16 @@ logging.basicConfig(
         logging.FileHandler(str(log_file)),
     ],
 )
+
+# Phase 4: Rotating file logger shared with options engine
+_rotating_handler = logging.handlers.RotatingFileHandler(
+    str(LOG_DIR / "options_engine.log"), maxBytes=5 * 1024 * 1024, backupCount=3,
+)
+_rotating_handler.setFormatter(
+    logging.Formatter("%(asctime)s | %(levelname)-8s | %(name)-30s | %(message)s")
+)
+logging.getLogger().addHandler(_rotating_handler)
+
 logger = logging.getLogger("v28_production")
 
 # ---------------------------------------------------------------------------
@@ -1160,7 +1171,12 @@ class EquityEngine:
 
 
 class OptionsEngine:
-    """Async wrapper around the autonomous options engine."""
+    """Async wrapper around the autonomous options engine.
+
+    Attributes:
+        mode: Trading mode ('paper' or 'live').
+        engine: The underlying AutonomousTradingEngine instance.
+    """
 
     def __init__(self, mode: str):
         self.mode = mode
@@ -1284,7 +1300,110 @@ async def equity_loop(engine: EquityEngine, stop_event: asyncio.Event):
             pass  # normal timeout – next cycle
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: Health-check HTTP endpoint (port 8080)
+# ---------------------------------------------------------------------------
+
+_STARTUP_TIME = time.monotonic()
+_HEALTH_STATE: Dict[str, Any] = {
+    "positions_count": 0,
+    "today_pnl": 0.0,
+    "last_cycle_ts": None,
+    "engine_status": "starting",
+}
+
+
+async def _health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """Minimal HTTP/1.1 handler that returns JSON health payload."""
+    try:
+        # Read request line (we don't care about path — everything returns health)
+        await asyncio.wait_for(reader.readline(), timeout=5.0)
+        # Drain remaining headers
+        while True:
+            line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            if line in (b"\r\n", b"\n", b""):
+                break
+    except Exception:
+        pass
+
+    import json as _json
+    body = _json.dumps({
+        "status": "ok",
+        "uptime_seconds": round(time.monotonic() - _STARTUP_TIME, 1),
+        "positions_count": _HEALTH_STATE["positions_count"],
+        "today_pnl": _HEALTH_STATE["today_pnl"],
+        "last_cycle_ts": _HEALTH_STATE["last_cycle_ts"],
+        "engine_status": _HEALTH_STATE["engine_status"],
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    })
+    response = (
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        f"{body}"
+    )
+    writer.write(response.encode())
+    await writer.drain()
+    writer.close()
+
+
+async def _start_health_server(port: int = 8080):
+    """Start a lightweight asyncio TCP server for health checks."""
+    try:
+        server = await asyncio.start_server(_health_handler, "0.0.0.0", port)
+        logger.info(f"Health-check endpoint listening on :{port}")
+        return server
+    except Exception as exc:
+        logger.warning(f"Could not start health-check server on :{port}: {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Graceful shutdown — cancel open orders, log final state, exit 0
+# ---------------------------------------------------------------------------
+
+async def _graceful_shutdown(
+    equity: EquityEngine,
+    options: OptionsEngine,
+    stop_event: asyncio.Event,
+):
+    """Cancel all open orders on Alpaca and log final state."""
+    logger.info("=== GRACEFUL SHUTDOWN: cancelling open orders ===")
+
+    # Cancel orders via equity engine's Alpaca client
+    if equity.client is not None:
+        try:
+            equity.client._request("DELETE", "/v2/orders")
+            logger.info("All open equity orders cancelled")
+        except Exception as exc:
+            logger.warning(f"Failed to cancel equity orders: {exc}")
+
+    # Cancel orders via options engine's Alpaca client
+    if options.engine is not None:
+        try:
+            options.engine.trade_executor.trading_client.cancel_orders()
+            logger.info("All open option orders cancelled")
+        except Exception as exc:
+            logger.warning(f"Failed to cancel option orders: {exc}")
+
+        # Persist final state
+        try:
+            options.engine._save_state()
+            logger.info("Options engine state saved")
+        except Exception as exc:
+            logger.warning(f"Failed to save options state: {exc}")
+
+    logger.info("=== GRACEFUL SHUTDOWN COMPLETE ===")
+
+
 async def main(mode: str):
+    """Orchestrate equity + options engines with health check and graceful shutdown.
+
+    Args:
+        mode: 'paper' or 'live'.
+    """
     logger.info("=" * 70)
     logger.info(f"  V28 PRODUCTION TRADING SYSTEM — mode={mode}")
     logger.info(f"  PID={os.getpid()}  Python={sys.version.split()[0]}")
@@ -1300,17 +1419,28 @@ async def main(mode: str):
 
     stop_event = asyncio.Event()
 
-    # Graceful shutdown on SIGTERM / SIGINT
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda s=sig: _handle_signal(s, stop_event))
-
     # Initialize engines
     equity = EquityEngine(mode)
     options = OptionsEngine(mode)
 
     await equity.initialize()
     await options.initialize()
+
+    # Phase 4: Graceful shutdown on SIGTERM / SIGINT
+    loop = asyncio.get_running_loop()
+
+    def _handle_sig(sig):
+        logger.info(f"Received signal {sig.name} — initiating graceful shutdown")
+        stop_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _handle_sig, sig)
+
+    # Phase 4: Start health-check HTTP server
+    health_server = await _start_health_server(
+        port=int(os.getenv("HEALTH_PORT", "8080"))
+    )
+    _HEALTH_STATE["engine_status"] = "running"
 
     # Start Prometheus metrics server
     if HAS_METRICS:
@@ -1328,6 +1458,7 @@ async def main(mode: str):
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=wait_secs)
                 logger.info("Shutdown requested during wait")
+                await _graceful_shutdown(equity, options, stop_event)
                 return
             except asyncio.TimeoutError:
                 await run_premarket_analysis()
@@ -1351,17 +1482,20 @@ async def main(mode: str):
 
     # Cancel remaining
     stop_event.set()
+    _HEALTH_STATE["engine_status"] = "shutting_down"
     for t in pending:
         t.cancel()
     if pending:
         await asyncio.wait(pending, timeout=10)
 
+    # Phase 4: graceful shutdown
+    await _graceful_shutdown(equity, options, stop_event)
+
+    if health_server is not None:
+        health_server.close()
+        await health_server.wait_closed()
+
     logger.info("V28 Production System shutdown complete.")
-
-
-def _handle_signal(sig, stop_event: asyncio.Event):
-    logger.info(f"Received signal {sig.name} — initiating graceful shutdown")
-    stop_event.set()
 
 
 # ---------------------------------------------------------------------------

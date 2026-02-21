@@ -24,13 +24,31 @@ Features:
 import asyncio
 import argparse
 import logging
+import logging.handlers
 from datetime import datetime, time
 from typing import Dict, List, Optional
 import json
 import os
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
+
+# ---------------------------------------------------------------------------
+# Rotating file logger (5 MB, 3 backups) — Phase 4
+# ---------------------------------------------------------------------------
+_LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
+_options_log_file = _LOG_DIR / "options_engine.log"
+_rotating_handler = logging.handlers.RotatingFileHandler(
+    str(_options_log_file), maxBytes=5 * 1024 * 1024, backupCount=3,
+)
+_rotating_handler.setFormatter(
+    logging.Formatter("%(asctime)s | %(levelname)-8s | %(name)-30s | %(message)s")
+)
+logging.getLogger("src.options").addHandler(_rotating_handler)
+logging.getLogger("src.options").setLevel(logging.INFO)
 
 from .config import RISK_CONFIG, MONITORING_CONFIG
 from .universe import get_universe
@@ -166,16 +184,32 @@ DAILY_LOSS_STOP = -1000              # Stop ALL trading if daily P/L < -$1,000
 MAX_STRIKE_OTM_PCT = 0.05            # Max 5% OTM for strike selection
 MIN_OPTION_DELTA = 0.15              # Min |delta| for tradable options
 
+# Phase 4: Daily P&L circuit breaker (realized + unrealized)
+DAILY_PNL_CIRCUIT_BREAKER = -500.0   # Halt if day P&L < -$500
+
 
 # ============================================================================
 # AUTONOMOUS TRADING ENGINE
 # ============================================================================
 
 class AutonomousTradingEngine:
-    """
-    Main autonomous trading engine.
-    
-    Runs continuously during market hours, executing the 6-step trading loop.
+    """Main autonomous options trading engine.
+
+    Runs continuously during market hours, executing a 6-step loop
+    every ``signal_scan_interval_seconds`` (default 300 s):
+
+    1. **SCAN** — Generate signals from all strategies.
+    2. **FILTER** — Remove invalid / duplicate / gated signals.
+    3. **SIZE** — Calculate position size (fixed-fractional).
+    4. **EXECUTE** — Resolve OCC contracts and submit to Alpaca.
+    5. **MANAGE** — Monitor positions, trigger stops / targets.
+    6. **CHECK** — Verify portfolio risk within limits.
+
+    Attributes:
+        portfolio_value: Current portfolio equity (refreshed each cycle).
+        current_positions: In-memory list of open option positions.
+        paper: Whether the engine is using paper trading.
+        stats: Cumulative run-time statistics dict.
     """
     
     def __init__(
@@ -184,13 +218,13 @@ class AutonomousTradingEngine:
         paper: bool = True,
         state_file: str = "",
     ):
-        """
-        Initialize engine.
-        
+        """Initialise the engine and all sub-components.
+
         Args:
-            portfolio_value: Starting portfolio value ($)
-            paper: Use paper trading (default True)
-            state_file: File to persist state (default: state/trading_state.json)
+            portfolio_value: Starting portfolio value in USD.
+            paper: If ``True`` (default), use Alpaca paper trading.
+            state_file: Path to the JSON state-persistence file.
+                Falls back to ``state/trading_state.json``.
         """
         # Deterministic state path (issue #15)
         if not state_file:
@@ -218,6 +252,9 @@ class AutonomousTradingEngine:
         self._daily_tracking_date = None      # date these counters apply to
         self._day_start_portfolio = portfolio_value  # portfolio value at day start
         self._executed_occ_symbols: set = set()      # OCC symbols already bought today
+
+        # Phase 4: Daily P&L circuit breaker state
+        self._pnl_circuit_breaker_tripped = False
 
         # Initialize components
         self.signal_generator = SignalGenerator()
@@ -378,7 +415,11 @@ class AutonomousTradingEngine:
             )
 
     def request_shutdown(self) -> None:
-        """Request graceful shutdown of the engine."""
+        """Request a graceful shutdown of the engine.
+
+        Sets the internal stop-event so that ``run_forever`` exits
+        after the current cycle finishes.
+        """
         self._stop_event.set()
 
     async def _sleep_or_stop(self, seconds: float) -> None:
@@ -390,7 +431,12 @@ class AutonomousTradingEngine:
             return
 
     async def run_forever(self) -> None:
-        """Run continuously until a shutdown is requested."""
+        """Run the trading loop continuously until shutdown is requested.
+
+        The loop respects market hours and implements an error-cooldown
+        mechanism: after ``MAX_CONSECUTIVE_ERRORS`` (5) failures in a
+        row the engine pauses for 15 minutes before retrying.
+        """
         self.logger.info("🚀 AUTONOMOUS TRADING ENGINE STARTED")
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 5
@@ -444,17 +490,24 @@ class AutonomousTradingEngine:
             await self._shutdown()
     
     async def run(self):
-        """
-        Main trading loop - runs continuously during market hours.
-        """
+        """Alias for :meth:`run_forever`."""
         await self.run_forever()
     
     async def _trading_cycle(self):
-        """
-        Execute one complete trading cycle (6 steps).
-        
-        ENHANCED: Now includes regime detection and dynamic weight optimization.
-        SAFETY:   Daily budget cap, trade limit, duplicate & loss-stop checks.
+        """Execute one complete 6-step trading cycle.
+
+        Steps:
+            0a. Refresh portfolio value from Alpaca.
+            0b. Refresh portfolio delta.
+            0c. Regime detection & weight optimisation.
+            0d. Greeks monitor check.
+            0e. VIX regime overlay.
+            1. SCAN for signals.
+            2. FILTER invalid signals.
+            3. SIZE positions.
+            4. EXECUTE trades (gated by Greeks, VIX, safe window).
+            5. MANAGE existing positions.
+            6. CHECK risk limits.
         """
         # --- Daily risk-control reset ---
         self._reset_daily_counters_if_needed()
@@ -487,6 +540,11 @@ class AutonomousTradingEngine:
         # STEP 0a-bis: Daily loss stop check (halt ALL trading)
         if self._daily_loss_exceeded():
             self.logger.critical("Cycle aborted — daily loss stop active.")
+            return
+
+        # STEP 0a-ter: Phase 4 daily P&L circuit breaker (-$500)
+        if not self._check_daily_pnl_circuit_breaker():
+            self.logger.critical("Cycle aborted — daily P&L circuit breaker active.")
             return
         
         # STEP 0b: Refresh portfolio delta from Alpaca positions (issue #10)
@@ -575,7 +633,11 @@ class AutonomousTradingEngine:
         self._log_cycle_summary()
     
     async def _scan_for_signals(self) -> List[Signal]:
-        """Step 1: Generate signals from all strategies."""
+        """Step 1: Generate signals from all strategies.
+
+        Returns:
+            List of raw :class:`Signal` objects from the signal generator.
+        """
         symbols = get_universe()
         
         signals = await self.signal_generator.generate_all_signals(
@@ -588,11 +650,17 @@ class AutonomousTradingEngine:
         return signals
     
     async def _filter_signals(self, signals: List[Signal]) -> List[Signal]:
-        """
-        Step 2: Filter signals to remove invalid/duplicate ones.
-        
-        ENHANCED: Now includes concentration risk checks and SignalAggregator
-        confidence boosting for each signal's underlying.
+        """Step 2: Filter signals to remove invalid / duplicate ones.
+
+        Applies concentration-risk check, confidence floor, IV rank
+        enforcement, earnings gate, underlying concentration limit,
+        and optional aggregator / Heston boosting.
+
+        Args:
+            signals: Raw signals from :meth:`_scan_for_signals`.
+
+        Returns:
+            Filtered list of actionable signals.
         """
         # First, check concentration risk
         concentration_ok = await self._check_concentration_risk()
@@ -721,7 +789,17 @@ class AutonomousTradingEngine:
         return valid_signals
     
     async def _size_positions(self, signals: List[Signal]) -> List[tuple]:
-        """Step 3: Calculate position sizes using Kelly Criterion."""
+        """Step 3: Calculate position sizes.
+
+        Uses fixed-fractional sizing (1 % risk per trade) with
+        constraints from the :class:`MedallionPositionSizer`.
+
+        Args:
+            signals: Validated signals from :meth:`_filter_signals`.
+
+        Returns:
+            List of ``(signal, position_size)`` tuples.
+        """
         sized_signals = []
         
         for signal in signals:
@@ -1134,13 +1212,14 @@ class AutonomousTradingEngine:
         return result
     
     async def _manage_positions(self):
-        """
-        Step 5: Monitor positions using REAL Alpaca P&L data.
-        
+        """Step 5: Monitor open positions using real Alpaca P&L data.
+
         Checks each position for:
-        1. Stop-loss trigger (unrealized loss > max_loss_pct)
-        2. Take-profit trigger (unrealized gain > target_profit_pct)
-        3. DTE management (close positions approaching expiration)
+            * Stop-loss trigger (unrealized loss > ``stop_loss_pct``).
+            * Take-profit trigger (unrealized gain > ``target_profit_pct``).
+            * Trailing stop (activate at +20 %, trail 40 % of peak).
+            * Time-based profit acceleration (close at +25 % after 50 % DTE).
+            * DTE management (close positions < 7 DTE).
         """
         if not self.current_positions:
             return
@@ -1351,7 +1430,11 @@ class AutonomousTradingEngine:
             self.stats["total_pnl"] += pnl
     
     async def _check_risk_limits(self) -> bool:
-        """Step 6: Verify portfolio risk within limits."""
+        """Step 6: Verify portfolio risk is within configured limits.
+
+        Returns:
+            ``True`` if all limits are satisfied.
+        """
         # Check portfolio delta
         max_delta = self.config["max_portfolio_delta"]
         if abs(self.portfolio_delta) > max_delta:
@@ -1464,7 +1547,10 @@ class AutonomousTradingEngine:
     # ------------------------------------------------------------------ #
 
     def _reset_daily_counters_if_needed(self):
-        """Reset daily counters at the start of each new trading day."""
+        """Reset daily counters at the start of each new trading day.
+
+        Resets spend, trade count, OCC set, and the P&L circuit breaker flag.
+        """
         today = datetime.now(ZoneInfo("America/New_York")).date()
         if self._daily_tracking_date != today:
             self.logger.info(
@@ -1477,6 +1563,7 @@ class AutonomousTradingEngine:
             self._daily_tracking_date = today
             self._day_start_portfolio = self.portfolio_value
             self._executed_occ_symbols.clear()
+            self._pnl_circuit_breaker_tripped = False
 
     def _daily_loss_exceeded(self) -> bool:
         """Return True if daily P/L has breached the DAILY_LOSS_STOP."""
@@ -1488,6 +1575,53 @@ class AutonomousTradingEngine:
             )
             return True
         return False
+
+    # ------------------------------------------------------------------ #
+    # PHASE 4: DAILY P&L CIRCUIT BREAKER  (-$500 realized + unrealized)
+    # ------------------------------------------------------------------ #
+
+    def _check_daily_pnl_circuit_breaker(self) -> bool:
+        """Check if the daily P&L circuit breaker should trip.
+
+        Computes realized + unrealized P&L since market open.  If the
+        combined number drops below ``DAILY_PNL_CIRCUIT_BREAKER`` (-$500),
+        all new entries are halted for the remainder of the session.
+        The flag resets automatically at the next market open via
+        ``_reset_daily_counters_if_needed``.
+
+        Returns:
+            True if trading is allowed (circuit breaker NOT tripped).
+            False if trading should stop.
+        """
+        if self._pnl_circuit_breaker_tripped:
+            return False  # already tripped earlier today
+
+        # Compute unrealized P&L from Alpaca positions
+        unrealized_pnl = 0.0
+        try:
+            positions = self.trade_executor.trading_client.get_all_positions()
+            for pos in positions:
+                sym = pos.symbol or ""
+                if len(sym) > 6:  # option position
+                    unrealized_pnl += float(pos.unrealized_pl or 0)
+        except Exception as e:
+            self.logger.warning(f"Circuit breaker: cannot fetch positions: {e}")
+            return True  # fail-open
+
+        # Realized component = portfolio change minus unrealized portion
+        total_day_pnl = (self.portfolio_value - self._day_start_portfolio)
+
+        if total_day_pnl < DAILY_PNL_CIRCUIT_BREAKER:
+            self._pnl_circuit_breaker_tripped = True
+            self.logger.critical(
+                f"🚨 DAILY P&L CIRCUIT BREAKER TRIPPED: "
+                f"day P&L=${total_day_pnl:,.2f} (unrealized=${unrealized_pnl:,.2f}) "
+                f"< threshold=${DAILY_PNL_CIRCUIT_BREAKER:,.0f}. "
+                f"All new entries halted until next market open."
+            )
+            return False
+
+        return True
 
     def _options_budget_allows(self, estimated_cost: float) -> bool:
         """Check whether we can afford *estimated_cost* within today's budget."""

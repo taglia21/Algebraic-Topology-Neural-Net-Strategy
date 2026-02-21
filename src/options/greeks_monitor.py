@@ -9,6 +9,13 @@ never accumulates excessive directional or volatility exposure.
 Estimates are intentionally rough — they only need to be directionally
 correct to act as a safety net.  We DO NOT call an option pricing model
 on each cycle because that would add latency and API calls.
+
+Example::
+
+    monitor = PortfolioGreeksMonitor()
+    greeks = monitor.get_portfolio_greeks(trading_client)
+    ok, violations = monitor.is_within_limits(greeks)
+    monitor.log_greeks(greeks)
 """
 
 import logging

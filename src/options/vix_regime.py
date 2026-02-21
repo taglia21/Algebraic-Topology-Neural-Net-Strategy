@@ -8,6 +8,12 @@ regimes, each with a position-size multiplier.  The CRISIS regime
 
 VIX is cached for ``VIX_CACHE_SECONDS`` (default 300 s / 5 min) to
 avoid excess yfinance API calls.
+
+Example::
+
+    overlay = VIXRegimeOverlay()
+    snap = overlay.get_snapshot()
+    print(snap.regime, snap.multiplier)
 """
 
 import logging

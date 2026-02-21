@@ -2,10 +2,19 @@
 Options Trading Configuration
 ==============================
 
-Risk parameters and trading configuration for autonomous engine.
+Risk parameters and trading configuration for the autonomous options engine.
 
-This module defines all risk limits, trading parameters, and strategy
-configurations used by the autonomous trading system.
+This module defines all risk limits, trading parameters, strategy
+configurations, and monitoring intervals used by the autonomous trading
+system.  Values are validated on import.
+
+Attributes:
+    RISK_CONFIG: Portfolio- and position-level risk limits.
+    STRATEGY_WEIGHTS: Default strategy allocation weights.
+    MARKET_HOURS: NYSE trading-session time boundaries.
+    VOLATILITY_REGIMES: IV-rank bucketed position-size multipliers.
+    LOGGING_CONFIG: Log format and rotation settings.
+    MONITORING_CONFIG: Scan, check, and heartbeat intervals.
 """
 
 from typing import Dict, Any
@@ -144,25 +153,29 @@ MONITORING_CONFIG = {
 # ============================================================================
 
 def get_config(key: str, default: Any = None) -> Any:
-    """
-    Get configuration value.
-    
+    """Retrieve a single configuration value from ``RISK_CONFIG``.
+
     Args:
-        key: Configuration key
-        default: Default value if key not found
-        
+        key: Configuration key to look up.
+        default: Fallback value when *key* is absent.
+
     Returns:
-        Configuration value
+        The configuration value, or *default* if not found.
     """
     return RISK_CONFIG.get(key, default)
 
 
 def validate_config() -> bool:
-    """
-    Validate configuration parameters.
-    
+    """Validate critical configuration parameters on import.
+
+    Checks that percentage values fall within [0, 1], DTE ranges
+    are consistent, and the fixed-risk fraction is sensible.
+
     Returns:
-        True if valid, raises ValueError otherwise
+        ``True`` if all checks pass.
+
+    Raises:
+        ValueError: If any parameter is out of range.
     """
     # Validate percentage values
     pct_keys = [

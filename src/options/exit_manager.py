@@ -39,6 +39,8 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from .occ_utils import parse_occ_symbol
+
 logger = logging.getLogger(__name__)
 
 
@@ -668,7 +670,13 @@ class ExitManager:
     # ====================================================================
 
     async def _refresh_position_prices(self):
-        """Refresh current prices for all tracked positions from Alpaca."""
+        """Refresh current prices for all tracked positions from Alpaca.
+
+        Phase 7 (Bug 3 fix): Always query real-time bid/ask/mid from
+        Alpaca data client for every tracked leg, not just positions that
+        happen to show up in get_all_positions.  This ensures ExitManager
+        has accurate P&L even for recently opened or thinly-traded options.
+        """
         if self.trading_client is None:
             return
 
@@ -688,14 +696,15 @@ class ExitManager:
             logger.warning(f"Failed to refresh prices from Alpaca: {e}")
             return
 
-        # Also try to get latest quotes for better mid prices
+        # Phase 7: Always fetch latest quotes for ALL tracked legs from data_client
+        # This is the primary source for bid/ask/mid — ensures real-time prices
         quote_map: Dict[str, dict] = {}
-        if self.data_client is not None:
-            all_occ_symbols = set()
-            for pos in self.positions.values():
-                for leg in pos.legs:
-                    all_occ_symbols.add(leg.occ_symbol)
+        all_occ_symbols = set()
+        for pos in self.positions.values():
+            for leg in pos.legs:
+                all_occ_symbols.add(leg.occ_symbol)
 
+        if self.data_client is not None and all_occ_symbols:
             for occ_sym in all_occ_symbols:
                 try:
                     from alpaca.data.requests import OptionLatestQuoteRequest
@@ -705,32 +714,46 @@ class ExitManager:
                         list(quotes.values())[0] if quotes else None
                     )
                     if q:
+                        bid = float(q.bid_price) if q.bid_price else 0.0
+                        ask = float(q.ask_price) if q.ask_price else 0.0
+                        mid = round((bid + ask) / 2.0, 2) if (bid > 0 or ask > 0) else 0.0
                         quote_map[occ_sym] = {
-                            "bid": float(q.bid_price) if q.bid_price else 0.0,
-                            "ask": float(q.ask_price) if q.ask_price else 0.0,
-                            "mid": round(
-                                (float(q.bid_price or 0) + float(q.ask_price or 0)) / 2.0,
-                                2,
-                            ),
+                            "bid": bid,
+                            "ask": ask,
+                            "mid": mid,
                         }
                 except Exception:
                     pass
+        elif self.data_client is None:
+            logger.debug("No data_client — skipping real-time quote refresh")
 
         # Update each tracked position
         for pos in self.positions.values():
             total_pnl = 0.0
+            has_quote_data = False
             for leg in pos.legs:
-                # Update leg prices
+                # Update leg prices from real-time quotes (preferred)
                 if leg.occ_symbol in quote_map:
                     q = quote_map[leg.occ_symbol]
                     leg.current_bid = q["bid"]
                     leg.current_ask = q["ask"]
                     leg.current_price = q["mid"]
+                    has_quote_data = True
 
-                # Compute P&L from Alpaca positions
+                # Compute P&L from Alpaca positions (positions API)
                 if leg.occ_symbol in alpaca_map:
                     ap_data = alpaca_map[leg.occ_symbol]
                     total_pnl += ap_data["unrealized_pl"]
+                elif has_quote_data:
+                    # Position not in Alpaca get_all_positions but we have quotes:
+                    # estimate P&L from entry_price vs current mid
+                    mid = leg.current_price or 0.0
+                    if leg.entry_price > 0 and mid > 0:
+                        if leg.side == "sell":
+                            leg_pnl = (leg.entry_price - mid) * leg.qty * 100
+                        else:
+                            leg_pnl = (mid - leg.entry_price) * leg.qty * 100
+                        total_pnl += leg_pnl
 
             pos.current_pnl = total_pnl
 
@@ -784,12 +807,16 @@ class ExitManager:
             if occ_sym in tracked_occ:
                 continue
 
-            # Orphaned position — create tracking entry
-            underlying = ""
-            for ch in occ_sym:
-                if ch.isdigit():
-                    break
-                underlying += ch
+            # Phase 7: Use centralized OCC parser
+            parsed = parse_occ_symbol(occ_sym)
+            if parsed is not None:
+                underlying = parsed['underlying']
+            else:
+                underlying = ""
+                for ch in occ_sym:
+                    if ch.isdigit():
+                        break
+                    underlying += ch
 
             qty = int(abs(data.get("qty", 0)))
             if qty == 0:
@@ -871,7 +898,14 @@ class ExitManager:
 
     @staticmethod
     def _parse_occ_expiration(occ_symbol: str) -> Optional[date]:
-        """Parse expiration date from OCC symbol."""
+        """Parse expiration date from OCC symbol.
+
+        Phase 7: Delegates to centralized ``parse_occ_symbol`` utility.
+        """
+        parsed = parse_occ_symbol(occ_symbol)
+        if parsed is not None:
+            return parsed['expiry_date']
+        # Fallback: manual extraction
         try:
             idx = 0
             for ch in occ_symbol:

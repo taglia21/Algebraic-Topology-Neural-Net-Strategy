@@ -753,6 +753,12 @@ class VRPStrategy:
     - Compare implied vol (from VIX/option chain) vs realized vol (GARCH/historical)
     - When IV > RV by > vrp_threshold (3%): sell premium (credit spreads/iron condors)
     - When IV < RV: buy premium (market underpricing risk)
+
+    Phase 7 Enhancement — Intraday VRP Signal:
+    - Compute 20-day realized vol from recent closes
+    - Compare to current VIX (implied vol)
+    - If VRP (IV - RV) > 5%, signal is favorable for selling premium
+    - If VRP < 0%, avoid selling premium entirely
     """
     
     def __init__(self):
@@ -760,10 +766,17 @@ class VRPStrategy:
         self.logger = logging.getLogger(f"{__name__}.VRP")
         self.iv_data_manager = IVDataManager()
         self.vrp_threshold = self.config.get("vrp_threshold", 0.03)
+        # Phase 7: Cache the last computed intraday VRP
+        self._last_intraday_vrp: Optional[float] = None
+        self._last_vrp_update: Optional[datetime] = None
     
     async def generate_signals(self, symbols: List[str]) -> List[Signal]:
         """Generate VRP signals for all symbols."""
         signals: List[Signal] = []
+
+        # Phase 7: Compute intraday VRP once per signal scan cycle
+        await self._update_intraday_vrp()
+
         for symbol in symbols:
             try:
                 sig = await self._evaluate(symbol)
@@ -773,8 +786,79 @@ class VRPStrategy:
                 self.logger.debug(f"VRP error {symbol}: {exc}")
         return signals
     
+    async def _update_intraday_vrp(self) -> None:
+        """Compute real-time VRP = VIX (implied vol) - 20d realized vol.
+
+        Phase 7 (Improvement 3): This is a portfolio-level signal that
+        gates all premium-selling activity.  Updated at most once per
+        5 minutes to avoid excessive API calls.
+
+        Stored in ``self._last_intraday_vrp`` (annualised percentage
+        points, e.g. 0.06 = 6 %).
+        """
+        # Rate-limit updates to every 5 minutes
+        now = datetime.now()
+        if (
+            self._last_vrp_update is not None
+            and (now - self._last_vrp_update).total_seconds() < 300
+        ):
+            return
+
+        try:
+            import yfinance as yf
+
+            # --- Implied vol from VIX ---
+            vix_data = yf.download("^VIX", period="5d", interval="1d", progress=False)
+            if vix_data is None or vix_data.empty:
+                self.logger.debug("VRP: VIX data unavailable")
+                return
+            import pandas as pd
+            if isinstance(vix_data.columns, pd.MultiIndex):
+                vix_close = float(vix_data["Close"].iloc[:, 0].dropna().values[-1])
+            else:
+                vix_close = float(vix_data["Close"].dropna().values[-1])
+            implied_vol = vix_close / 100.0  # VIX is in % (e.g. 18 = 18%)
+
+            # --- Realized vol from SPY 20-day log returns ---
+            spy_data = yf.download("SPY", period="60d", interval="1d", progress=False)
+            if spy_data is None or len(spy_data) < 21:
+                return
+            if isinstance(spy_data.columns, pd.MultiIndex):
+                spy_closes = spy_data["Close"].iloc[:, 0].dropna().values.astype(float)
+            else:
+                spy_closes = spy_data["Close"].dropna().values.astype(float)
+            if len(spy_closes) < 21:
+                return
+
+            log_rets = np.diff(np.log(spy_closes[-21:]))
+            realized_vol = float(np.std(log_rets) * np.sqrt(252))
+
+            vrp = implied_vol - realized_vol
+            self._last_intraday_vrp = vrp
+            self._last_vrp_update = now
+
+            self.logger.info(
+                f"Intraday VRP updated: IV(VIX)={implied_vol:.2%}, "
+                f"RV(20d)={realized_vol:.2%}, VRP={vrp:+.2%}"
+            )
+        except Exception as exc:
+            self.logger.debug(f"Intraday VRP update failed: {exc}")
+
+    def get_intraday_vrp(self) -> Optional[float]:
+        """Return the last computed intraday VRP, or None if unavailable.
+
+        Other strategies can call this to gate premium-selling:
+        - VRP > 0.05 (5%): favorable to sell premium
+        - VRP < 0.00 (0%): avoid selling premium
+        """
+        return self._last_intraday_vrp
+    
     async def _evaluate(self, symbol: str) -> Optional[Signal]:
-        """Evaluate VRP for a symbol by comparing IV and RV."""
+        """Evaluate VRP for a symbol by comparing IV and RV.
+
+        Phase 7: Incorporates intraday VRP gate — if VRP < 0%,
+        premium-selling signals are suppressed entirely.
+        """
         iv_rank = self.iv_data_manager.get_iv_rank(symbol)
         if iv_rank is None:
             return None
@@ -790,6 +874,15 @@ class VRPStrategy:
         implied_vol = 0.10 + (iv_rank / 100.0) * 0.50
         
         vrp = implied_vol - garch_rv  # Positive = IV > RV = sell premium
+
+        # Phase 7: Intraday VRP gate — suppress premium-selling when VRP < 0
+        intraday_vrp = self._last_intraday_vrp
+        if intraday_vrp is not None and intraday_vrp < 0.0 and vrp > 0:
+            self.logger.info(
+                f"VRP gate: suppressing SELL for {symbol} — "
+                f"intraday VRP={intraday_vrp:+.2%} < 0%"
+            )
+            return None
         
         # SELL premium: IV exceeds RV by more than threshold
         if vrp > self.vrp_threshold:
@@ -797,6 +890,10 @@ class VRPStrategy:
             
             # Confidence scales with VRP magnitude
             confidence = min(0.50 + (vrp - self.vrp_threshold) * 5.0, 0.95)
+
+            # Phase 7: Boost confidence when intraday VRP is strongly positive
+            if intraday_vrp is not None and intraday_vrp > 0.05:
+                confidence = min(confidence * 1.10, 0.95)
             
             return Signal(
                 symbol=symbol,

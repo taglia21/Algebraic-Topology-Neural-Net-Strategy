@@ -73,6 +73,9 @@ from .exit_manager import ExitManager, ExitAction, ExitReason
 from .gex_analyzer import GammaExposureAnalyzer, GEXProfile
 from src.metrics.daily_performance import DailyPerformanceLogger
 
+# ==== PHASE 7: OCC UTILS, DELTA HEDGING, SMART PRICING ====
+from .occ_utils import parse_occ_symbol, compute_option_delta, smart_limit_price
+
 # ==== PHASE 4: WIRED ORPHANED MODULES ====
 try:
     from .manifold_regime_detector import ManifoldRegimeDetector
@@ -425,12 +428,17 @@ class AutonomousTradingEngine:
 
         synced: list = []
         for occ, data in alpaca_opts.items():
-            # Extract underlying from OCC symbol (letters before first digit)
-            underlying = ""
-            for ch in occ:
-                if ch.isdigit():
-                    break
-                underlying += ch
+            # Phase 7: Use centralized OCC parser instead of inline char loop
+            parsed = parse_occ_symbol(occ)
+            if parsed is not None:
+                underlying = parsed['underlying']
+            else:
+                # Fallback: extract letters before first digit
+                underlying = ""
+                for ch in occ:
+                    if ch.isdigit():
+                        break
+                    underlying += ch
 
             synced.append({
                 "symbol": underlying.upper(),
@@ -446,6 +454,17 @@ class AutonomousTradingEngine:
 
         prev_count = len(self.current_positions)
         self.current_positions = synced
+
+        # Phase 7 (Improvement 2): Register all synced positions with ExitManager
+        # so that positions survive restart with proper exit management
+        try:
+            self.exit_manager.sync_from_alpaca_state(alpaca_opts)
+            self.logger.info(
+                f"ExitManager reconciled: {len(self.exit_manager.positions)} tracked positions"
+            )
+        except Exception as exc:
+            self.logger.warning(f"ExitManager sync on startup failed: {exc}")
+
         if len(synced) != prev_count:
             self.logger.info(
                 f"Position sync: {prev_count} -> {len(synced)} option positions"
@@ -585,25 +604,65 @@ class AutonomousTradingEngine:
             return
         
         # STEP 0b: Refresh portfolio delta from Alpaca positions (issue #10)
+        # Phase 7: Use Black-Scholes delta via occ_utils instead of hardcoded ±50
         try:
             alpaca_positions = self.trade_executor.trading_client.get_all_positions()
             total_delta = 0.0
+            # Fetch underlying prices for delta calculation (cache per underlying)
+            _underlying_prices: dict[str, float] = {}
             for ap in alpaca_positions:
-                # Only count OPTIONS positions toward options engine delta.
                 sym = ap.symbol or ""
                 is_option = len(sym) > 6 and any(c.isdigit() for c in sym[:6])
                 if not is_option:
-                    continue  # skip equity positions
+                    # Equity position (e.g. SPY shares from delta hedging)
+                    # Each share = +1 delta (long) or -1 delta (short)
+                    equity_qty = float(ap.qty) if ap.qty else 0
+                    total_delta += equity_qty  # shares are 1 delta each
+                    continue
 
                 qty = float(ap.qty) if ap.qty else 0
-                # Sign-aware delta:
-                #   Long call  = +delta,  Long put  = -delta
-                #   Short call = -delta,  Short put = +delta
-                # OCC: AAPL260320P00230000 — 'P' or 'C' after date digits
-                is_put = "P" in sym[6:8] or "P" in sym[-9:-8]
-                delta_per_contract = -50 if is_put else 50  # ~0.50 delta
-                total_delta += qty * delta_per_contract
+                parsed = parse_occ_symbol(sym)
+                if parsed is None:
+                    # Fallback: crude ±50 delta per contract
+                    is_put = "P" in sym[6:8] or "P" in sym[-9:-8]
+                    total_delta += qty * (-50 if is_put else 50)
+                    continue
+
+                underlying = parsed['underlying']
+                # Get underlying price (cache across positions)
+                if underlying not in _underlying_prices:
+                    try:
+                        ul_price = float(
+                            getattr(
+                                self.trade_executor.trading_client.get_open_position(underlying),
+                                'current_price', 0
+                            ) or 0
+                        )
+                    except Exception:
+                        ul_price = 0.0
+                    # Fallback: try yfinance for underlying price
+                    if ul_price <= 0:
+                        try:
+                            import yfinance as yf
+                            tick = yf.Ticker(underlying)
+                            ul_price = tick.info.get('regularMarketPrice', 0) or tick.fast_info.get('lastPrice', 0) or 0
+                        except Exception:
+                            ul_price = 0.0
+                    _underlying_prices[underlying] = ul_price
+
+                ul_price = _underlying_prices[underlying]
+                if ul_price > 0:
+                    per_share_delta = compute_option_delta(sym, ul_price)
+                    # qty from Alpaca is signed (+ = long, - = short)
+                    # per_share_delta is per-share, multiply by 100 for per-contract
+                    total_delta += qty * per_share_delta * 100
+                else:
+                    # No underlying price — use crude fallback
+                    is_put = parsed['option_type'] == 'P'
+                    total_delta += qty * (-50 if is_put else 50)
+
             self.portfolio_delta = total_delta
+            self.logger.info(f"Portfolio delta (BS-computed): {total_delta:.1f}")
         except Exception as e:
             self.logger.warning(f"Could not refresh portfolio delta: {e}")
         
@@ -1268,11 +1327,19 @@ class AutonomousTradingEngine:
                 f"limit={resolved.mid_price:.2f}"
             )
 
+            # Phase 7: Smart limit price — lean toward bid for buys, ask for sells
+            order_side = OrderSide.BUY if signal.signal_type == SignalType.BUY else OrderSide.SELL
+            limit = smart_limit_price(
+                bid=resolved.bid,
+                ask=resolved.ask,
+                side=order_side.value,
+            )
+
             result = await self.trade_executor.submit_single_leg_order(
                 option_symbol=resolved.occ_symbol,
-                side=OrderSide.BUY if signal.signal_type == SignalType.BUY else OrderSide.SELL,
+                side=order_side,
                 quantity=position_size.contracts,
-                limit_price=resolved.mid_price,
+                limit_price=limit,
                 client_order_id=self._make_client_order_id(
                     resolved.occ_symbol, cycle_num
                 ),
@@ -1361,30 +1428,37 @@ class AutonomousTradingEngine:
                 if not symbol:
                     continue
                 
-                # Check against Alpaca data — FIXED: use exact symbol prefix match
-                # instead of substring ("A" in "AAPL..." was matching everything)
+                # Check against Alpaca data — Phase 7: use parse_occ_symbol
+                # instead of substring matching (fixes "A" matching "AAPL" etc.)
                 unrealized_pnl = 0.0
                 unrealized_pnl_pct = 0.0
                 
-                # Look for matching option positions using exact underlying prefix
+                # Look for matching option positions using OCC parser
                 for occ_sym, data in alpaca_map.items():
-                    # OCC format: AAPL250620P00150000 — extract underlying correctly
-                    occ_underlying = ''
-                    for ch in occ_sym:
-                        if ch.isdigit():
-                            break
-                        occ_underlying += ch
+                    parsed_occ = parse_occ_symbol(occ_sym)
+                    if parsed_occ is not None:
+                        occ_underlying = parsed_occ['underlying']
+                    else:
+                        occ_underlying = ''
+                        for ch in occ_sym:
+                            if ch.isdigit():
+                                break
+                            occ_underlying += ch
                     if occ_underlying.upper() == symbol.upper():
                         unrealized_pnl += data["unrealized_pl"]
                 
                 # Calculate P&L percentage using real cost_basis from Alpaca
                 total_cost_basis = 0.0
                 for occ_sym, data in alpaca_map.items():
-                    occ_underlying = ''
-                    for ch in occ_sym:
-                        if ch.isdigit():
-                            break
-                        occ_underlying += ch
+                    parsed_occ = parse_occ_symbol(occ_sym)
+                    if parsed_occ is not None:
+                        occ_underlying = parsed_occ['underlying']
+                    else:
+                        occ_underlying = ''
+                        for ch in occ_sym:
+                            if ch.isdigit():
+                                break
+                            occ_underlying += ch
                     if occ_underlying.upper() == symbol.upper():
                         total_cost_basis += abs(data.get("cost_basis", 0.0))
                 
@@ -1460,14 +1534,18 @@ class AutonomousTradingEngine:
                     from datetime import date as _date_cls
                     today = _date_cls.today()
                     for occ_sym in alpaca_map:
-                        occ_underlying = ''
-                        for ch in occ_sym:
-                            if ch.isdigit():
-                                break
-                            occ_underlying += ch
+                        parsed_occ = parse_occ_symbol(occ_sym)
+                        if parsed_occ is not None:
+                            occ_underlying = parsed_occ['underlying']
+                        else:
+                            occ_underlying = ''
+                            for ch in occ_sym:
+                                if ch.isdigit():
+                                    break
+                                occ_underlying += ch
                         if occ_underlying.upper() != (symbol or '').upper():
                             continue
-                        exp_date = self._parse_occ_expiration(occ_sym)
+                        exp_date = parsed_occ['expiry_date'] if parsed_occ else self._parse_occ_expiration(occ_sym)
                         if exp_date is not None:
                             dte = (exp_date - today).days
                             if dte < dte_close_threshold:
@@ -1505,11 +1583,15 @@ class AutonomousTradingEngine:
             try:
                 alpaca_positions = self.trade_executor.trading_client.get_all_positions()
                 for ap in alpaca_positions:
-                    occ_underlying = ''
-                    for ch in ap.symbol:
-                        if ch.isdigit():
-                            break
-                        occ_underlying += ch
+                    parsed_occ_close = parse_occ_symbol(ap.symbol)
+                    if parsed_occ_close is not None:
+                        occ_underlying = parsed_occ_close['underlying']
+                    else:
+                        occ_underlying = ''
+                        for ch in ap.symbol:
+                            if ch.isdigit():
+                                break
+                            occ_underlying += ch
                     if occ_underlying.upper() == (symbol or '').upper():
                         self.logger.info(f"  Closing Alpaca position: {ap.symbol}")
                         try:
@@ -1526,9 +1608,15 @@ class AutonomousTradingEngine:
     async def _check_risk_limits(self) -> bool:
         """Step 6: Verify portfolio risk is within configured limits.
 
+        Also triggers automatic delta hedging when thresholds are breached
+        (Phase 7 — Bug 4 fix).
+
         Returns:
             ``True`` if all limits are satisfied.
         """
+        # Phase 7: Automatic delta hedging with SPY shares
+        await self._auto_delta_hedge()
+
         # Check portfolio delta
         max_delta = self.config["max_portfolio_delta"]
         if abs(self.portfolio_delta) > max_delta:
@@ -1542,7 +1630,68 @@ class AutonomousTradingEngine:
             return False
         
         return True
-    
+
+    # ================================================================== #
+    # PHASE 7: AUTOMATIC DELTA HEDGING
+    # ================================================================== #
+
+    async def _auto_delta_hedge(self) -> None:
+        """Automatically hedge portfolio delta by trading SPY shares.
+
+        When |portfolio_delta| exceeds the configured threshold (default 150),
+        submit a market order for SPY shares to bring delta closer to neutral.
+
+        Safety:
+        - Only hedges once per cycle (no rapid-fire).
+        - Caps hedge size at 200 shares per cycle.
+        - Uses market orders for reliability.
+        - Logs every hedge action.
+        """
+        DELTA_HEDGE_THRESHOLD = self.config.get("auto_delta_hedge_threshold", 150.0)
+        MAX_HEDGE_SHARES = 200  # cap hedge size per cycle
+
+        if abs(self.portfolio_delta) <= DELTA_HEDGE_THRESHOLD:
+            return  # within tolerance
+
+        # Determine hedge direction and size
+        # If delta is +300, we need to sell ~300 shares of SPY to neutralize
+        hedge_shares = -int(round(self.portfolio_delta))  # negate to offset
+        hedge_shares = max(-MAX_HEDGE_SHARES, min(MAX_HEDGE_SHARES, hedge_shares))
+
+        if hedge_shares == 0:
+            return
+
+        side_str = "sell" if hedge_shares < 0 else "buy"
+        abs_shares = abs(hedge_shares)
+
+        self.logger.info(
+            f"🔀 AUTO DELTA HEDGE: portfolio delta={self.portfolio_delta:+.1f} "
+            f"exceeds ±{DELTA_HEDGE_THRESHOLD:.0f} → "
+            f"{side_str.upper()} {abs_shares} shares SPY"
+        )
+
+        try:
+            from alpaca.trading.requests import MarketOrderRequest
+            from alpaca.trading.enums import OrderSide as AlpacaOrderSide, TimeInForce
+
+            order_req = MarketOrderRequest(
+                symbol="SPY",
+                qty=abs_shares,
+                side=AlpacaOrderSide.SELL if hedge_shares < 0 else AlpacaOrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            )
+            order = self.trade_executor.trading_client.submit_order(order_req)
+            self.logger.info(
+                f"✓ Delta hedge order submitted: {side_str} {abs_shares} SPY "
+                f"order_id={order.id}"
+            )
+            await self._send_discord_notification(
+                f"🔀 Delta Hedge: {side_str.upper()} {abs_shares} SPY "
+                f"(portfolio delta was {self.portfolio_delta:+.1f})"
+            )
+        except Exception as exc:
+            self.logger.error(f"Delta hedge order failed: {exc}")
+
     def _has_position(self, symbol: str) -> bool:
         """Check if we have a position in symbol."""
         for pos in self.current_positions:

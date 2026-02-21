@@ -131,6 +131,11 @@ MONITORING_CONFIG = {
     "risk_check_interval": 15,  # Check risk every 15 seconds
     "heartbeat_interval": 300,  # Log heartbeat every 5 minutes
     "regime_update_interval": 3600,  # Update regime every hour
+    # Phase 3 additions
+    "greeks_log_interval": 1,  # Log Greeks every cycle
+    "vix_cache_seconds": 300,  # Cache VIX for 5 min to avoid excess API calls
+    "max_underlying_concentration": 0.30,  # Max 30% of options risk in one underlying
+    "max_positions_per_underlying": 2,  # Max option positions per underlying symbol
 }
 
 

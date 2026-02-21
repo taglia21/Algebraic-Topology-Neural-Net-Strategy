@@ -32,10 +32,13 @@ from typing import Optional, Dict, List, Any
 import numpy as np
 
 # ===========================================================================
-# EMERGENCY OPTIONS ENGINE KILL SWITCH (2026-02-20)
-# Set to True ONLY after risk controls in autonomous_engine.py are verified.
+# OPTIONS ENGINE — Re-enabled after Phases 1-3 hardening (2026-02-21)
+# Guards: Alpaca-sourced position limits, idempotent orders, fixed fractional
+# sizing, reduced universe (8 symbols), earnings gate, IV rank enforcement,
+# bid-ask filter, DTE exit, portfolio heat cap, Greeks monitor, VIX overlay,
+# underlying concentration limit, error resilience w/ 15-min cooldown.
 # ===========================================================================
-OPTIONS_ENGINE_ENABLED = False
+OPTIONS_ENGINE_ENABLED = True
 
 # Ensure project root is on sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent

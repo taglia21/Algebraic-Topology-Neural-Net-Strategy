@@ -40,6 +40,8 @@ from .trade_executor import AlpacaOptionsExecutor, OrderSide, ExecutionResult
 from .iv_data_manager import IVDataManager
 from .contract_resolver import OptionContractResolver, ResolvedContract, ResolvedSpread, ResolvedIronCondor
 from .earnings_gate import should_block_for_earnings
+from .greeks_monitor import PortfolioGreeksMonitor
+from .vix_regime import VIXRegimeOverlay
 
 # ==== NEW ENHANCED MODULES ====
 from .regime_detector import RegimeDetector, MarketRegime
@@ -299,6 +301,10 @@ class AutonomousTradingEngine:
             except Exception as e:
                 self.logger.warning(f"BayesianTuner init failed: {e}")
 
+        # ==== PHASE 3: Greeks monitor + VIX overlay ====
+        self.greeks_monitor = PortfolioGreeksMonitor()
+        self.vix_overlay = VIXRegimeOverlay()
+
         # Backfill IV data on startup
         self._backfill_iv_data()
         
@@ -325,6 +331,51 @@ class AutonomousTradingEngine:
         self.logger.info(f"✓ Phase4 modules: Manifold={self.manifold_detector is not None}, "
                         f"ML={self.adaptive_ml is not None}, GARCH={self.garch_model is not None}, "
                         f"Heston={self.heston_model is not None}, Aggregator={self.signal_aggregator is not None}")
+
+    # ------------------------------------------------------------------ #
+    # PHASE 3: Sync in-memory positions from Alpaca
+    # ------------------------------------------------------------------ #
+
+    def _sync_positions_from_alpaca(self) -> None:
+        """Replace ``self.current_positions`` with actual Alpaca state.
+
+        Called at the START of every ``_trading_cycle`` so that in-memory
+        state matches reality even after a restart, crash, or manual
+        intervention on the Alpaca dashboard.
+        """
+        try:
+            alpaca_opts = self._get_alpaca_option_positions()
+        except Exception as exc:
+            self.logger.warning(f"Position sync failed: {exc}")
+            return
+
+        synced: list = []
+        for occ, data in alpaca_opts.items():
+            # Extract underlying from OCC symbol (letters before first digit)
+            underlying = ""
+            for ch in occ:
+                if ch.isdigit():
+                    break
+                underlying += ch
+
+            synced.append({
+                "symbol": underlying.upper(),
+                "occ_symbol": occ,
+                "qty": data.get("qty", 0),
+                "cost_basis": data.get("cost_basis", 0),
+                "unrealized_pl": data.get("unrealized_pl", 0),
+                "entry_time": datetime.now().isoformat(),   # approx if unknown
+                "signal": None,   # no original signal on restart
+                "position_size": None,
+                "execution": None,
+            })
+
+        prev_count = len(self.current_positions)
+        self.current_positions = synced
+        if len(synced) != prev_count:
+            self.logger.info(
+                f"Position sync: {prev_count} -> {len(synced)} option positions"
+            )
 
     def request_shutdown(self) -> None:
         """Request graceful shutdown of the engine."""
@@ -408,6 +459,9 @@ class AutonomousTradingEngine:
         # --- Daily risk-control reset ---
         self._reset_daily_counters_if_needed()
 
+        # --- PHASE 3: sync in-memory positions from Alpaca ---
+        self._sync_positions_from_alpaca()
+
         self.stats["cycles_run"] += 1
         cycle_num = self.stats["cycles_run"]
         
@@ -460,6 +514,28 @@ class AutonomousTradingEngine:
         
         # STEP 0c (NEW): REGIME DETECTION & WEIGHT OPTIMIZATION
         await self._update_regime_and_weights()
+
+        # STEP 0d (PHASE 3): Portfolio Greeks monitor
+        try:
+            greeks = self.greeks_monitor.get_portfolio_greeks(
+                self.trade_executor.trading_client
+            )
+            self.greeks_monitor.log_greeks(greeks)
+            greeks_ok, violations = self.greeks_monitor.is_within_limits(greeks)
+            if not greeks_ok:
+                for v in violations:
+                    self.logger.warning(f"Greeks violation: {v.message}")
+                self.logger.warning("Greeks limits breached — skipping new entries this cycle")
+        except Exception as e:
+            self.logger.warning(f"Greeks monitor error: {e}")
+            greeks_ok = True  # fail-open so the bot doesn't freeze
+
+        # STEP 0e (PHASE 3): VIX regime overlay
+        vix_snap = self.vix_overlay.get_snapshot()
+        if vix_snap.multiplier <= 0:
+            self.logger.critical(
+                f"VIX CRISIS ({vix_snap.level:.1f}) — halting ALL new entries"
+            )
         
         # STEP 1: SCAN - Generate signals
         signals = await self._scan_for_signals()
@@ -474,11 +550,18 @@ class AutonomousTradingEngine:
         self.logger.info(f"Step 3 (SIZE): {len(sized_signals)} positions sized")
         
         # STEP 4: EXECUTE - Place orders
-        if safe_entry_window():
-            executions = await self._execute_trades(sized_signals)
+        if safe_entry_window() and greeks_ok and vix_snap.multiplier > 0:
+            executions = await self._execute_trades(sized_signals, vix_multiplier=vix_snap.multiplier)
             self.logger.info(f"Step 4 (EXECUTE): {len(executions)} orders submitted")
         else:
-            self.logger.info("Step 4 (EXECUTE): Outside safe entry window, skipping")
+            reason = []
+            if not safe_entry_window():
+                reason.append("outside safe window")
+            if not greeks_ok:
+                reason.append("Greeks limits breached")
+            if vix_snap.multiplier <= 0:
+                reason.append(f"VIX crisis ({vix_snap.level:.1f})")
+            self.logger.info(f"Step 4 (EXECUTE): Skipped — {', '.join(reason)}")
         
         # STEP 5: MANAGE - Monitor positions
         await self._manage_positions()
@@ -613,6 +696,25 @@ class AutonomousTradingEngine:
                     f"Skipping {signal.symbol}: earnings within {sig_dte}-day DTE window"
                 )
                 continue
+
+            # --- PHASE 3: UNDERLYING CONCENTRATION LIMIT ---
+            max_per_underlying = self.config.get("max_positions_per_underlying", 2)
+            count_this_sym = sum(
+                1 for p in self.current_positions
+                if (
+                    isinstance(p, dict)
+                    and (
+                        p.get("symbol") == signal.symbol
+                        or getattr(p.get("signal"), "symbol", None) == signal.symbol
+                    )
+                )
+            )
+            if count_this_sym >= max_per_underlying:
+                self.logger.info(
+                    f"Skipping {signal.symbol}: already {count_this_sym} positions "
+                    f"(max {max_per_underlying} per underlying)"
+                )
+                continue
             
             valid_signals.append(signal)
         
@@ -656,7 +758,7 @@ class AutonomousTradingEngine:
         
         return sized_signals
     
-    async def _execute_trades(self, sized_signals: List[tuple]) -> List[ExecutionResult]:
+    async def _execute_trades(self, sized_signals: List[tuple], *, vix_multiplier: float = 1.0) -> List[ExecutionResult]:
         """Step 4: Resolve signals to real contracts and execute via Alpaca API.
 
         For each (signal, position_size) pair:
@@ -751,6 +853,7 @@ class AutonomousTradingEngine:
                     signal, position_size,
                     held_occ_symbols=held_occ_symbols,
                     cycle_num=cycle_num,
+                    vix_multiplier=vix_multiplier,
                 )
                 if result is not None:
                     # --- Track daily counters on successful submission ---
@@ -804,6 +907,7 @@ class AutonomousTradingEngine:
         self, signal: Signal, position_size,
         held_occ_symbols: set = None,
         cycle_num: int = 0,
+        vix_multiplier: float = 1.0,
     ) -> Optional[ExecutionResult]:
         """Resolve a single signal to real contracts, then execute.
 
@@ -813,6 +917,7 @@ class AutonomousTradingEngine:
             held_occ_symbols: Set of OCC symbols currently held on Alpaca
                               (Alpaca-sourced, survives restarts)
             cycle_num: Current cycle number for idempotent order IDs
+            vix_multiplier: VIX regime size multiplier (0.0 = halt)
 
         Returns:
             ExecutionResult on success/failure, or None if resolution fails.
@@ -820,6 +925,18 @@ class AutonomousTradingEngine:
         if held_occ_symbols is None:
             held_occ_symbols = set()
         target_dte = signal.dte or 30
+
+        # --- PHASE 3: Apply VIX regime multiplier to contracts ---
+        if vix_multiplier < 1.0 and hasattr(position_size, 'contracts'):
+            import math
+            original = position_size.contracts
+            adjusted = max(1, math.floor(original * vix_multiplier))
+            if adjusted != original:
+                self.logger.info(
+                    f"VIX multiplier {vix_multiplier:.1f}x: "
+                    f"{signal.symbol} contracts {original} -> {adjusted}"
+                )
+                position_size.contracts = adjusted
 
         # ---------------------------------------------------------------- #
         # CREDIT SPREAD / PUT SPREAD

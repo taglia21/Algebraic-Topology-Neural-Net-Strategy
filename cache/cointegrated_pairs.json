@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-02-21T19:05:27.113731",
+  "timestamp": "2026-02-21T19:34:48.047850",
   "data_hash": "0cce7bf3c131",
   "n_pairs": 5,
   "pairs": [
@@ -17,7 +17,7 @@
       "adf_stat": -3.8120869408281957,
       "correlation": 0.8785128250572185,
       "kalman_half_life": 2.771737645631745,
-      "last_updated": "2026-02-21T19:05:27.031278",
+      "last_updated": "2026-02-21T19:34:47.960987",
       "is_tradeable": true
     },
     {
@@ -34,7 +34,7 @@
       "adf_stat": -3.710383799996012,
       "correlation": -0.363036283544333,
       "kalman_half_life": 2.820305093490463,
-      "last_updated": "2026-02-21T19:05:26.926162",
+      "last_updated": "2026-02-21T19:34:47.860945",
       "is_tradeable": true
     },
     {
@@ -51,7 +51,7 @@
       "adf_stat": -3.6255216598702433,
       "correlation": 0.21601536312139782,
       "kalman_half_life": 3.376309160900636,
-      "last_updated": "2026-02-21T19:05:26.944644",
+      "last_updated": "2026-02-21T19:34:47.879113",
       "is_tradeable": true
     },
     {
@@ -68,7 +68,7 @@
       "adf_stat": -3.616563818329767,
       "correlation": -0.260119276536467,
       "kalman_half_life": 3.095067992354857,
-      "last_updated": "2026-02-21T19:05:26.964988",
+      "last_updated": "2026-02-21T19:34:47.897380",
       "is_tradeable": true
     },
     {
@@ -85,7 +85,7 @@
       "adf_stat": -3.455753866276759,
       "correlation": 0.12231903255507262,
       "kalman_half_life": 3.0698771069962794,
-      "last_updated": "2026-02-21T19:05:26.907061",
+      "last_updated": "2026-02-21T19:34:47.842649",
       "is_tradeable": true
     }
   ]

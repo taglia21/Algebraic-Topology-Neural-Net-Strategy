@@ -43,38 +43,50 @@ class DynamicWeightOptimizer:
     """
 
     # Preferred weight profiles per regime label.
+    # Updated to include VRP + IV Crush strategies.
     _REGIME_PROFILES: Dict[str, Dict[str, float]] = {
         "bull_low_vol": {
-            "iv_rank": 0.35,
-            "theta_decay": 0.35,
-            "mean_reversion": 0.15,
-            "delta_hedging": 0.15,
+            "iv_rank": 0.20,
+            "theta_decay": 0.20,
+            "mean_reversion": 0.10,
+            "delta_hedging": 0.05,
+            "vrp": 0.35,       # VRP dominant: sell premium in calm bull
+            "iv_crush": 0.10,
         },
         "bull_high_vol": {
-            "iv_rank": 0.30,
-            "theta_decay": 0.25,
-            "mean_reversion": 0.20,
-            "delta_hedging": 0.25,
+            "iv_rank": 0.20,
+            "theta_decay": 0.15,
+            "mean_reversion": 0.15,
+            "delta_hedging": 0.15,
+            "vrp": 0.25,       # Still sell premium but cautious
+            "iv_crush": 0.10,
         },
         "bear_low_vol": {
-            "iv_rank": 0.20,
-            "theta_decay": 0.25,
-            "mean_reversion": 0.35,
-            "delta_hedging": 0.20,
-        },
-        "bear_high_vol": {
             "iv_rank": 0.15,
             "theta_decay": 0.15,
-            "mean_reversion": 0.25,
-            "delta_hedging": 0.45,
+            "mean_reversion": 0.25,  # Mean reversion dominates
+            "delta_hedging": 0.15,
+            "vrp": 0.20,
+            "iv_crush": 0.10,
+        },
+        "bear_high_vol": {
+            "iv_rank": 0.10,
+            "theta_decay": 0.05,
+            "mean_reversion": 0.10,
+            "delta_hedging": 0.45,  # Max hedging in crisis
+            "vrp": 0.25,       # VRP still works (sell rich IV)
+            "iv_crush": 0.05,
         },
     }
 
     _DEFAULT_PROFILE: Dict[str, float] = {
-        "iv_rank": 0.25,
-        "theta_decay": 0.25,
-        "mean_reversion": 0.25,
-        "delta_hedging": 0.25,
+        "iv_rank": 0.17,
+        "theta_decay": 0.17,
+        "mean_reversion": 0.13,
+        "delta_hedging": 0.10,
+        "vrp": 0.25,
+        "iv_crush": 0.08,
+        "vol_divergence": 0.10,
     }
 
     def __init__(

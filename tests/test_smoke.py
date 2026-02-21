@@ -303,6 +303,188 @@ def test_metrics_module():
         check("Prometheus gauges/counters importable", False, str(e))
 
 
+def test_alpha_strategies():
+    """New alpha strategies import and instantiate correctly."""
+    print("\n── Alpha Strategy Tests ──")
+
+    # VRP Strategy
+    try:
+        from src.options.signal_generator import VRPStrategy
+        vrp = VRPStrategy()
+        check("VRPStrategy importable and instantiates", True)
+        check("VRPStrategy has generate_signals method",
+              hasattr(vrp, "generate_signals"))
+        check("VRPStrategy has vrp_threshold",
+              hasattr(vrp, "vrp_threshold") and vrp.vrp_threshold == 0.03,
+              f"got {getattr(vrp, 'vrp_threshold', 'missing')}")
+    except Exception as e:
+        check("VRPStrategy importable and instantiates", False, str(e))
+
+    # IV Crush Strategy
+    try:
+        from src.options.signal_generator import IVCrushStrategy
+        crush = IVCrushStrategy()
+        check("IVCrushStrategy importable and instantiates", True)
+        check("IVCrushStrategy has generate_signals method",
+              hasattr(crush, "generate_signals"))
+        check("IVCrushStrategy has min_iv_rank",
+              hasattr(crush, "min_iv_rank") and crush.min_iv_rank == 80,
+              f"got {getattr(crush, 'min_iv_rank', 'missing')}")
+        check("IVCrushStrategy has historical crush data",
+              hasattr(crush, "_historical_crush") and len(crush._historical_crush) > 0)
+    except Exception as e:
+        check("IVCrushStrategy importable and instantiates", False, str(e))
+
+    # Bayesian confidence combiner
+    try:
+        from src.options.signal_generator import bayesian_combine_confidence
+        check("bayesian_combine_confidence importable", True)
+        # Test with empty list
+        result = bayesian_combine_confidence([])
+        check("bayesian_combine_confidence handles empty input",
+              result == [])
+    except Exception as e:
+        check("bayesian_combine_confidence importable", False, str(e))
+
+
+def test_signal_source_enums():
+    """SignalSource enum has VRP and IV_CRUSH entries."""
+    print("\n── Signal Enums ──")
+    try:
+        from src.options.signal_generator import SignalSource
+        check("SignalSource.VRP exists",
+              hasattr(SignalSource, "VRP") and SignalSource.VRP.value == "vrp")
+        check("SignalSource.IV_CRUSH exists",
+              hasattr(SignalSource, "IV_CRUSH") and SignalSource.IV_CRUSH.value == "iv_crush")
+    except Exception as e:
+        check("SignalSource enums", False, str(e))
+
+
+def test_config_new_params():
+    """New config parameters for alpha improvement exist."""
+    print("\n── Config Params ──")
+    try:
+        from src.options.config import RISK_CONFIG, STRATEGY_WEIGHTS
+
+        check("vrp_threshold == 0.03",
+              RISK_CONFIG.get("vrp_threshold") == 0.03,
+              f"got {RISK_CONFIG.get('vrp_threshold')}")
+        check("iv_crush_min_rank == 80",
+              RISK_CONFIG.get("iv_crush_min_rank") == 80,
+              f"got {RISK_CONFIG.get('iv_crush_min_rank')}")
+        check("iv_crush_min_historical_drop == 0.20",
+              RISK_CONFIG.get("iv_crush_min_historical_drop") == 0.20,
+              f"got {RISK_CONFIG.get('iv_crush_min_historical_drop')}")
+        check("multi_tf_zscore_windows == [10, 20, 50]",
+              RISK_CONFIG.get("multi_tf_zscore_windows") == [10, 20, 50],
+              f"got {RISK_CONFIG.get('multi_tf_zscore_windows')}")
+        check("theta_gamma_min_ratio == 0.5",
+              RISK_CONFIG.get("theta_gamma_min_ratio") == 0.5,
+              f"got {RISK_CONFIG.get('theta_gamma_min_ratio')}")
+        check("signal_convergence_boost == True",
+              RISK_CONFIG.get("signal_convergence_boost") is True,
+              f"got {RISK_CONFIG.get('signal_convergence_boost')}")
+
+        check("STRATEGY_WEIGHTS has 'vrp' key",
+              "vrp" in STRATEGY_WEIGHTS,
+              f"keys: {list(STRATEGY_WEIGHTS.keys())}")
+        check("STRATEGY_WEIGHTS has 'iv_crush' key",
+              "iv_crush" in STRATEGY_WEIGHTS,
+              f"keys: {list(STRATEGY_WEIGHTS.keys())}")
+        check("STRATEGY_WEIGHTS sums to ~1.0",
+              abs(sum(STRATEGY_WEIGHTS.values()) - 1.0) < 0.01,
+              f"sum={sum(STRATEGY_WEIGHTS.values()):.3f}")
+    except Exception as e:
+        check("Config params", False, str(e))
+
+
+def test_signal_generator_wiring():
+    """SignalGenerator has all strategies wired in."""
+    print("\n── SignalGenerator Wiring ──")
+    try:
+        from src.options.signal_generator import SignalGenerator
+        sg = SignalGenerator()
+
+        check("SignalGenerator instantiates", True)
+        check("has vrp_strategy",
+              hasattr(sg, "vrp_strategy"))
+        check("has iv_crush_strategy",
+              hasattr(sg, "iv_crush_strategy"))
+        check("has regime_detector attr",
+              hasattr(sg, "regime_detector"))
+        check("has weight_optimizer attr",
+              hasattr(sg, "weight_optimizer"))
+    except Exception as e:
+        check("SignalGenerator wiring", False, str(e))
+
+
+def test_mean_reversion_multi_tf():
+    """MeanReversionStrategy uses multi-timeframe z-scores."""
+    print("\n── Mean Reversion Multi-TF ──")
+    try:
+        from src.options.signal_generator import MeanReversionStrategy
+        mr = MeanReversionStrategy()
+
+        check("MeanReversionStrategy instantiates", True)
+        check("has z_score_windows attr",
+              hasattr(mr, "z_score_windows"))
+        check("z_score_windows == [10, 20, 50]",
+              mr.z_score_windows == [10, 20, 50],
+              f"got {getattr(mr, 'z_score_windows', 'missing')}")
+        check("has _is_bb_expanding method",
+              hasattr(mr, "_is_bb_expanding") and callable(mr._is_bb_expanding))
+    except Exception as e:
+        check("MeanReversionStrategy multi-TF", False, str(e))
+
+
+def test_theta_decay_bs():
+    """ThetaDecayStrategy uses Black-Scholes probability computation."""
+    print("\n── Theta Decay BS ──")
+    try:
+        from src.options.signal_generator import ThetaDecayStrategy
+        td = ThetaDecayStrategy()
+
+        check("ThetaDecayStrategy instantiates", True)
+        check("has _compute_probability_otm method",
+              hasattr(td, "_compute_probability_otm") and callable(td._compute_probability_otm))
+        check("has _compute_theta_gamma_ratio method",
+              hasattr(td, "_compute_theta_gamma_ratio") and callable(td._compute_theta_gamma_ratio))
+
+        # Sanity check: ATM put with 30 DTE and 25% IV should have ~50% PoP
+        pop = td._compute_probability_otm(100.0, 100.0, 30, 0.25, "put")
+        check("ATM put PoP near 50%",
+              0.40 < pop < 0.60,
+              f"got {pop:.3f}")
+
+        # Theta/gamma ratio for ATM 30 DTE should be positive
+        tg = td._compute_theta_gamma_ratio(100.0, 100.0, 30, 0.25)
+        check("Theta/gamma ratio > 0",
+              tg > 0,
+              f"got {tg:.3f}")
+    except Exception as e:
+        check("ThetaDecayStrategy BS", False, str(e))
+
+
+def test_weight_optimizer_new_strategies():
+    """Weight optimizer profiles include VRP and IV Crush."""
+    print("\n── Weight Optimizer Profiles ──")
+    try:
+        from src.options.weight_optimizer import DynamicWeightOptimizer
+        wo = DynamicWeightOptimizer(
+            strategies=["iv_rank", "theta_decay", "mean_reversion",
+                        "delta_hedging", "vrp", "iv_crush"]
+        )
+        check("DynamicWeightOptimizer accepts 6 strategies", True)
+
+        # Check all regime profiles have VRP
+        for regime, profile in wo._REGIME_PROFILES.items():
+            has_vrp = "vrp" in profile
+            check(f"Regime '{regime}' has 'vrp'", has_vrp)
+
+    except Exception as e:
+        check("Weight optimizer profiles", False, str(e))
+
+
 # ── Run all tests ──────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -323,6 +505,13 @@ if __name__ == "__main__":
     test_volume_check()
     test_bracket_order_structure()
     test_metrics_module()
+    test_alpha_strategies()
+    test_signal_source_enums()
+    test_config_new_params()
+    test_signal_generator_wiring()
+    test_mean_reversion_multi_tf()
+    test_theta_decay_bs()
+    test_weight_optimizer_new_strategies()
 
     print("\n" + "=" * 60)
     total = PASS + FAIL

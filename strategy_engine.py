@@ -111,6 +111,7 @@ class StrategyType(Enum):
     PAIRS = "pairs_trading"
     MEAN_REVERSION = "mean_reversion"
     MOMENTUM = "momentum_regime"
+    VWAP_REVERSION = "vwap_reversion"
 
 
 class SignalDirection(Enum):
@@ -398,6 +399,16 @@ class EngineConfig:
     max_net_beta: float = 0.20          # Keep net beta between -0.2 and +0.2
     min_confidence: float = 0.50        # Minimum confidence to generate a signal
 
+    # --- Phase 5b: VWAP intraday mean reversion ---
+    vwap_enabled: bool = True               # Enable VWAP reversion scanning
+    vwap_lookback: int = 20                 # 20-bar VWAP window
+    vwap_entry_std: float = 1.5             # Enter at 1.5 std devs from VWAP
+    vwap_rsi_oversold: float = 30.0         # RSI confirmation for longs
+    vwap_rsi_overbought: float = 70.0       # RSI confirmation for shorts
+    vwap_stop_mult: float = 2.0             # Stop at 2x the entry distance
+    vwap_max_positions: int = 3             # Max simultaneous VWAP positions
+    vwap_max_hold_days: int = 3             # Short hold — intraday/overnight
+
     # --- Data ---
     min_bars_required: int = 250        # Need at least 250 bars for 200-SMA
 
@@ -449,6 +460,7 @@ class StrategyEngine:
             "pairs_trading": {"wins": 0, "losses": 0, "total_pnl": 0.0},
             "mean_reversion": {"wins": 0, "losses": 0, "total_pnl": 0.0},
             "momentum_regime": {"wins": 0, "losses": 0, "total_pnl": 0.0},
+            "vwap_reversion": {"wins": 0, "losses": 0, "total_pnl": 0.0},
         }
 
         # --- Drawdown tracking ---
@@ -460,6 +472,7 @@ class StrategyEngine:
             "pairs_trading": [],
             "mean_reversion": [],
             "momentum_regime": [],
+            "vwap_reversion": [],
         }
 
         # --- Kalman spread tracker cache (per pair_id) ---
@@ -1107,6 +1120,15 @@ class StrategyEngine:
             mom_signals = []
             logger.info("Momentum skipped — stat-arb strategies have signals")
 
+        # --- Strategy D: VWAP Intraday Mean Reversion (Phase 5b) ---
+        vwap_signals: List[TradeSignal] = []
+        if self.cfg.vwap_enabled:
+            vwap_signals = self._scan_vwap_reversion(
+                price_data, volume_data, ohlcv_data, equity, current_positions, timestamp
+            )
+            all_signals.extend(vwap_signals)
+            logger.info(f"VWAP reversion: {len(vwap_signals)} signals")
+
         # --- Post-processing: apply regime scaling ---
         if regime != "unknown":
             all_signals = [
@@ -1666,6 +1688,179 @@ class StrategyEngine:
                     max_hold_days=self.cfg.mr_max_hold_days,
                 ))
                 mr_count += 1
+
+        return signals
+
+    # ------------------------------------------------------------------
+    # Strategy D: VWAP Intraday Mean Reversion  (Phase 5b)
+    # ------------------------------------------------------------------
+
+    def _scan_vwap_reversion(
+        self,
+        price_data: pd.DataFrame,
+        volume_data: Optional[pd.DataFrame],
+        ohlcv_data: Optional[Dict[str, pd.DataFrame]],
+        equity: float,
+        positions: Dict[str, Any],
+        timestamp: str,
+    ) -> List[TradeSignal]:
+        """
+        VWAP mean-reversion strategy.
+
+        Uses Volume-Weighted Average Price as the "fair value" anchor:
+
+        LONG when:
+          • Price < VWAP − ``vwap_entry_std`` × std
+          • RSI(14) < ``vwap_rsi_oversold``
+
+        SHORT when:
+          • Price > VWAP + ``vwap_entry_std`` × std
+          • RSI(14) > ``vwap_rsi_overbought``
+
+        Target: revert to VWAP
+        Stop: 2× entry distance from VWAP (configurable)
+        Max hold: 3 days (short-duration reversion)
+        """
+        signals: List[TradeSignal] = []
+        vwap_count = sum(
+            1 for s, info in positions.items()
+            if isinstance(info, dict) and info.get("strategy") == "vwap_reversion"
+        )
+
+        for sym in price_data.columns:
+            if sym in positions:
+                continue
+            if vwap_count >= self.cfg.vwap_max_positions:
+                break
+
+            prices = price_data[sym].dropna().values.astype(float)
+            lookback = self.cfg.vwap_lookback
+            if len(prices) < lookback + 5:
+                continue
+
+            current_price = float(prices[-1])
+            if current_price < 10:
+                continue
+
+            # --- Compute VWAP ---
+            window_prices = prices[-lookback:]
+            if volume_data is not None and sym in volume_data.columns:
+                vols = volume_data[sym].dropna().values.astype(float)
+                if len(vols) >= lookback:
+                    window_vols = vols[-lookback:]
+                    total_vol = window_vols.sum()
+                    if total_vol > 0:
+                        vwap = float(np.sum(window_prices * window_vols) / total_vol)
+                    else:
+                        vwap = float(np.mean(window_prices))
+                else:
+                    vwap = float(np.mean(window_prices))
+            else:
+                # Fallback: equal-weight (simple mean)
+                vwap = float(np.mean(window_prices))
+
+            # Standard deviation of price around VWAP
+            deviations = window_prices - vwap
+            vwap_std = float(np.std(deviations))
+            if vwap_std < 1e-6:
+                continue
+
+            distance_from_vwap = current_price - vwap
+            z_vwap = distance_from_vwap / vwap_std
+
+            # RSI confirmation
+            rsi = compute_rsi(prices, 14)
+
+            # ATR for sizing
+            atr = 0.0
+            if ohlcv_data and sym in ohlcv_data:
+                df = ohlcv_data[sym]
+                if all(c in df.columns for c in ['high', 'low', 'close']):
+                    atr = compute_atr(df['high'].values, df['low'].values, df['close'].values, 14)
+            if atr < 1e-6 and len(prices) >= 15:
+                atr = float(np.mean(np.abs(np.diff(prices[-15:]))))
+
+            entry_threshold = self.cfg.vwap_entry_std
+
+            # === LONG: price significantly below VWAP ===
+            if z_vwap < -entry_threshold and rsi < self.cfg.vwap_rsi_oversold:
+                entry_dist = abs(distance_from_vwap)
+                stop_price = round(current_price - self.cfg.vwap_stop_mult * entry_dist, 2)
+                target_price = round(vwap, 2)
+
+                # Confidence: stronger at more extreme deviations
+                conf = min(0.95, 0.50 + 0.15 * (abs(z_vwap) - entry_threshold))
+                conf = max(self.cfg.min_confidence, conf)
+
+                # Risk-based sizing
+                risk_per_share = current_price - stop_price
+                if risk_per_share > 0:
+                    risk_dollars = equity * 0.01
+                    shares = int(risk_dollars / risk_per_share)
+                    size_pct = min(self.cfg.max_position_pct,
+                                   (shares * current_price) / equity if equity > 0 else 0)
+                else:
+                    size_pct = self.cfg.max_position_pct * 0.3
+
+                signals.append(TradeSignal(
+                    symbol=sym,
+                    direction=SignalDirection.LONG,
+                    strategy=StrategyType.VWAP_REVERSION,
+                    confidence=conf,
+                    position_size_pct=size_pct,
+                    entry_price=current_price,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                    strategy_source=(
+                        f"VWAP LONG: ${current_price:.2f} < VWAP ${vwap:.2f} "
+                        f"(z={z_vwap:.2f}), RSI={rsi:.0f}"
+                    ),
+                    z_score=z_vwap,
+                    atr=atr,
+                    rsi=rsi,
+                    timestamp=timestamp,
+                    max_hold_days=self.cfg.vwap_max_hold_days,
+                ))
+                vwap_count += 1
+
+            # === SHORT: price significantly above VWAP ===
+            elif z_vwap > entry_threshold and rsi > self.cfg.vwap_rsi_overbought:
+                entry_dist = abs(distance_from_vwap)
+                stop_price = round(current_price + self.cfg.vwap_stop_mult * entry_dist, 2)
+                target_price = round(vwap, 2)
+
+                conf = min(0.95, 0.50 + 0.15 * (abs(z_vwap) - entry_threshold))
+                conf = max(self.cfg.min_confidence, conf)
+
+                risk_per_share = stop_price - current_price
+                if risk_per_share > 0:
+                    risk_dollars = equity * 0.01
+                    shares = int(risk_dollars / risk_per_share)
+                    size_pct = min(self.cfg.max_position_pct,
+                                   (shares * current_price) / equity if equity > 0 else 0)
+                else:
+                    size_pct = self.cfg.max_position_pct * 0.3
+
+                signals.append(TradeSignal(
+                    symbol=sym,
+                    direction=SignalDirection.SHORT,
+                    strategy=StrategyType.VWAP_REVERSION,
+                    confidence=conf,
+                    position_size_pct=size_pct,
+                    entry_price=current_price,
+                    stop_price=stop_price,
+                    target_price=target_price,
+                    strategy_source=(
+                        f"VWAP SHORT: ${current_price:.2f} > VWAP ${vwap:.2f} "
+                        f"(z={z_vwap:.2f}), RSI={rsi:.0f}"
+                    ),
+                    z_score=z_vwap,
+                    atr=atr,
+                    rsi=rsi,
+                    timestamp=timestamp,
+                    max_hold_days=self.cfg.vwap_max_hold_days,
+                ))
+                vwap_count += 1
 
         return signals
 

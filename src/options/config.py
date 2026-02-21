@@ -61,10 +61,24 @@ RISK_CONFIG: Dict[str, Any] = {
     "z_score_entry": 2.0,  # Enter when z-score exceeds +/-2.0
     "z_score_exit": 0.5,  # Exit when z-score returns to +/-0.5
     "lookback_period": 252,  # 1 year lookback for z-score
+    "multi_tf_zscore_windows": [10, 20, 50],  # Multi-timeframe z-score windows
     
     # Delta hedging
     "delta_hedge_threshold": 25.0,  # Hedge when portfolio delta > +/-25 shares equivalent
     "delta_rebalance_threshold": 10.0,  # Rebalance at +/-10 shares equivalent
+    
+    # Volatility Risk Premium (VRP)
+    "vrp_threshold": 0.03,  # 3% IV-RV spread to trigger VRP strategy
+    
+    # IV Crush strategy
+    "iv_crush_min_rank": 80,  # Min IV rank for IV crush strategy
+    "iv_crush_min_historical_drop": 0.20,  # 20% min historical IV drop
+    
+    # Theta/Gamma efficiency
+    "theta_gamma_min_ratio": 0.5,  # Min theta/gamma ratio for theta decay signals
+    
+    # Signal convergence
+    "signal_convergence_boost": True,  # Enable Bayesian confidence boosting
     
     # Position sizing (fixed-fractional — Kelly removed)
     "fixed_risk_fraction": 0.01,  # 1% of portfolio risked per trade
@@ -82,10 +96,12 @@ RISK_CONFIG: Dict[str, Any] = {
 # ============================================================================
 
 STRATEGY_WEIGHTS: Dict[str, float] = {
-    "iv_rank": 0.35,  # 35% weight to IV rank strategy
-    "theta_decay": 0.30,  # 30% weight to theta strategy
-    "mean_reversion": 0.20,  # 20% weight to mean reversion
-    "delta_hedging": 0.15,  # 15% weight to delta hedging
+    "iv_rank": 0.20,  # 20% weight to IV rank strategy
+    "theta_decay": 0.20,  # 20% weight to theta strategy
+    "mean_reversion": 0.15,  # 15% weight to mean reversion
+    "delta_hedging": 0.10,  # 10% weight to delta hedging
+    "vrp": 0.25,  # 25% weight to VRP (top alpha source)
+    "iv_crush": 0.10,  # 10% weight to IV crush
 }
 
 

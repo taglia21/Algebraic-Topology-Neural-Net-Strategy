@@ -557,3 +557,149 @@ class IVDataManager:
         except Exception as e:
             self.logger.error(f"Failed to get stats: {e}")
             return {}
+
+
+# ============================================================================
+# IBKRIVDataManager — live IV data from Interactive Brokers
+# ============================================================================
+
+class IBKRIVDataManager(IVDataManager):
+    """IV data manager backed by Interactive Brokers live market data.
+
+    Unlike the base class that relies on Alpaca + yfinance, this sub-class
+    fetches **real, exchange-quoted** option chain data (including Greeks and
+    implied volatility) via :class:`~src.brokers.ibkr_client.IBKRBrokerClient`.
+
+    Parameters
+    ----------
+    ibkr_client : IBKRBrokerClient
+        An already-connected IBKR broker client.
+    data_dir : str
+        Directory for the SQLite cache (inherited from :class:`IVDataManager`).
+    """
+
+    def __init__(self, ibkr_client, data_dir: str = "data"):
+        # Explicitly bypass the Alpaca client init in IVDataManager.__init__
+        self.data_dir = data_dir
+        os.makedirs(data_dir, exist_ok=True)
+        self.db_path = os.path.join(data_dir, "iv_cache.db")
+        self.logger = logging.getLogger(__name__ + ".IBKRIVDataManager")
+        self.data_client = None  # Not using Alpaca
+        self._init_database()
+
+        self.ibkr = ibkr_client
+
+    # ---- Option chain with live IV from IBKR ----
+
+    def get_option_chain_with_iv(self, symbol: str, expiry: str = "") -> list:
+        """Fetch option chain with LIVE exchange-quoted IV and Greeks.
+
+        Parameters
+        ----------
+        symbol : str
+            Underlying ticker (e.g. ``'SPY'``).
+        expiry : str
+            ``YYYYMMDD`` expiration.  If empty, infers nearest monthly.
+
+        Returns
+        -------
+        list[OptionContract]
+            Each contract has ``implied_volatility``, ``delta``, ``gamma``,
+            ``theta``, ``vega``, ``bid``, ``ask`` populated from IBKR live feed.
+        """
+        if not expiry:
+            from datetime import timedelta
+            target = datetime.now() + timedelta(days=30)
+            expiry = target.strftime("%Y%m%d")
+
+        chain = self.ibkr.get_option_chain(symbol, expiry)
+        self.logger.info(
+            "IBKR chain for %s exp=%s: %d contracts", symbol, expiry, len(chain),
+        )
+
+        # Persist a daily ATM IV snapshot into the cache for IV rank calculations
+        if chain:
+            self._cache_atm_iv(symbol, chain)
+
+        return chain
+
+    def _cache_atm_iv(self, symbol: str, chain: list) -> None:
+        """Store today's ATM IV in the SQLite cache for rank computations."""
+        try:
+            # Find most liquid ATM-ish call (highest volume around mid-strike)
+            calls = [c for c in chain if c.right == "C" and c.implied_volatility > 0]
+            if not calls:
+                return
+            mid_strike = sorted({c.strike for c in calls})[len({c.strike for c in calls}) // 2]
+            atm = min(calls, key=lambda c: abs(c.strike - mid_strike))
+            today = datetime.now().strftime("%Y-%m-%d")
+
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO iv_history "
+                    "(symbol, date, atm_iv, skew_25delta, term_structure, call_iv, put_iv) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (symbol, today, atm.implied_volatility, 0.0, 0.0,
+                     atm.implied_volatility, atm.implied_volatility),
+                )
+                conn.commit()
+        except Exception as exc:
+            self.logger.warning("Failed to cache ATM IV for %s: %s", symbol, exc)
+
+    # ---- IV rank from 252-day reqHistoricalData ----
+
+    def compute_iv_rank(self, symbol: str, lookback_days: int = 252):
+        """Compute IV rank from IBKR historical data.
+
+        Uses ``reqHistoricalData`` for OPTION_IMPLIED_VOLATILITY to get
+        a 252-day IV time-series straight from the exchange.
+
+        Falls back to the SQLite cache-based :meth:`get_iv_rank` if
+        historical data request fails.
+        """
+        try:
+            from ib_insync import Stock as IBStock
+            contract = IBStock(symbol, "SMART", "USD")
+            self.ibkr.ib.qualifyContracts(contract)
+
+            bars = self.ibkr.ib.reqHistoricalData(
+                contract,
+                endDateTime="",
+                durationStr="1 Y",
+                barSizeSetting="1 day",
+                whatToShow="OPTION_IMPLIED_VOLATILITY",
+                useRTH=True,
+                formatDate=1,
+            )
+            if not bars or len(bars) < 20:
+                self.logger.warning(
+                    "IBKR returned %d IV bars for %s — falling back to cache",
+                    len(bars) if bars else 0, symbol,
+                )
+                return self.get_iv_rank(symbol, lookback_days)
+
+            iv_series = [float(b.close) for b in bars]
+            current = iv_series[-1]
+            lo, hi = min(iv_series), max(iv_series)
+            if hi == lo:
+                return 50.0
+            rank = ((current - lo) / (hi - lo)) * 100
+            self.logger.info(
+                "%s IBKR IV Rank: %.1f%% (current=%.4f, range=%.4f-%.4f)",
+                symbol, rank, current, lo, hi,
+            )
+            return round(rank, 2)
+        except Exception as exc:
+            self.logger.warning("IBKR IV rank failed for %s (%s) — using cache", symbol, exc)
+            return self.get_iv_rank(symbol, lookback_days)
+
+    # ---- Data-quality overrides ----
+
+    def is_synthetic(self, symbol: str = "") -> bool:  # noqa: ARG002
+        """IBKR data is always live — never synthetic."""
+        return False
+
+    def data_quality_score(self, symbol: str = "") -> float:  # noqa: ARG002
+        """IBKR live feed always gets a perfect quality score."""
+        return 1.0

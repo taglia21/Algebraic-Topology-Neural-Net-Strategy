@@ -22,5 +22,8 @@ hmmlearn>=0.3.0
 PyWavelets>=1.4.0
 scipy>=1.11.0
 
+# Interactive Brokers
+ib_insync>=0.9.86
+
 # Monitoring
 prometheus-client>=0.20.0

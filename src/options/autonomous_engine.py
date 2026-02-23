@@ -288,8 +288,37 @@ class AutonomousTradingEngine:
         # Initialize components
         self.signal_generator = SignalGenerator()
         self.position_sizer = MedallionPositionSizer()
-        self.trade_executor = AlpacaOptionsExecutor(paper=paper)
-        self.iv_data_manager = IVDataManager()  # NEW: IV data management
+
+        # ---- Broker selection: IBKR vs Alpaca ----
+        try:
+            from config.config import BROKER as _BROKER, IBKR_HOST, IBKR_PORT, IBKR_ACCOUNT
+        except ImportError:
+            import os as _os
+            _BROKER = _os.getenv("BROKER", "alpaca")
+            IBKR_HOST = _os.getenv("IBKR_HOST", "127.0.0.1")
+            IBKR_PORT = int(_os.getenv("IBKR_PORT", "4002"))
+            IBKR_ACCOUNT = _os.getenv("IBKR_ACCOUNT", "U22452226")
+
+        if _BROKER == "ibkr":
+            try:
+                from src.brokers.ibkr_client import IBKRBrokerClient
+                from .iv_data_manager import IBKRIVDataManager
+                self.ibkr_client = IBKRBrokerClient(
+                    host=IBKR_HOST, port=IBKR_PORT, account=IBKR_ACCOUNT, paper=paper,
+                )
+                self.ibkr_client.connect()
+                self.trade_executor = AlpacaOptionsExecutor(paper=paper)  # still used for options order routing
+                self.iv_data_manager = IBKRIVDataManager(self.ibkr_client)
+                self.logger.info("✓ IBKR broker client active (account=%s)", IBKR_ACCOUNT)
+            except Exception as exc:
+                self.logger.warning("IBKR init failed (%s) — falling back to Alpaca", exc)
+                self.ibkr_client = None
+                self.trade_executor = AlpacaOptionsExecutor(paper=paper)
+                self.iv_data_manager = IVDataManager()
+        else:
+            self.ibkr_client = None
+            self.trade_executor = AlpacaOptionsExecutor(paper=paper)
+            self.iv_data_manager = IVDataManager()  # Alpaca / yfinance path
         
         # Contract resolver — bridges signals to real OCC symbols with live pricing
         self.contract_resolver = OptionContractResolver(

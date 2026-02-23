@@ -54,11 +54,11 @@ COMMANDS = [
     # .env is handled separately below
     (
         "Docker compose up",
-        "cd /opt/trading-bot && docker compose -f deploy/docker-compose.ibkr.yml up -d --build 2>&1 | tail -20",
+        "cd /opt/trading-bot && docker compose --env-file .env -f deploy/docker-compose.ibkr.yml up -d --build 2>&1 | tail -20",
     ),
     (
         "Docker compose ps",
-        "docker compose -f /opt/trading-bot/deploy/docker-compose.ibkr.yml ps",
+        "cd /opt/trading-bot && docker compose --env-file .env -f deploy/docker-compose.ibkr.yml ps",
     ),
 ]
 

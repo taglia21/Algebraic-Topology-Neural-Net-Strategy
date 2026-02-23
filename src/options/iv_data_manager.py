@@ -57,8 +57,14 @@ class IVDataManager:
     - Daily snapshots of ATM IV, skew, term structure
     - 252-day rolling window for IV rank
     - Automatic backfilling of missing data
+    - Tracks synthetic vs real data sources per symbol
     """
-    
+
+    # Tracks which symbols have only synthetic data (set at class level, shared)
+    _synthetic_symbols: set = set()
+    # Tracks per-symbol count of real (non-synthetic) IV data points
+    _real_data_counts: dict = {}
+
     def __init__(self, data_dir: str = "data", api_key: str = None, api_secret: str = None):
         """
         Initialize IV data manager.
@@ -348,6 +354,12 @@ class IVDataManager:
                 f"✓ Backfilled {records_created} days of IV data for {symbol} "
                 f"(ATM IV range: {atm_iv:.2%})"
             )
+            # Track as real data (derived from actual prices, not synthetic)
+            IVDataManager._real_data_counts[symbol.upper()] = (
+                IVDataManager._real_data_counts.get(symbol.upper(), 0) + records_created
+            )
+            # Remove from synthetic set if previously marked
+            IVDataManager._synthetic_symbols.discard(symbol.upper())
             
             return records_created
             
@@ -410,6 +422,8 @@ class IVDataManager:
                 
                 conn.commit()
                 self.logger.info(f"Backfilled {rows_inserted} days of synthetic IV for {symbol}")
+                # Mark this symbol as synthetic
+                IVDataManager._synthetic_symbols.add(symbol.upper())
                 return rows_inserted
                 
         except Exception as e:
@@ -459,6 +473,62 @@ class IVDataManager:
             self.logger.error(f"Failed to get IV history: {e}")
             return []
     
+    def is_synthetic(self, symbol: str) -> bool:
+        """Return True if this symbol's IV data is entirely synthetic/backfilled.
+
+        A symbol is considered synthetic if:
+        1. It was populated via backfill_synthetic_data(), OR
+        2. It has fewer than 30 days of real (non-synthetic) data.
+        """
+        sym = symbol.upper()
+        if sym in IVDataManager._synthetic_symbols:
+            return True
+        real_count = IVDataManager._real_data_counts.get(sym, 0)
+        return real_count < 30
+
+    def data_quality_score(self, symbol: str) -> float:
+        """Return a quality score 0.0-1.0 for this symbol's IV data.
+
+        Factors:
+        - 0.0 if purely synthetic (backfill_synthetic_data)
+        - Scales with number of real data days (30 = 0.5, 252 = 1.0)
+        - Penalised if data is stale (no update in last 3 days)
+        """
+        sym = symbol.upper()
+        if sym in IVDataManager._synthetic_symbols:
+            return 0.0
+
+        # Count real data points from DB
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                lookback = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+                cursor.execute(
+                    "SELECT COUNT(*) FROM iv_history WHERE symbol = ? AND date >= ?",
+                    (sym, lookback),
+                )
+                count = cursor.fetchone()[0]
+                IVDataManager._real_data_counts[sym] = count
+
+                # Check staleness
+                cursor.execute(
+                    "SELECT MAX(date) FROM iv_history WHERE symbol = ?",
+                    (sym,),
+                )
+                latest = cursor.fetchone()[0]
+                stale_penalty = 0.0
+                if latest:
+                    days_since = (datetime.now() - datetime.strptime(latest, '%Y-%m-%d')).days
+                    if days_since > 3:
+                        stale_penalty = min(0.3, days_since * 0.05)
+
+                if count < 20:
+                    return 0.0
+                raw_score = min(1.0, count / 252.0)
+                return max(0.0, raw_score - stale_penalty)
+        except Exception:
+            return 0.0
+
     def get_stats(self) -> Dict:
         """Get database statistics."""
         try:

@@ -716,36 +716,10 @@ class AutonomousTradingEngine:
             self.logger.critical(
                 f"VIX CRISIS ({vix_snap.level:.1f}) — halting ALL new entries"
             )
-        
-        # STEP 1: SCAN - Generate signals
-        signals = await self._scan_for_signals()
-        self.logger.info(f"Step 1 (SCAN): Generated {len(signals)} signals")
-        
-        # STEP 2: FILTER - Remove invalid signals
-        valid_signals = await self._filter_signals(signals)
-        self.logger.info(f"Step 2 (FILTER): {len(valid_signals)} valid signals")
-        
-        # STEP 3: SIZE - Calculate position sizes
-        sized_signals = await self._size_positions(valid_signals)
-        self.logger.info(f"Step 3 (SIZE): {len(sized_signals)} positions sized")
-        
-        # STEP 4: EXECUTE - Place orders
-        if safe_entry_window() and greeks_ok and vix_snap.multiplier > 0 and not self._daily_loss_halt_active:
-            executions = await self._execute_trades(sized_signals, vix_multiplier=vix_snap.multiplier)
-            self.logger.info(f"Step 4 (EXECUTE): {len(executions)} orders submitted")
-        else:
-            reason = []
-            if not safe_entry_window():
-                reason.append("outside safe window")
-            if not greeks_ok:
-                reason.append("Greeks limits breached")
-            if vix_snap.multiplier <= 0:
-                reason.append(f"VIX crisis ({vix_snap.level:.1f})")
-            if self._daily_loss_halt_active:
-                reason.append("daily loss halt active")
-            self.logger.info(f"Step 4 (EXECUTE): Skipped — {', '.join(reason)}")
-        
-        # STEP 5: MANAGE - Monitor positions (PHASE 6: ExitManager-driven)
+
+        # ================================================================
+        # STEP 5 (MANAGE) — run BEFORE new entries so exits free capital
+        # ================================================================
         await self._manage_positions()
         self.logger.info(f"Step 5 (MANAGE): {len(self.current_positions)} positions monitored")
 
@@ -754,6 +728,42 @@ class AutonomousTradingEngine:
 
         # STEP 5b (PHASE 6): Run ExitManager checks on all tracked positions
         await self._run_exit_manager()
+
+        # ================================================================
+        # ENTRY PATH — gated by regime availability
+        # ================================================================
+        if self.current_regime is None:
+            self.logger.warning(
+                "Regime is None after detection — skipping new entries this cycle"
+            )
+        else:
+            # STEP 1: SCAN - Generate signals
+            signals = await self._scan_for_signals()
+            self.logger.info(f"Step 1 (SCAN): Generated {len(signals)} signals")
+            
+            # STEP 2: FILTER - Remove invalid signals
+            valid_signals = await self._filter_signals(signals)
+            self.logger.info(f"Step 2 (FILTER): {len(valid_signals)} valid signals")
+            
+            # STEP 3: SIZE - Calculate position sizes
+            sized_signals = await self._size_positions(valid_signals)
+            self.logger.info(f"Step 3 (SIZE): {len(sized_signals)} positions sized")
+            
+            # STEP 4: EXECUTE - Place orders
+            if safe_entry_window() and greeks_ok and vix_snap.multiplier > 0 and not self._daily_loss_halt_active:
+                executions = await self._execute_trades(sized_signals, vix_multiplier=vix_snap.multiplier)
+                self.logger.info(f"Step 4 (EXECUTE): {len(executions)} orders submitted")
+            else:
+                reason = []
+                if not safe_entry_window():
+                    reason.append("outside safe window")
+                if not greeks_ok:
+                    reason.append("Greeks limits breached")
+                if vix_snap.multiplier <= 0:
+                    reason.append(f"VIX crisis ({vix_snap.level:.1f})")
+                if self._daily_loss_halt_active:
+                    reason.append("daily loss halt active")
+                self.logger.info(f"Step 4 (EXECUTE): Skipped — {', '.join(reason)}")
         
         # STEP 6: CHECK - Verify risk limits
         risk_ok = await self._check_risk_limits()
@@ -934,6 +944,19 @@ class AutonomousTradingEngine:
                     f"⛔ CONCENTRATION: {signal.symbol} exceeds "
                     f"{MAX_UNDERLYING_CONCENTRATION_PCT:.0%} of portfolio "
                     f"— BLOCKING new entry"
+                )
+                continue
+
+            # --- REGIME STRATEGY GATING ---
+            # Only allow strategies appropriate for the current regime.
+            allowed_strategies = self._get_regime_strategies()
+            sig_strategy = getattr(signal, "strategy", "") or ""
+            if sig_strategy and sig_strategy.lower() not in [
+                s.lower() for s in allowed_strategies
+            ]:
+                self.logger.info(
+                    f"Regime gate: blocking {signal.symbol} strategy "
+                    f"'{sig_strategy}' (allowed: {allowed_strategies})"
                 )
                 continue
             

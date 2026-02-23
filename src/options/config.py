@@ -122,6 +122,29 @@ RISK_CONFIG: Dict[str, Any] = {
 
 
 # ============================================================================
+# TRANSACTION COST MODEL
+# ============================================================================
+
+TRANSACTION_COSTS: Dict[str, float] = {
+    "commission_per_contract": 0.65,        # $0.65 per contract (Alpaca/IBKR)
+    "slippage_pct_of_mid": 0.15,           # 15% slippage from mid price
+    "min_expected_edge_after_costs": 0.10,  # 10% minimum profit margin
+}
+
+
+# ============================================================================
+# MINIMUM LIQUIDITY GATES
+# ============================================================================
+
+LIQUIDITY_GATES: Dict[str, Any] = {
+    "min_avg_daily_volume": 1_000_000,     # 1M shares minimum
+    "min_option_open_interest": 500,        # 500 contracts OI minimum
+    "max_bid_ask_spread_abs": 0.10,        # $0.10 max absolute spread
+    "max_bid_ask_spread_pct": 0.05,        # 5% of mid price max spread
+}
+
+
+# ============================================================================
 # STRATEGY WEIGHTS
 # ============================================================================
 
@@ -180,8 +203,8 @@ LOGGING_CONFIG = {
 # ============================================================================
 
 MONITORING_CONFIG = {
-    "signal_scan_interval": 300,  # Scan for signals every 300 seconds (was 60 — too aggressive)
-    "signal_scan_interval_seconds": 300,  # Alias for compatibility
+    "signal_scan_interval": 60,  # Scan for signals every 60 seconds (alpha decays in minutes)
+    "signal_scan_interval_seconds": 60,  # Alias for compatibility
     "position_check_interval": 30,  # Check positions every 30 seconds
     "risk_check_interval": 15,  # Check risk every 15 seconds
     "heartbeat_interval": 300,  # Log heartbeat every 5 minutes

@@ -33,11 +33,14 @@ Usage:
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+
+import yfinance as yf
 
 from .occ_utils import parse_occ_symbol
 
@@ -71,6 +74,7 @@ class ExitReason(Enum):
     MANUAL = "manual"
     ROLL = "roll"
     EMERGENCY = "emergency"
+    VEGA_SPIKE = "vega_spike"
 
 
 class PositionType(Enum):
@@ -195,10 +199,16 @@ class ExitManager:
             "dte_exits": 0,
             "trailing_stop_exits": 0,
             "time_accel_exits": 0,
+            "vega_spike_exits": 0,
             "total_realized_pnl": 0.0,
             "winning_exits": 0,
             "losing_exits": 0,
         }
+
+        # VIX spike tracking for vega exit
+        self._vix_open: Optional[float] = None
+        self._vix_open_date: Optional[date] = None
+        self._last_vix_fetch: float = 0.0
 
         logger.info(
             f"ExitManager initialized: profit_target={self.config['profit_target_pct']:.0%}, "
@@ -371,6 +381,93 @@ class ExitManager:
         return position_id
 
     # ====================================================================
+    # VIX SPIKE EXIT (short-vega protection)
+    # ====================================================================
+
+    def _fetch_vix_level(self) -> Optional[float]:
+        """Fetch current VIX level with 60s cache."""
+        now = time.time()
+        if now - self._last_vix_fetch < 60:
+            return self._vix_open  # Return cached; actual current fetched below
+        try:
+            vix = yf.Ticker("^VIX")
+            hist = vix.history(period="2d", interval="1d")
+            if hist.empty or len(hist) < 1:
+                return None
+            today = date.today()
+            if self._vix_open_date != today:
+                # Set day-open VIX from today's open or prior close
+                if len(hist) >= 2:
+                    self._vix_open = float(hist["Close"].iloc[-2])
+                else:
+                    self._vix_open = float(hist["Open"].iloc[-1])
+                self._vix_open_date = today
+            current_vix = float(hist["Close"].iloc[-1])
+            self._last_vix_fetch = now
+            return current_vix
+        except Exception as e:
+            logger.warning(f"VIX fetch failed: {e}")
+            return None
+
+    def check_vega_spike_exit(self) -> List[ExitAction]:
+        """
+        If VIX spikes >20% intraday, close ALL short-premium positions.
+
+        This is a portfolio-level emergency exit that fires before any
+        per-position logic runs.
+
+        Returns:
+            List of ExitAction for every open short-premium position,
+            or empty list if VIX is calm.
+        """
+        VIX_SPIKE_THRESHOLD = 0.20  # 20% intraday move
+
+        current_vix = self._fetch_vix_level()
+        if current_vix is None or self._vix_open is None:
+            return []
+
+        vix_change_pct = (current_vix - self._vix_open) / self._vix_open
+        if vix_change_pct < VIX_SPIKE_THRESHOLD:
+            return []
+
+        logger.critical(
+            f"VIX SPIKE DETECTED: {self._vix_open:.1f} -> {current_vix:.1f} "
+            f"({vix_change_pct:+.1%}). Closing ALL short-premium positions."
+        )
+
+        actions: List[ExitAction] = []
+        for pos_id, pos in list(self.positions.items()):
+            if pos.is_closed:
+                continue
+            # Short-premium = credit spreads, short puts, short calls, iron condors
+            if pos.position_type in (
+                PositionType.CREDIT_SPREAD,
+                PositionType.IRON_CONDOR,
+            ) or pos.net_credit > 0:
+                action = ExitAction(
+                    position_id=pos_id,
+                    symbol=pos.underlying,
+                    reason=ExitReason.VEGA_SPIKE,
+                    action="close",
+                    urgency="immediate",
+                    details=(
+                        f"VIX spike {vix_change_pct:+.1%} "
+                        f"({self._vix_open:.1f}->{current_vix:.1f}). "
+                        f"Emergency close of short-premium position."
+                    ),
+                    current_pnl=pos.current_pnl,
+                    current_pnl_pct=pos.current_pnl_pct,
+                )
+                actions.append(action)
+                self.stats["vega_spike_exits"] += 1
+                logger.warning(
+                    f"VEGA SPIKE EXIT: {pos.underlying} {pos.position_type.value} "
+                    f"P&L=${pos.current_pnl:.2f}"
+                )
+
+        return actions
+
+    # ====================================================================
     # POSITION MONITORING
     # ====================================================================
 
@@ -388,6 +485,11 @@ class ExitManager:
 
         if not self.positions:
             return actions
+
+        # --- VEGA SPIKE: Portfolio-level emergency exit ---
+        vega_actions = self.check_vega_spike_exit()
+        if vega_actions:
+            return vega_actions  # Skip per-position logic; close everything
 
         # Refresh prices from Alpaca
         await self._refresh_position_prices()

@@ -15,6 +15,7 @@ HOST = "134.209.40.95"
 USER = "root"
 KEY_PATH = "~/.ssh/id_rsa_droplet"
 TIMEOUT = 300  # seconds per command
+BUILD_TIMEOUT = 900  # 15 min for docker build
 
 ENV_CONTENTS = """\
 IBKR_HOST=ib-gateway
@@ -63,21 +64,20 @@ COMMANDS = [
 ]
 
 
-def run_command(client: paramiko.SSHClient, label: str, cmd: str) -> int:
+def run_command(client: paramiko.SSHClient, label: str, cmd: str, timeout: int = TIMEOUT) -> int:
     """Execute a command, stream stdout/stderr, return exit code."""
     print(f"\n{'=' * 60}")
     print(f">>> [{label}]")
     print(f">>> {cmd}")
     print("-" * 60)
 
-    stdin, stdout, stderr = client.exec_command(cmd, timeout=TIMEOUT)
+    _stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
 
-    # Read and print stdout
-    out = stdout.read().decode("utf-8", errors="replace")
-    if out.strip():
-        print(out, end="" if out.endswith("\n") else "\n")
+    # Stream stdout line by line
+    for line in stdout:
+        print(line, end="")
 
-    # Read and print stderr
+    # Print any stderr
     err = stderr.read().decode("utf-8", errors="replace")
     if err.strip():
         print(err, end="" if err.endswith("\n") else "\n")
@@ -121,7 +121,8 @@ def main() -> int:
         print(f"Connected to {HOST}\n")
 
         for label, cmd in COMMANDS:
-            rc = run_command(client, label, cmd)
+            t = BUILD_TIMEOUT if "compose" in cmd and "up" in cmd else TIMEOUT
+            rc = run_command(client, label, cmd, timeout=t)
 
             # Insert .env write after "Create directories" step
             if label == "Create directories":

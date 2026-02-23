@@ -79,18 +79,18 @@ COPY --chown=tradingbot:tradingbot . .
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8080/api/health || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
 # Switch to non-root user
 USER tradingbot
 
 # Expose ports
-# 8080: REST/WebSocket API
-# 8081: Metrics/Prometheus
-EXPOSE 8080 8081
+# 8080: REST/Health API
+# 9091: Metrics/Prometheus
+EXPOSE 8080 9091
 
-# Default command
-CMD ["python", "run_v28_production.py", "--mode=live"]
+# Default entrypoint — IBKR live trading
+ENTRYPOINT ["python", "run_v28_production.py", "--broker", "ibkr", "--live"]
 
 
 # =============================================================================

@@ -190,6 +190,40 @@ except ImportError:
     HAS_DAILY_PERF = False
 
 # ---------------------------------------------------------------------------
+# Phase D: IBKR broker, ML self-training, alpha signals, Sharpe optimizer, health monitor
+# ---------------------------------------------------------------------------
+
+try:
+    from src.brokers.ibkr_client import IBKRBrokerClient
+    HAS_IBKR = True
+except ImportError:
+    HAS_IBKR = False
+
+try:
+    from src.ml.online_learner import OnlineLearner, OnlineLearnerConfig, TradeOutcome
+    HAS_ONLINE_LEARNER = True
+except ImportError:
+    HAS_ONLINE_LEARNER = False
+
+try:
+    from src.options.signal_engine import SignalEngine as AlphaSignalEngine
+    HAS_SIGNAL_ENGINE = True
+except ImportError:
+    HAS_SIGNAL_ENGINE = False
+
+try:
+    from src.optimization.sharpe_optimizer import SharpeOptimizer, SharpeOptimizerConfig
+    HAS_SHARPE_OPT = True
+except ImportError:
+    HAS_SHARPE_OPT = False
+
+try:
+    from src.monitoring.health_monitor import HealthMonitor, HealthMonitorConfig
+    HAS_HEALTH_MONITOR = True
+except ImportError:
+    HAS_HEALTH_MONITOR = False
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
@@ -311,14 +345,16 @@ class EquityEngine:
     MAX_DAILY_TURNOVER_PCT = 0.15   # 15% of equity per day
     MIN_HOLD_BARS = 6               # minimum scan cycles before soft exit
 
-    def __init__(self, mode: str):
+    def __init__(self, mode: str, broker: str = "alpaca"):
         self.mode = mode
-        self.engine = None           # EnhancedTradingEngine (signal source)
-        self.client = None           # AlpacaClient
-        self.risk_guardian = None     # RiskGuardian (safety layer)
-        self.strategy_engine = None  # StrategyEngine (improved MR/pairs/momentum)
-        self.pair_finder = None      # PairFinder (stat-arb)
-        self.factor_monitor = None   # FactorMonitor (factor exposure)
+        self.broker_type = broker      # 'alpaca' or 'ibkr'
+        self.engine = None             # EnhancedTradingEngine (signal source)
+        self.client = None             # AlpacaClient (legacy)
+        self.ibkr_client = None        # IBKRBrokerClient (new)
+        self.risk_guardian = None       # RiskGuardian (safety layer)
+        self.strategy_engine = None    # StrategyEngine (improved MR/pairs/momentum)
+        self.pair_finder = None        # PairFinder (stat-arb)
+        self.factor_monitor = None     # FactorMonitor (factor exposure)
 
         # Phase B: Signal quality + ML + execution
         self.signal_aggregator = None
@@ -331,6 +367,12 @@ class EquityEngine:
         # Phase C: Kalman + TCA + retraining
         self.tca_model = None
         self.retrain_scheduler = None
+
+        # Phase D: IBKR + ML self-training + alpha signals + Sharpe optimizer
+        self.online_learner = None
+        self.alpha_signal_engine = None
+        self.sharpe_optimizer = None
+        self.health_monitor = None
 
         # Phase 6: Daily performance logger
         self.daily_perf = None
@@ -354,17 +396,33 @@ class EquityEngine:
         config = ETEConfig()
         self.engine = EnhancedTradingEngine(config)
 
-        # 2. AlpacaClient for order execution
-        from src.trading.alpaca_client import AlpacaClient
-        self.client = AlpacaClient()
+        # 2. Broker client — IBKR (preferred) or Alpaca (legacy)
+        init_equity = 100_000.0
+        if self.broker_type == "ibkr" and HAS_IBKR:
+            ibkr_host = os.getenv("IBKR_HOST", "127.0.0.1")
+            ibkr_port = int(os.getenv("IBKR_PORT", "4002"))
+            ibkr_account = os.getenv("IBKR_ACCOUNT", "U22452226")
+            self.ibkr_client = IBKRBrokerClient(
+                host=ibkr_host, port=ibkr_port, account=ibkr_account,
+                paper=(self.mode == "paper"),
+            )
+            try:
+                self.ibkr_client.connect()
+                acct = self.ibkr_client.get_account()
+                init_equity = acct.portfolio_value
+                self.logger.info(f"IBKR connected — equity ${init_equity:,.0f}")
+            except Exception as e:
+                self.logger.warning(f"IBKR connect failed: {e} — will retry")
+        else:
+            from src.trading.alpaca_client import AlpacaClient
+            self.client = AlpacaClient()
+            try:
+                acct = self.client.get_account()
+                init_equity = acct.equity
+            except Exception as e:
+                self.logger.warning(f"Alpaca account fetch failed: {e}")
 
         # 3. RiskGuardian — bracket stops, drawdown circuit breaker, regime sizing
-        try:
-            acct = self.client.get_account()
-            init_equity = acct.equity
-        except Exception as e:
-            self.logger.warning(f"Account fetch failed, using default equity: {e}")
-            init_equity = 100_000.0
         self.risk_guardian = RiskGuardian(
             initial_equity=init_equity,
             max_drawdown_pct=0.15,
@@ -501,6 +559,48 @@ class EquityEngine:
             except Exception as e:
                 self.logger.warning(f"DailyPerformanceLogger init failed: {e}")
 
+        # 15. Online Learner (Phase D — self-training ML)
+        if HAS_ONLINE_LEARNER:
+            try:
+                self.online_learner = OnlineLearner()
+                self.online_learner.load_latest_checkpoint()
+                self.logger.info("OnlineLearner loaded (self-training ML)")
+            except Exception as e:
+                self.logger.warning(f"OnlineLearner init failed: {e}")
+
+        # 16. Alpha Signal Engine (Phase D)
+        if HAS_SIGNAL_ENGINE:
+            try:
+                self.alpha_signal_engine = AlphaSignalEngine()
+                self.logger.info("AlphaSignalEngine loaded (VIX/GEX/IV/PC signals)")
+            except Exception as e:
+                self.logger.warning(f"AlphaSignalEngine init failed: {e}")
+
+        # 17. Sharpe Optimizer (Phase D)
+        if HAS_SHARPE_OPT:
+            try:
+                self.sharpe_optimizer = SharpeOptimizer()
+                self.sharpe_optimizer.update_daily_equity(init_equity)
+                self.logger.info("SharpeOptimizer loaded (dynamic sizing + DD breaker)")
+            except Exception as e:
+                self.logger.warning(f"SharpeOptimizer init failed: {e}")
+
+        # 18. Health Monitor (Phase D)
+        if HAS_HEALTH_MONITOR:
+            try:
+                hm_config = HealthMonitorConfig(
+                    ibkr_host=os.getenv("IBKR_HOST", "127.0.0.1"),
+                    ibkr_port=int(os.getenv("IBKR_PORT", "4002")),
+                    discord_webhook=os.getenv("DISCORD_WEBHOOK_MARCUS", ""),
+                )
+                self.health_monitor = HealthMonitor(config=hm_config)
+                if self.ibkr_client:
+                    self.health_monitor.set_ibkr_client(self.ibkr_client)
+                self.health_monitor.start()
+                self.logger.info("HealthMonitor started (60s interval)")
+            except Exception as e:
+                self.logger.warning(f"HealthMonitor init failed: {e}")
+
         _phase_b = []
         if self.signal_aggregator: _phase_b.append("SignalAgg")
         if self.nn_predictor: _phase_b.append("NNPredictor")
@@ -511,10 +611,18 @@ class EquityEngine:
         if self.retrain_scheduler: _phase_b.append("Retrain")
         if self.daily_perf: _phase_b.append("DailyPerf")
 
+        _phase_d = []
+        if self.ibkr_client: _phase_d.append("IBKR")
+        if self.online_learner: _phase_d.append("OnlineLearner")
+        if self.alpha_signal_engine: _phase_d.append("AlphaSignals")
+        if self.sharpe_optimizer: _phase_d.append("SharpeOpt")
+        if self.health_monitor: _phase_d.append("HealthMon")
+
         self.logger.info(
-            f"Equity engine initialized (mode={self.mode}) with "
+            f"Equity engine initialized (mode={self.mode}, broker={self.broker_type}) with "
             f"RiskGuardian + StrategyEngine + anti-churn + universe filter"
             + (f" + Phase B: {', '.join(_phase_b)}" if _phase_b else "")
+            + (f" + Phase D: {', '.join(_phase_d)}" if _phase_d else "")
         )
 
     # ── Anti-churn helpers ──────────────────────────────────────────
@@ -657,7 +765,20 @@ class EquityEngine:
         equity = 100_000.0
         pos_values: dict[str, float] = {}
         existing_symbols: list[str] = []
-        if self.client:
+
+        # IBKR path
+        if self.ibkr_client:
+            try:
+                acct = self.ibkr_client.get_account()
+                equity = acct.portfolio_value
+                for p in self.ibkr_client.get_positions():
+                    if len(p.symbol) <= 6:
+                        pos_values[p.symbol] = abs(p.market_value)
+                        existing_symbols.append(p.symbol)
+            except Exception as e:
+                self.logger.warning(f"IBKR position fetch failed: {e}")
+        # Alpaca fallback
+        elif self.client:
             try:
                 acct = self.client.get_account()
                 equity = acct.equity
@@ -667,6 +788,21 @@ class EquityEngine:
                         existing_symbols.append(p.symbol)
             except Exception as e:
                 self.logger.warning(f"Position fetch failed, using stale data: {e}")
+
+        # Phase D: Sharpe optimizer — update daily equity + drawdown check
+        if self.sharpe_optimizer:
+            self.sharpe_optimizer.update_daily_equity(equity)
+            dd_ok, dd_msg = self.sharpe_optimizer.check_drawdown(equity)
+            if not dd_ok:
+                self.logger.warning(f"🔴 SHARPE DD HALT: {dd_msg}")
+                return
+
+        # Phase D: Online learner circuit breaker
+        if self.online_learner:
+            allowed, cb_reason = self.online_learner.is_trading_allowed()
+            if not allowed:
+                self.logger.warning(f"🔴 ML CIRCUIT BREAKER: {cb_reason}")
+                return
 
         # Update RiskGuardian with current equity
         if self.risk_guardian:
@@ -1398,14 +1534,15 @@ async def _graceful_shutdown(
     logger.info("=== GRACEFUL SHUTDOWN COMPLETE ===")
 
 
-async def main(mode: str):
+async def main(mode: str, broker: str = "alpaca"):
     """Orchestrate equity + options engines with health check and graceful shutdown.
 
     Args:
         mode: 'paper' or 'live'.
+        broker: 'ibkr' or 'alpaca'.
     """
     logger.info("=" * 70)
-    logger.info(f"  V28 PRODUCTION TRADING SYSTEM — mode={mode}")
+    logger.info(f"  V28 PRODUCTION TRADING SYSTEM — mode={mode}, broker={broker}")
     logger.info(f"  PID={os.getpid()}  Python={sys.version.split()[0]}")
     logger.info(f"  Time (ET): {_now_et():%Y-%m-%d %H:%M:%S %Z}")
     logger.info("=" * 70)
@@ -1420,7 +1557,7 @@ async def main(mode: str):
     stop_event = asyncio.Event()
 
     # Initialize engines
-    equity = EquityEngine(mode)
+    equity = EquityEngine(mode, broker=broker)
     options = OptionsEngine(mode)
 
     await equity.initialize()
@@ -1491,6 +1628,29 @@ async def main(mode: str):
     # Phase 4: graceful shutdown
     await _graceful_shutdown(equity, options, stop_event)
 
+    # Phase D: save ML model on shutdown
+    if equity.online_learner:
+        try:
+            equity.online_learner.save_checkpoint(tag="shutdown")
+            logger.info("OnlineLearner checkpoint saved on shutdown")
+        except Exception as e:
+            logger.warning(f"OnlineLearner save failed: {e}")
+
+    # Phase D: stop health monitor
+    if equity.health_monitor:
+        try:
+            equity.health_monitor.stop()
+        except Exception:
+            pass
+
+    # Phase D: disconnect IBKR
+    if equity.ibkr_client:
+        try:
+            equity.ibkr_client.disconnect()
+            logger.info("IBKR disconnected")
+        except Exception:
+            pass
+
     if health_server is not None:
         health_server.close()
         await health_server.wait_closed()
@@ -1506,10 +1666,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="V28 Production Trading System")
     parser.add_argument("--mode", choices=["live", "paper"], default="paper",
                         help="Trading mode (default: paper)")
+    parser.add_argument("--broker", choices=["ibkr", "alpaca"], default="alpaca",
+                        help="Broker backend (default: alpaca)")
+    parser.add_argument("--live", action="store_true",
+                        help="Shortcut for --mode=live")
     args = parser.parse_args()
 
+    # --live flag overrides --mode
+    mode = "live" if args.live else args.mode
+    # BROKER env var overrides CLI
+    broker = os.getenv("BROKER", args.broker)
+
     try:
-        asyncio.run(main(args.mode))
+        asyncio.run(main(mode, broker))
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as exc:

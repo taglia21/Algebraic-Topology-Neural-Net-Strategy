@@ -1,0 +1,109 @@
+# ===========================================================================
+# IBKR Live Trading — Docker Compose
+# ===========================================================================
+# Services:
+#   1. ib-gateway   — IB Gateway for API access (ghcr.io/gnzsnz/ib-gateway)
+#   2. trading-bot  — V28 production trading engine
+#   3. prometheus    — Metrics scraping
+#
+# Usage:
+#   docker compose -f deploy/docker-compose.ibkr.yml up -d --build
+#   docker compose -f deploy/docker-compose.ibkr.yml logs -f trading-bot
+# ===========================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # IB Gateway — headless TWS replacement
+  # ---------------------------------------------------------------------------
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: ib-gateway
+    restart: always
+    environment:
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      TRADING_MODE: ${TRADING_MODE:-live}
+      TWS_ACCEPT_INCOMING: "accept"
+      READ_ONLY_API: "no"
+      VNC_SERVER_PASSWORD: ${VNC_PASSWORD:-}
+    ports:
+      - "4001:4001"   # live API
+      - "4002:4002"   # paper API
+      - "5900:5900"   # VNC (optional, for debugging)
+    volumes:
+      - ib-gateway-data:/opt/ibc/logs
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 4002 || nc -z localhost 4001"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    networks:
+      - ibkr-net
+
+  # ---------------------------------------------------------------------------
+  # Trading Bot — V28 Production Engine
+  # ---------------------------------------------------------------------------
+  trading-bot:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: v28-ibkr-trading-bot
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      - IBKR_HOST=ib-gateway
+      - IBKR_PORT=4002
+      - IBKR_ACCOUNT=${IBKR_ACCOUNT}
+      - BROKER=ibkr
+      - PYTHONPATH=/app
+      - HEALTH_PORT=8080
+      - METRICS_PORT=9091
+    ports:
+      - "8080:8080"   # health endpoint
+      - "9091:9091"   # Prometheus metrics
+    volumes:
+      - ../logs:/app/logs
+      - ../state:/app/state
+      - ../models:/app/models
+    depends_on:
+      ib-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - ibkr-net
+
+  # ---------------------------------------------------------------------------
+  # Prometheus — Metrics
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ibkr-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    networks:
+      - ibkr-net
+
+# ---------------------------------------------------------------------------
+# Networks & Volumes
+# ---------------------------------------------------------------------------
+networks:
+  ibkr-net:
+    driver: bridge
+
+volumes:
+  ib-gateway-data:
+  prometheus-data:

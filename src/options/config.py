@@ -26,14 +26,25 @@ from typing import Dict, Any
 RISK_CONFIG: Dict[str, Any] = {
     # Portfolio-level risk limits
     "max_portfolio_delta": 500.0,  # Maximum net delta exposure (shares equiv; ~7% of $73K)
-    "max_position_size_pct": 0.03,  # 3% max per position (was 5%)
+    "max_position_size_pct": 0.02,  # 2% max per position (was 3%) — FIX 7
     "max_daily_loss_pct": 0.02,  # 2% max daily drawdown (was 3%)
     "max_portfolio_heat": 0.08,  # 8% max total risk exposure (was 10%)
     
     # Position-level risk limits
     "max_risk_per_trade_pct": 0.02,  # 2% max risk per trade
-    "max_contracts_per_trade": 3,  # Maximum contracts per order (was 5)
+    "max_contracts_per_trade": 2,  # Maximum contracts per order (was 3) — FIX 7
     "max_positions": 8,  # Maximum concurrent positions (was 15)
+
+    # ===== EMERGENCY FIX 2026-02-23: PER-SYMBOL CONTRACT CAP =====
+    "max_contracts_per_symbol": 5,  # HARD CAP: never hold > 5 contracts per underlying
+    "max_underlying_concentration_pct": 0.15,  # Max 15% of portfolio in one underlying
+    "daily_loss_halt_usd": -1500,  # Halt new entries when day P&L < -$1,500
+    "daily_loss_emergency_usd": -3000,  # Emergency close ALL when day P&L < -$3,000
+    "signal_dedup_hours": 4,  # Min hours between identical contract signals
+    "position_age_loss_24h_pct": -0.40,  # Close if >24h old and >40% loss
+    "position_age_loss_48h_pct": -0.20,  # Close if >48h old and >20% loss
+    "min_bayesian_confidence": 0.65,  # Minimum Bayesian confidence for entry — FIX 6
+    "max_kelly_fraction": 0.25,  # Quarter Kelly cap — FIX 7
     
     # Time-based parameters
     "min_dte": 7,  # Minimum days to expiration
@@ -46,8 +57,8 @@ RISK_CONFIG: Dict[str, Any] = {
     "stop_loss_pct": 0.50,  # Stop loss at 50% loss (was 75% — too loose for small acct)
     "trailing_stop_pct": 0.50,  # Trailing stop at 50% (was 35%)
     
-    # IV-based thresholds
-    "iv_rank_sell_threshold": 65.0,  # Sell premium above this IV rank (was 50 - too aggressive)
+    # IV-based thresholds — FIX 6: tightened
+    "iv_rank_sell_threshold": 60.0,  # Sell premium above IVR 60 (was 65 — FIX 6)
     "iv_rank_buy_threshold": 25.0,  # Buy options below this IV rank
     "iv_rank_extreme_high": 80.0,  # Extremely high IV
     "iv_rank_extreme_low": 20.0,  # Extremely low IV
@@ -67,8 +78,8 @@ RISK_CONFIG: Dict[str, Any] = {
     "delta_hedge_threshold": 25.0,  # Hedge when portfolio delta > +/-25 shares equivalent
     "delta_rebalance_threshold": 10.0,  # Rebalance at +/-10 shares equivalent
     
-    # Volatility Risk Premium (VRP)
-    "vrp_threshold": 0.03,  # 3% IV-RV spread to trigger VRP strategy
+    # Volatility Risk Premium (VRP) — FIX 6: tightened from 3% to 5 vol pts
+    "vrp_threshold": 0.05,  # 5% IV-RV spread to trigger VRP strategy (was 3%)
     
     # IV Crush strategy
     "iv_crush_min_rank": 80,  # Min IV rank for IV crush strategy
@@ -80,8 +91,10 @@ RISK_CONFIG: Dict[str, Any] = {
     # Signal convergence
     "signal_convergence_boost": True,  # Enable Bayesian confidence boosting
     
-    # Position sizing (fixed-fractional — Kelly removed)
+    # Position sizing (fixed-fractional — Kelly capped at 0.25)
     "fixed_risk_fraction": 0.01,  # 1% of portfolio risked per trade
+    "max_single_position_pct": 0.02,  # Max 2% of portfolio in single position — FIX 7
+    "min_entry_sharpe": 1.5,  # Minimum backtest Sharpe for entry — FIX 7
     
     # Execution
     "order_timeout_seconds": 60,  # Order timeout
@@ -176,7 +189,7 @@ MONITORING_CONFIG = {
     # Phase 3 additions
     "greeks_log_interval": 1,  # Log Greeks every cycle
     "vix_cache_seconds": 300,  # Cache VIX for 5 min to avoid excess API calls
-    "max_underlying_concentration": 0.30,  # Max 30% of options risk in one underlying
+    "max_underlying_concentration": 0.15,  # Max 15% of options risk in one underlying — FIX 5
     "max_positions_per_underlying": 2,  # Max option positions per underlying symbol
 }
 

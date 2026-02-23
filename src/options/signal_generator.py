@@ -332,6 +332,19 @@ class ThetaDecayStrategy:
         if tg_ratio < min_tg:
             self.logger.debug(f"Theta/gamma ratio {tg_ratio:.2f} < {min_tg} for {symbol}")
             return None
+
+        # ===== 2026-02-23 FIX 6: theta/price ratio >= 0.005 (5bp/day) =====
+        if current_price and current_price > 0:
+            T = max(dte / 365.0, 1e-6)
+            d1_val_chk = (np.log(current_price / strike) + (self._risk_free_rate + 0.5 * implied_vol**2) * T) / (implied_vol * np.sqrt(T))
+            phi_d1_chk = float(norm.pdf(d1_val_chk))
+            theta_daily_est = abs(current_price * phi_d1_chk * implied_vol / (2 * np.sqrt(T)) / 365.0)
+            theta_price_ratio = theta_daily_est / current_price
+            if theta_price_ratio < 0.005:
+                self.logger.debug(
+                    f"Theta/price ratio {theta_price_ratio:.4f} < 0.005 for {symbol} — skipping"
+                )
+                return None
         
         # Only signal if PoP meets minimum
         if pop < self.config["min_probability_of_profit"]:
@@ -1178,11 +1191,18 @@ class SignalGenerator:
     """
     Main signal generator combining all strategies with Bayesian confidence
     scoring and regime-adaptive strategy weights.
+
+    2026-02-23 FIX 2: Signal deduplication — tracks last signal time per
+    OCC contract and blocks rapid-fire duplicate signals.
     """
     
     def __init__(self):
         self.config = RISK_CONFIG
         self.logger = logging.getLogger(__name__)
+
+        # 2026-02-23 FIX 2: Signal deduplication state
+        self._last_signal_per_contract: Dict[str, datetime] = {}
+        self._signal_dedup_hours = self.config.get("signal_dedup_hours", 4)
         
         # Initialize strategies
         self.iv_rank_strategy = IVRankStrategy()
@@ -1289,14 +1309,19 @@ class SignalGenerator:
         self,
         symbols: Optional[List[str]] = None,
         portfolio_delta: float = 0.0,
+        current_positions: Optional[List] = None,
     ) -> List[Signal]:
         """
         Generate signals from all strategies with Bayesian confidence
         scoring and regime-adaptive weighting.
-        
+
+        2026-02-23 FIX 2: Accepts ``current_positions`` for dedup and
+        applies signal-level deduplication before returning.
+
         Args:
             symbols: Symbols to analyze (default: universe)
             portfolio_delta: Current portfolio delta for hedging
+            current_positions: Optional list of in-memory positions for dedup
             
         Returns:
             Combined list of signals from all strategies
@@ -1339,9 +1364,155 @@ class SignalGenerator:
         # Apply Bayesian confidence combination
         if self.config.get("signal_convergence_boost", True):
             all_signals = bayesian_combine_confidence(all_signals)
+
+        # ===== 2026-02-23 FIX 2: SIGNAL DEDUPLICATION =====
+        all_signals = self._deduplicate_signals(all_signals, current_positions)
+
+        # ===== 2026-02-23 FIX 6: MOMENTUM FILTER =====
+        all_signals = await self._apply_momentum_filter(all_signals)
         
         # Sort by confidence descending
         all_signals.sort(key=lambda s: s.confidence, reverse=True)
         
         self.logger.info(f"Generated {len(all_signals)} signals across all strategies")
         return all_signals
+
+    # ================================================================== #
+    # 2026-02-23 FIX 2: SIGNAL DEDUPLICATION
+    # ================================================================== #
+
+    def _deduplicate_signals(
+        self, signals: List[Signal], current_positions: Optional[List] = None
+    ) -> List[Signal]:
+        """Remove duplicate signals for the same contract/symbol.
+
+        Rules:
+        1. Minimum ``signal_dedup_hours`` (default 4) between identical signals
+           on the same OCC contract.
+        2. Any signal for a contract already held with qty >= 3 is blocked.
+
+        Args:
+            signals: Raw signal list.
+            current_positions: In-memory position list for qty check.
+
+        Returns:
+            Filtered signal list.
+        """
+        now = datetime.now()
+        deduped: List[Signal] = []
+
+        # Build a map of underlying -> total qty from current_positions
+        held_qty_by_symbol: Dict[str, int] = defaultdict(int)
+        if current_positions:
+            for pos in current_positions:
+                if isinstance(pos, dict):
+                    sig = pos.get("signal")
+                    sym = getattr(sig, "symbol", None) or pos.get("symbol")
+                    ps = pos.get("position_size")
+                    qty = getattr(ps, "contracts", 1) if ps else 1
+                    if sym:
+                        held_qty_by_symbol[sym.upper()] += qty
+
+        for signal in signals:
+            # Key for dedup: prefer OCC symbol, fall back to underlying+strategy
+            key = signal.occ_symbol or f"{signal.symbol}_{signal.strategy}_{signal.signal_type.value}"
+
+            # Rule 1: Time-based dedup
+            last_time = self._last_signal_per_contract.get(key)
+            if last_time is not None:
+                hours_since = (now - last_time).total_seconds() / 3600.0
+                if hours_since < self._signal_dedup_hours:
+                    self.logger.info(
+                        f"DEDUP: Blocking {signal.symbol} ({key}) — "
+                        f"last signal {hours_since:.1f}h ago "
+                        f"(min {self._signal_dedup_hours}h)"
+                    )
+                    continue
+
+            # Rule 2: Block if already holding >= 3 contracts of this underlying
+            sym_upper = (signal.symbol or "").upper()
+            if held_qty_by_symbol.get(sym_upper, 0) >= 3:
+                self.logger.info(
+                    f"DEDUP: Blocking {signal.symbol} — already holding "
+                    f"{held_qty_by_symbol[sym_upper]} contracts (>= 3)"
+                )
+                continue
+
+            # Accept signal and record timestamp
+            self._last_signal_per_contract[key] = now
+            deduped.append(signal)
+
+        removed = len(signals) - len(deduped)
+        if removed > 0:
+            self.logger.info(f"DEDUP: Removed {removed} duplicate signals")
+
+        return deduped
+
+    # ================================================================== #
+    # 2026-02-23 FIX 6: MOMENTUM FILTER
+    # ================================================================== #
+
+    async def _apply_momentum_filter(self, signals: List[Signal]) -> List[Signal]:
+        """Filter signals against the 5-day trend.
+
+        Do NOT buy puts/short against a strong uptrend, and do NOT buy
+        calls/long against a strong downtrend.
+
+        Computes 5-day EMA and checks price vs EMA.
+        """
+        filtered: List[Signal] = []
+        for signal in signals:
+            try:
+                import yfinance as yf
+                data = yf.download(
+                    signal.symbol, period='10d', interval='1d', progress=False
+                )
+                if data is None or len(data) < 5:
+                    filtered.append(signal)
+                    continue
+
+                import pandas as pd
+                if isinstance(data.columns, pd.MultiIndex):
+                    closes = data['Close'].iloc[:, 0].dropna()
+                else:
+                    closes = data['Close'].dropna()
+
+                if len(closes) < 5:
+                    filtered.append(signal)
+                    continue
+
+                ema5 = closes.ewm(span=5, adjust=False).mean()
+                current_price = float(closes.iloc[-1])
+                ema5_val = float(ema5.iloc[-1])
+                trend_up = current_price > ema5_val
+
+                # Block puts against uptrend
+                if signal.signal_type == SignalType.BUY and signal.strategy in (
+                    "put_spread", "straddle", "strangle"
+                ):
+                    # Straddles/strangles are direction-neutral so allow
+                    if signal.strategy == "put_spread" and trend_up:
+                        self.logger.info(
+                            f"MOMENTUM: Blocking put_spread on {signal.symbol} "
+                            f"(price {current_price:.2f} > EMA5 {ema5_val:.2f})"
+                        )
+                        continue
+
+                # Block bullish signals in strong downtrend
+                if signal.signal_type == SignalType.BUY and signal.strategy == "call_spread":
+                    if not trend_up:
+                        self.logger.info(
+                            f"MOMENTUM: Blocking call_spread on {signal.symbol} "
+                            f"(price {current_price:.2f} < EMA5 {ema5_val:.2f})"
+                        )
+                        continue
+
+            except Exception:
+                pass  # On failure, allow signal through
+
+            filtered.append(signal)
+
+        removed = len(signals) - len(filtered)
+        if removed > 0:
+            self.logger.info(f"MOMENTUM FILTER: Removed {removed} signals against trend")
+        return filtered

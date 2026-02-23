@@ -182,7 +182,7 @@ def safe_entry_window() -> bool:
 
 
 # ============================================================================
-# OPTIONS RISK CONTROLS (2026-02-20 emergency fix)
+# OPTIONS RISK CONTROLS (2026-02-23 emergency fix — per-symbol caps + circuit breakers)
 # ============================================================================
 
 MAX_DAILY_OPTIONS_SPEND = 500       # Max $500/day total spend on options
@@ -194,6 +194,12 @@ MIN_OPTION_DELTA = 0.15              # Min |delta| for tradable options
 
 # Phase 4: Daily P&L circuit breaker (realized + unrealized)
 DAILY_PNL_CIRCUIT_BREAKER = -500.0   # Halt if day P&L < -$500
+
+# ===== 2026-02-23 EMERGENCY: Hard per-symbol contract cap =====
+MAX_CONTRACTS_PER_SYMBOL = 5         # NEVER exceed 5 contracts per underlying
+DAILY_LOSS_HALT_USD = -1500.0        # Halt new entries at -$1,500 day P&L
+DAILY_LOSS_EMERGENCY_USD = -3000.0   # Emergency close ALL at -$3,000 day P&L
+MAX_UNDERLYING_CONCENTRATION_PCT = 0.15  # No underlying > 15% of portfolio
 
 
 # ============================================================================
@@ -263,6 +269,21 @@ class AutonomousTradingEngine:
 
         # Phase 4: Daily P&L circuit breaker state
         self._pnl_circuit_breaker_tripped = False
+        # 2026-02-23: Enhanced daily loss circuit breaker
+        self._daily_loss_halt_active = False
+        self._daily_loss_emergency_active = False
+
+        # 2026-02-23 EMERGENCY: Forced exit logger
+        _forced_exit_log = _LOG_DIR / "forced_exits.log"
+        self._forced_exit_logger = logging.getLogger("forced_exits")
+        _fe_handler = logging.handlers.RotatingFileHandler(
+            str(_forced_exit_log), maxBytes=5 * 1024 * 1024, backupCount=3,
+        )
+        _fe_handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s")
+        )
+        self._forced_exit_logger.addHandler(_fe_handler)
+        self._forced_exit_logger.setLevel(logging.INFO)
 
         # Initialize components
         self.signal_generator = SignalGenerator()
@@ -598,6 +619,11 @@ class AutonomousTradingEngine:
             self.logger.critical("Cycle aborted — daily loss stop active.")
             return
 
+        # STEP 0a-ter (2026-02-23): Enhanced daily loss circuit breaker
+        #   -$1,500 → halt new entries, -$3,000 → emergency close ALL
+        if not self._check_enhanced_daily_circuit_breaker():
+            return
+
         # STEP 0a-ter: Phase 4 daily P&L circuit breaker (-$500)
         if not self._check_daily_pnl_circuit_breaker():
             self.logger.critical("Cycle aborted — daily P&L circuit breaker active.")
@@ -704,7 +730,7 @@ class AutonomousTradingEngine:
         self.logger.info(f"Step 3 (SIZE): {len(sized_signals)} positions sized")
         
         # STEP 4: EXECUTE - Place orders
-        if safe_entry_window() and greeks_ok and vix_snap.multiplier > 0:
+        if safe_entry_window() and greeks_ok and vix_snap.multiplier > 0 and not self._daily_loss_halt_active:
             executions = await self._execute_trades(sized_signals, vix_multiplier=vix_snap.multiplier)
             self.logger.info(f"Step 4 (EXECUTE): {len(executions)} orders submitted")
         else:
@@ -715,11 +741,16 @@ class AutonomousTradingEngine:
                 reason.append("Greeks limits breached")
             if vix_snap.multiplier <= 0:
                 reason.append(f"VIX crisis ({vix_snap.level:.1f})")
+            if self._daily_loss_halt_active:
+                reason.append("daily loss halt active")
             self.logger.info(f"Step 4 (EXECUTE): Skipped — {', '.join(reason)}")
         
         # STEP 5: MANAGE - Monitor positions (PHASE 6: ExitManager-driven)
         await self._manage_positions()
         self.logger.info(f"Step 5 (MANAGE): {len(self.current_positions)} positions monitored")
+
+        # STEP 5a (2026-02-23 FIX 3): Force-close aged losing positions
+        await self._force_close_aged_positions()
 
         # STEP 5b (PHASE 6): Run ExitManager checks on all tracked positions
         await self._run_exit_manager()
@@ -745,6 +776,7 @@ class AutonomousTradingEngine:
         signals = await self.signal_generator.generate_all_signals(
             symbols=symbols,
             portfolio_delta=self.portfolio_delta,
+            current_positions=self.current_positions,
         )
         
         self.stats["signals_generated"] += len(signals)
@@ -777,8 +809,8 @@ class AutonomousTradingEngine:
             if signal.signal_type == SignalType.HOLD:
                 continue
             
-            # Skip low confidence - require meaningful signal quality
-            min_confidence = 0.40 if self.paper else 0.50
+            # Skip low confidence — FIX 6: raised minimum to 0.65
+            min_confidence = 0.65
 
             # PHASE 5: Boost confidence using SignalAggregator on the underlying
             if self.signal_aggregator is not None:
@@ -883,6 +915,25 @@ class AutonomousTradingEngine:
                 self.logger.info(
                     f"Skipping {signal.symbol}: already {count_this_sym} positions "
                     f"(max {max_per_underlying} per underlying)"
+                )
+                continue
+
+            # ===== 2026-02-23 FIX 1: HARD PER-SYMBOL CONTRACT CAP =====
+            underlying_contracts = self._count_contracts_for_underlying(signal.symbol)
+            if underlying_contracts >= MAX_CONTRACTS_PER_SYMBOL:
+                self.logger.warning(
+                    f"⛔ PER-SYMBOL CAP: {signal.symbol} already has "
+                    f"{underlying_contracts} contracts (cap={MAX_CONTRACTS_PER_SYMBOL}) "
+                    f"— BLOCKING new entry"
+                )
+                continue
+
+            # ===== 2026-02-23 FIX 5: UNDERLYING CONCENTRATION LIMIT =====
+            if not self._check_underlying_concentration(signal.symbol):
+                self.logger.warning(
+                    f"⛔ CONCENTRATION: {signal.symbol} exceeds "
+                    f"{MAX_UNDERLYING_CONCENTRATION_PCT:.0%} of portfolio "
+                    f"— BLOCKING new entry"
                 )
                 continue
             
@@ -1019,6 +1070,41 @@ class AutonomousTradingEngine:
                 estimated_cost = getattr(position_size, 'max_risk', 0) or 500.0
                 if not self._options_budget_allows(estimated_cost):
                     break
+
+                # ===== 2026-02-23 FIX 1: PER-SYMBOL CONTRACT CAP (double-gate) =====
+                underlying_contracts = self._count_contracts_for_underlying(signal.symbol)
+                if underlying_contracts >= MAX_CONTRACTS_PER_SYMBOL:
+                    self.logger.warning(
+                        f"⛔ PER-SYMBOL CAP (exec): {signal.symbol} has "
+                        f"{underlying_contracts} contracts — BLOCKING order"
+                    )
+                    continue
+                # Cap contracts to not exceed remaining headroom
+                headroom = MAX_CONTRACTS_PER_SYMBOL - underlying_contracts
+                if hasattr(position_size, 'contracts') and position_size.contracts > headroom:
+                    self.logger.info(
+                        f"Reducing {signal.symbol} from {position_size.contracts} "
+                        f"to {headroom} contracts (per-symbol headroom)"
+                    )
+                    position_size.contracts = headroom
+
+                # ===== 2026-02-23 FIX 5: UNDERLYING CONCENTRATION (double-gate) =====
+                if not self._check_underlying_concentration(signal.symbol):
+                    self.logger.warning(
+                        f"⛔ CONCENTRATION (exec): {signal.symbol} exceeds "
+                        f"{MAX_UNDERLYING_CONCENTRATION_PCT:.0%} — BLOCKING"
+                    )
+                    continue
+
+                # ===== 2026-02-23 FIX 7: CAP POSITION SIZE =====
+                max_pos_value = self.portfolio_value * 0.02  # 2% cap
+                if estimated_cost > max_pos_value and max_pos_value > 0:
+                    self.logger.warning(
+                        f"FIX7: {signal.symbol} cost ${estimated_cost:.0f} > "
+                        f"2% cap ${max_pos_value:.0f} — reducing"
+                    )
+                    if hasattr(position_size, 'contracts') and position_size.contracts > 1:
+                        position_size.contracts = max(1, int(max_pos_value / (estimated_cost / position_size.contracts)))
 
                 # Skip if estimated cost exceeds buying power (avoid 40310000 errors)
                 if estimated_cost > available_bp:
@@ -1327,7 +1413,8 @@ class AutonomousTradingEngine:
                 f"limit={resolved.mid_price:.2f}"
             )
 
-            # Phase 7: Smart limit price — lean toward bid for buys, ask for sells
+            # Phase 7 + FIX 8: Smart limit price with cancel/reprice logic
+            # NEVER use market orders for options entries (massive slippage)
             order_side = OrderSide.BUY if signal.signal_type == SignalType.BUY else OrderSide.SELL
             limit = smart_limit_price(
                 bid=resolved.bid,
@@ -1335,14 +1422,14 @@ class AutonomousTradingEngine:
                 side=order_side.value,
             )
 
-            result = await self.trade_executor.submit_single_leg_order(
-                option_symbol=resolved.occ_symbol,
+            result = await self._submit_with_reprice(
+                occ_symbol=resolved.occ_symbol,
                 side=order_side,
                 quantity=position_size.contracts,
-                limit_price=limit,
-                client_order_id=self._make_client_order_id(
-                    resolved.occ_symbol, cycle_num
-                ),
+                initial_limit=limit,
+                bid=resolved.bid,
+                ask=resolved.ask,
+                cycle_num=cycle_num,
             )
 
         # ---------------------------------------------------------------- #
@@ -1706,6 +1793,368 @@ class AutonomousTradingEngine:
             elif isinstance(pos, str) and pos == symbol:
                 return True
         return False
+
+    # ================================================================== #
+    # 2026-02-23 EMERGENCY FIX 1: PER-SYMBOL CONTRACT CAP
+    # ================================================================== #
+
+    def _count_contracts_for_underlying(self, underlying: str) -> int:
+        """Count total contracts held for a given underlying across all positions.
+
+        Queries Alpaca (single source of truth) and sums absolute qty for
+        every option position whose underlying matches.
+
+        Args:
+            underlying: The underlying symbol (e.g. 'DIA', 'SPY').
+
+        Returns:
+            Total contract count for that underlying.
+        """
+        total = 0
+        try:
+            alpaca_opts = self._get_alpaca_option_positions()
+            for occ_sym, data in alpaca_opts.items():
+                parsed = parse_occ_symbol(occ_sym)
+                if parsed is not None:
+                    occ_underlying = parsed['underlying']
+                else:
+                    occ_underlying = ''
+                    for ch in occ_sym:
+                        if ch.isdigit():
+                            break
+                        occ_underlying += ch
+                if occ_underlying.upper() == underlying.upper():
+                    total += int(abs(data.get("qty", 0)))
+        except Exception as e:
+            self.logger.error(f"Error counting contracts for {underlying}: {e}")
+        return total
+
+    # ================================================================== #
+    # 2026-02-23 EMERGENCY FIX 3: POSITION AGE STOPS
+    # ================================================================== #
+
+    async def _force_close_aged_positions(self) -> None:
+        """Force-close long option positions that are old AND losing.
+
+        Rules:
+        - >24h old AND loss >40%: close immediately via market order
+        - >48h old AND loss >20%: close immediately via market order
+
+        All forced closures are logged to logs/forced_exits.log.
+        """
+        now = datetime.now(ZoneInfo("America/New_York"))
+        try:
+            alpaca_positions = self.trade_executor.trading_client.get_all_positions()
+        except Exception as e:
+            self.logger.warning(f"Cannot check aged positions: {e}")
+            return
+
+        for ap in alpaca_positions:
+            sym = ap.symbol or ""
+            # Only options (OCC symbols > 6 chars with digits)
+            if len(sym) <= 6 or not any(c.isdigit() for c in sym[:8]):
+                continue
+
+            qty = float(ap.qty) if ap.qty else 0
+            if qty <= 0:
+                continue  # Only check long positions
+
+            cost_basis = float(ap.cost_basis) if ap.cost_basis else 0
+            unrealized_pl = float(ap.unrealized_pl) if ap.unrealized_pl else 0
+            loss_pct = unrealized_pl / cost_basis if cost_basis > 0 else 0
+
+            # Estimate position age from ExitManager tracked positions
+            entry_time = None
+            for pos in self.exit_manager.positions.values():
+                for leg in pos.legs:
+                    if leg.occ_symbol == sym:
+                        entry_time = pos.entry_time
+                        break
+                if entry_time:
+                    break
+
+            # Fall back to state file entry_time
+            if entry_time is None:
+                for p in self.current_positions:
+                    if isinstance(p, dict):
+                        et_str = p.get("entry_time")
+                        sig = p.get("signal")
+                        occ = getattr(sig, "occ_symbol", None) if sig else None
+                        if occ == sym and et_str:
+                            try:
+                                entry_time = datetime.fromisoformat(et_str)
+                                if entry_time.tzinfo is None:
+                                    entry_time = entry_time.replace(
+                                        tzinfo=ZoneInfo("America/New_York")
+                                    )
+                            except (ValueError, TypeError):
+                                pass
+                            break
+
+            if entry_time is None:
+                continue  # Can't determine age
+
+            age_hours = (now - entry_time).total_seconds() / 3600.0
+            should_close = False
+            reason = ""
+
+            # Rule 1: >24h AND loss >40%
+            if age_hours > 24 and loss_pct < -0.40:
+                should_close = True
+                reason = (
+                    f"AGE STOP (24h/40%): {sym} held {age_hours:.1f}h, "
+                    f"loss={loss_pct:.1%}, P&L=${unrealized_pl:+,.2f}"
+                )
+
+            # Rule 2: >48h AND loss >20%
+            elif age_hours > 48 and loss_pct < -0.20:
+                should_close = True
+                reason = (
+                    f"AGE STOP (48h/20%): {sym} held {age_hours:.1f}h, "
+                    f"loss={loss_pct:.1%}, P&L=${unrealized_pl:+,.2f}"
+                )
+
+            if should_close:
+                self.logger.critical(f"🚨 FORCED EXIT: {reason}")
+                self._forced_exit_logger.info(reason)
+                try:
+                    self.trade_executor.trading_client.close_position(sym)
+                    self.logger.info(f"✓ Force-closed {sym}")
+                    await self._send_discord_notification(f"🚨 FORCED EXIT: {reason}")
+                except Exception as e:
+                    self.logger.error(f"Failed to force-close {sym}: {e}")
+
+    # ================================================================== #
+    # 2026-02-23 EMERGENCY FIX 4: ENHANCED DAILY LOSS CIRCUIT BREAKER
+    # ================================================================== #
+
+    def _check_enhanced_daily_circuit_breaker(self) -> bool:
+        """Enhanced daily P&L circuit breaker with two tiers.
+
+        Tier 1 (-$1,500): Halt all NEW entries for the rest of the day.
+        Tier 2 (-$3,000): Emergency close ALL long option positions.
+
+        Returns:
+            True if trading is allowed, False if halted.
+        """
+        if self._daily_loss_emergency_active:
+            return False  # Already tripped tier 2
+
+        total_day_pnl = self.portfolio_value - self._day_start_portfolio
+
+        # Tier 2: Emergency close ALL at -$3,000
+        if total_day_pnl < DAILY_LOSS_EMERGENCY_USD:
+            self._daily_loss_emergency_active = True
+            self._daily_loss_halt_active = True
+            self.logger.critical(
+                f"🚨🚨 EMERGENCY CIRCUIT BREAKER: day P&L=${total_day_pnl:,.2f} "
+                f"< ${DAILY_LOSS_EMERGENCY_USD:,.0f} — CLOSING ALL POSITIONS"
+            )
+            self._forced_exit_logger.critical(
+                f"EMERGENCY CLOSE ALL: day P&L=${total_day_pnl:,.2f}"
+            )
+            # Emergency close all long option positions
+            try:
+                alpaca_positions = self.trade_executor.trading_client.get_all_positions()
+                for ap in alpaca_positions:
+                    sym = ap.symbol or ""
+                    if len(sym) > 6 and any(c.isdigit() for c in sym[:8]):
+                        qty = float(ap.qty) if ap.qty else 0
+                        if qty > 0:  # Long positions only
+                            self.logger.critical(f"Emergency closing: {sym}")
+                            try:
+                                self.trade_executor.trading_client.close_position(sym)
+                            except Exception as e:
+                                self.logger.error(f"Emergency close failed for {sym}: {e}")
+            except Exception as e:
+                self.logger.error(f"Emergency position query failed: {e}")
+            return False
+
+        # Tier 1: Halt new entries at -$1,500
+        if total_day_pnl < DAILY_LOSS_HALT_USD:
+            self._daily_loss_halt_active = True
+            self.logger.critical(
+                f"🚨 DAILY LOSS HALT: day P&L=${total_day_pnl:,.2f} "
+                f"< ${DAILY_LOSS_HALT_USD:,.0f} — halting new entries"
+            )
+            # Still allow position management (exits), but no new entries
+            # The cycle continues but _execute_trades will be blocked
+            return True  # Allow cycle to continue for exit management
+
+        return True
+
+    # ================================================================== #
+    # 2026-02-23 EMERGENCY FIX 5: UNDERLYING CONCENTRATION LIMIT
+    # ================================================================== #
+
+    def _check_underlying_concentration(self, underlying: str) -> bool:
+        """Check if a new entry in underlying would exceed concentration limit.
+
+        No single underlying can represent > 15% of total portfolio value
+        in options market value.
+
+        Args:
+            underlying: The underlying symbol.
+
+        Returns:
+            True if within limits, False if would exceed.
+        """
+        if self.portfolio_value <= 0:
+            return True
+
+        try:
+            alpaca_opts = self._get_alpaca_option_positions()
+            underlying_mv = 0.0
+            for occ_sym, data in alpaca_opts.items():
+                parsed = parse_occ_symbol(occ_sym)
+                if parsed is not None:
+                    occ_ul = parsed['underlying']
+                else:
+                    occ_ul = ''
+                    for ch in occ_sym:
+                        if ch.isdigit():
+                            break
+                        occ_ul += ch
+                if occ_ul.upper() == underlying.upper():
+                    underlying_mv += abs(data.get("market_value", 0))
+
+            concentration = underlying_mv / self.portfolio_value
+            if concentration >= MAX_UNDERLYING_CONCENTRATION_PCT:
+                self.logger.warning(
+                    f"Concentration check: {underlying} = "
+                    f"${underlying_mv:,.0f} / ${self.portfolio_value:,.0f} "
+                    f"= {concentration:.1%} >= {MAX_UNDERLYING_CONCENTRATION_PCT:.0%}"
+                )
+                return False
+        except Exception as e:
+            self.logger.warning(f"Concentration check failed for {underlying}: {e}")
+        return True
+
+    # ================================================================== #
+    # 2026-02-23 EMERGENCY FIX 8: SMART LIMIT ORDERS WITH REPRICE
+    # ================================================================== #
+
+    async def _submit_with_reprice(
+        self,
+        occ_symbol: str,
+        side: OrderSide,
+        quantity: int,
+        initial_limit: float,
+        bid: float,
+        ask: float,
+        cycle_num: int,
+        max_attempts: int = 3,
+        wait_seconds: int = 60,
+    ) -> ExecutionResult:
+        """Submit a limit order with cancel/reprice logic.
+
+        1. Submit limit at mid price.
+        2. Wait ``wait_seconds`` for fill.
+        3. If not filled, cancel and reprice at mid - $0.01 (buys) or mid + $0.01 (sells).
+        4. Repeat up to ``max_attempts`` times.
+        5. If still unfilled after all attempts, abandon.
+
+        NEVER submits market orders for options.
+
+        Returns:
+            ExecutionResult from the final attempt.
+        """
+        limit = round(initial_limit, 2)
+        result = None
+
+        for attempt in range(1, max_attempts + 1):
+            client_order_id = self._make_client_order_id(
+                occ_symbol, cycle_num * 100 + attempt
+            )
+
+            self.logger.info(
+                f"FIX8: Attempt {attempt}/{max_attempts} — "
+                f"{side.value} {quantity} {occ_symbol} limit=${limit:.2f}"
+            )
+
+            result = await self.trade_executor.submit_single_leg_order(
+                option_symbol=occ_symbol,
+                side=side,
+                quantity=quantity,
+                limit_price=limit,
+                client_order_id=client_order_id,
+            )
+
+            if result is None:
+                # Resolution failure
+                return ExecutionResult(
+                    success=False,
+                    order_id="",
+                    status="resolution_failed",
+                    error_message="submit_single_leg_order returned None",
+                )
+
+            if result.success:
+                # Check if filled or at least accepted
+                order_id = result.order_id
+                if not order_id:
+                    return result
+
+                # Wait for fill
+                filled = await self._wait_for_fill(order_id, wait_seconds)
+                if filled:
+                    self.logger.info(
+                        f"FIX8: Order filled on attempt {attempt}: {occ_symbol}"
+                    )
+                    return result
+
+                # Not filled — cancel and reprice
+                if attempt < max_attempts:
+                    try:
+                        self.trade_executor.trading_client.cancel_order_by_id(order_id)
+                        self.logger.info(f"FIX8: Cancelled unfilled order {order_id}")
+                    except Exception as e:
+                        self.logger.warning(f"FIX8: Cancel failed: {e}")
+
+                    # Reprice: move toward the spread
+                    if side == OrderSide.BUY:
+                        limit = round(limit + 0.01, 2)  # Pay slightly more
+                    else:
+                        limit = round(limit - 0.01, 2)  # Accept slightly less
+                    # Don't exceed ask (for buys) or go below bid (for sells)
+                    if side == OrderSide.BUY:
+                        limit = min(limit, round(ask - 0.01, 2))
+                    else:
+                        limit = max(limit, round(bid + 0.01, 2))
+            else:
+                # Order rejected — don't retry
+                self.logger.warning(
+                    f"FIX8: Order rejected: {result.error_message}"
+                )
+                return result
+
+        self.logger.warning(
+            f"FIX8: Abandoned after {max_attempts} attempts: {occ_symbol}"
+        )
+        return result or ExecutionResult(
+            success=False, order_id="", status="abandoned",
+            error_message=f"Abandoned after {max_attempts} reprice attempts",
+        )
+
+    async def _wait_for_fill(self, order_id: str, timeout_seconds: int) -> bool:
+        """Wait up to timeout_seconds for an order to be filled.
+
+        Returns True if filled, False if still pending.
+        """
+        import time as _time
+        deadline = _time.monotonic() + timeout_seconds
+        while _time.monotonic() < deadline:
+            try:
+                order = self.trade_executor.trading_client.get_order_by_id(order_id)
+                status = str(getattr(order, 'status', '')).lower()
+                if status in ('filled', 'partially_filled'):
+                    return True
+                if status in ('cancelled', 'canceled', 'expired', 'rejected'):
+                    return False
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+        return False
     
     # ------------------------------------------------------------------ #
     # ALPACA-SOURCED POSITION HELPERS (2026-02-21 — survive restarts)
@@ -1807,6 +2256,8 @@ class AutonomousTradingEngine:
             self._day_start_portfolio = self.portfolio_value
             self._executed_occ_symbols.clear()
             self._pnl_circuit_breaker_tripped = False
+            self._daily_loss_halt_active = False
+            self._daily_loss_emergency_active = False
 
     def _daily_loss_exceeded(self) -> bool:
         """Return True if daily P/L has breached the DAILY_LOSS_STOP."""

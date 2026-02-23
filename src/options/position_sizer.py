@@ -93,6 +93,14 @@ class MedallionPositionSizer:
         contracts = max(1, contracts)
         contracts = min(contracts, self.config["max_contracts_per_symbol"])
 
+        # ===== 2026-02-23 FIX 7: Cap at 2% of portfolio =====
+        max_single_pct = self.config.get("max_single_position_pct", 0.02)
+        max_pos_value = portfolio_value * max_single_pct
+        if max_loss_per_contract > 0:
+            max_by_value = max(1, int(max_pos_value / max_loss_per_contract))
+            if contracts > max_by_value:
+                contracts = max_by_value
+
         # Delta constraint
         if position_delta_per_contract != 0:
             max_portfolio_delta = self.config["max_portfolio_delta"]

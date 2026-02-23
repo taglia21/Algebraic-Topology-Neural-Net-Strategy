@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for caching
-COPY requirements.txt requirements-v28.txt ./
+COPY requirements.txt ./
 
 # Create virtual environment and install dependencies
 RUN python -m venv /opt/venv
@@ -29,8 +29,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Upgrade pip and install dependencies
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -r requirements-v28.txt
+    pip install --no-cache-dir -r requirements.txt
 
 
 # =============================================================================

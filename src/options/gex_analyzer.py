@@ -466,3 +466,107 @@ class GammaExposureAnalyzer:
             return int(strike_str) / 1000.0
         except (ValueError, IndexError):
             return None
+
+
+# ---------------------------------------------------------------------------
+# Item 12 — GEXPinningAnalysis (extends GEX module)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PinStrikeResult:
+    """GEX pinning analysis result."""
+    pin_strike: Optional[float] = None       # Strike with highest |GEX|
+    pin_gex: float = 0.0                     # GEX at pin strike
+    spot_price: float = 0.0
+    distance_to_pin_pct: float = 0.0         # |spot - pin| / spot
+    is_pinned: bool = False                  # Within pinning_threshold
+    fade_breakout: bool = False              # True → fade moves away from pin
+    nearby_strikes: List[float] = field(default_factory=list)
+    total_gex: float = 0.0
+
+
+class GEXPinningAnalysis:
+    """Detect GEX pinning and generate fade-breakout signals.
+
+    Pin strike = strike with highest |net_gex|.
+    When spot is within pinning_threshold of pin strike,
+    market is "pinned" and breakouts should be faded.
+
+    Uses the existing GEXProfile from GammaExposureAnalyzer.
+    """
+
+    def __init__(
+        self,
+        pinning_threshold: float = 0.005,  # 0.5%
+        min_gex_for_pin: float = 0.0,      # minimum |GEX| to consider pinning
+    ):
+        """
+        Args:
+            pinning_threshold: Max distance (%) from pin strike to consider pinned.
+            min_gex_for_pin: Minimum absolute GEX to qualify as pin strike.
+        """
+        self.pinning_threshold = pinning_threshold
+        self.min_gex_for_pin = min_gex_for_pin
+
+    def analyze(self, profile: GEXProfile) -> PinStrikeResult:
+        """Analyze a GEX profile for pinning.
+
+        Args:
+            profile: GEXProfile from GammaExposureAnalyzer.
+
+        Returns:
+            PinStrikeResult with pin strike and fade signal.
+        """
+        if not profile.strikes:
+            return PinStrikeResult(spot_price=profile.spot_price)
+
+        # Find strike with highest absolute GEX
+        max_strike = max(profile.strikes, key=lambda s: abs(s.net_gex))
+        pin_strike = max_strike.strike
+        pin_gex = max_strike.net_gex
+
+        # Check if GEX is high enough to cause pinning
+        if abs(pin_gex) < self.min_gex_for_pin:
+            return PinStrikeResult(
+                pin_strike=pin_strike,
+                pin_gex=pin_gex,
+                spot_price=profile.spot_price,
+                distance_to_pin_pct=abs(profile.spot_price - pin_strike) / max(profile.spot_price, 1e-6),
+                is_pinned=False,
+                fade_breakout=False,
+                total_gex=profile.net_gex,
+            )
+
+        # Distance from spot to pin
+        dist_pct = abs(profile.spot_price - pin_strike) / max(profile.spot_price, 1e-6)
+        is_pinned = dist_pct <= self.pinning_threshold
+
+        # Nearby high-GEX strikes (within 2x threshold)
+        nearby = [
+            s.strike for s in profile.strikes
+            if abs(profile.spot_price - s.strike) / max(profile.spot_price, 1e-6) <= 2 * self.pinning_threshold
+            and abs(s.net_gex) > abs(pin_gex) * 0.3  # at least 30% of pin GEX
+        ]
+
+        # Fade breakout when pinned and positive GEX environment
+        # Positive GEX = dealers suppress moves → fade breakouts
+        fade_breakout = is_pinned and profile.is_positive_gex
+
+        result = PinStrikeResult(
+            pin_strike=pin_strike,
+            pin_gex=pin_gex,
+            spot_price=profile.spot_price,
+            distance_to_pin_pct=dist_pct,
+            is_pinned=is_pinned,
+            fade_breakout=fade_breakout,
+            nearby_strikes=sorted(nearby),
+            total_gex=profile.net_gex,
+        )
+
+        if is_pinned:
+            logger.info(
+                "GEX PINNING: spot=%.2f pinned to strike=%.2f (dist=%.2f%%, GEX=%.0f) → fade=%s",
+                profile.spot_price, pin_strike, dist_pct * 100, pin_gex, fade_breakout,
+            )
+
+        return result

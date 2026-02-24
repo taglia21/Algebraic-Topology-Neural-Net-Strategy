@@ -201,6 +201,33 @@ services:
           cpus: '0.25'
           memory: 128M
 
+  # =============================================================================
+  # Live Dashboard — WebSocket real-time push (Tier 3)
+  # =============================================================================
+  live-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: v28-live-dashboard
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+    command: ["python", "-c", "from src.monitoring.live_dashboard import LiveDashboard; d = LiveDashboard(port=8002); d.start()"]
+
+    ports:
+      - "8002:8002"
+
+    networks:
+      - trading-network
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+
 # =============================================================================
 # Networks
 # =============================================================================

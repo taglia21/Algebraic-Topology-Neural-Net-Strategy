@@ -397,3 +397,94 @@ class SpreadStrategyAggregator:
             f"Spread strategies produced {len(merged)} raw → {len(deduped)} deduped signals"
         )
         return deduped
+
+
+# =====================================================================
+# TIER 2 — Adaptive Spread Quoter (Phase I, Item 12)
+# =====================================================================
+
+class AdaptiveSpreadQuoter:
+    """Price credit-spread limit orders at mid + 1-tick improvement.
+
+    Retries up to ``max_retries`` times with 30-second intervals, widening
+    the limit by ``tick_step`` each retry until filled or exhausted.
+
+    Parameters
+    ----------
+    tick_step : float
+        Per-retry price improvement step (default 0.01 = $0.01).
+    retry_interval_seconds : int
+        Seconds between retries (default 30).
+    max_retries : int
+        Maximum number of retry attempts (default 5).
+    """
+
+    def __init__(
+        self,
+        tick_step: float = 0.01,
+        retry_interval_seconds: int = 30,
+        max_retries: int = 5,
+    ):
+        self.tick_step = tick_step
+        self.retry_interval_seconds = retry_interval_seconds
+        self.max_retries = max_retries
+        self.logger = logging.getLogger(f"{__name__}.AdaptiveSpreadQuoter")
+
+    def compute_limit_price(
+        self,
+        bid: float,
+        ask: float,
+        retry: int = 0,
+    ) -> float:
+        """Compute limit price = mid + 1-tick improvement, plus retry widening.
+
+        Args:
+            bid: Best bid.
+            ask: Best ask.
+            retry: Current retry number (0-based).
+
+        Returns:
+            Limit price in USD.
+        """
+        mid = (bid + ask) / 2.0
+        # Start at mid + 1 tick improvement; widen each retry
+        limit = mid + self.tick_step + (self.tick_step * retry)
+        return round(limit, 2)
+
+    async def quote_and_fill(
+        self,
+        symbol: str,
+        bid: float,
+        ask: float,
+        submit_fn=None,
+    ) -> Optional[Dict]:
+        """Attempt to fill a limit order with adaptive pricing.
+
+        Args:
+            symbol: OCC symbol or underlying.
+            bid: Best bid.
+            ask: Best ask.
+            submit_fn: Async callable ``submit_fn(symbol, limit_price)``
+                that returns ``{"filled": bool, ...}``.
+
+        Returns:
+            Fill result dict, or None if all retries exhausted.
+        """
+        for attempt in range(self.max_retries):
+            limit = self.compute_limit_price(bid, ask, retry=attempt)
+            self.logger.info(
+                f"[{symbol}] Attempt {attempt+1}/{self.max_retries}: "
+                f"limit=${limit:.2f} (bid={bid:.2f}, ask={ask:.2f})"
+            )
+
+            if submit_fn is not None:
+                result = await submit_fn(symbol, limit)
+                if result and result.get("filled"):
+                    self.logger.info(f"[{symbol}] Filled at ${limit:.2f}")
+                    return result
+
+            if attempt < self.max_retries - 1:
+                await asyncio.sleep(self.retry_interval_seconds)
+
+        self.logger.warning(f"[{symbol}] Exhausted {self.max_retries} retries")
+        return None

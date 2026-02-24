@@ -137,6 +137,21 @@ except ImportError:
     BayesianTuner = None
     BAYESIAN_AVAILABLE = False
 
+# ==== TIER 2: Kalman filter + HMM regime ====
+try:
+    from .kalman_filter import KalmanPriceFilter
+    KALMAN_AVAILABLE = True
+except ImportError:
+    KalmanPriceFilter = None
+    KALMAN_AVAILABLE = False
+
+try:
+    from .hmm_regime import HMMRegimeClassifier
+    HMM_REGIME_AVAILABLE = True
+except ImportError:
+    HMMRegimeClassifier = None
+    HMM_REGIME_AVAILABLE = False
+
 
 # ============================================================================
 # MARKET HOURS
@@ -408,6 +423,23 @@ class AutonomousTradingEngine:
         # ==== PHASE 3: Greeks monitor + VIX overlay ====
         self.greeks_monitor = PortfolioGreeksMonitor()
         self.vix_overlay = VIXRegimeOverlay()
+
+        # ==== TIER 2: Kalman filter + HMM regime ====
+        self.kalman_filter = None
+        if KALMAN_AVAILABLE:
+            try:
+                self.kalman_filter = KalmanPriceFilter()
+                self.logger.info("✓ KalmanPriceFilter loaded (Q=0.01, R=1.0)")
+            except Exception as e:
+                self.logger.warning(f"KalmanPriceFilter init failed: {e}")
+
+        self.hmm_regime_classifier = None
+        if HMM_REGIME_AVAILABLE:
+            try:
+                self.hmm_regime_classifier = HMMRegimeClassifier()
+                self.logger.info("✓ HMMRegimeClassifier loaded (3-state)")
+            except Exception as e:
+                self.logger.warning(f"HMMRegimeClassifier init failed: {e}")
 
         # ==== PHASE 6: Exit Manager, GEX, Daily P&L ====
         exit_config = {

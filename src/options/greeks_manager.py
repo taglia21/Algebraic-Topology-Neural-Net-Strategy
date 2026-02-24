@@ -517,3 +517,177 @@ class GreeksManager:
         lines.append(f"\n{portfolio}")
         
         return "\n".join(lines)
+
+
+# ============================================================================
+# TIER 2: VegaHedger (Phase J, Item 14)
+# ============================================================================
+
+class VegaHedger:
+    """Monitor net vega and alert/auto-reduce when it exceeds thresholds.
+
+    Thresholds:
+      - warn_threshold: $500 → Discord alert
+      - critical_threshold: $1 000 → auto-reduce (close most vega-heavy position)
+      - floor: -$200 → alert when short-vega gets too extreme
+
+    Parameters
+    ----------
+    warn_threshold : float
+        Net vega dollar value that triggers a warning (default 500).
+    critical_threshold : float
+        Net vega dollar value that triggers auto-reduce (default 1000).
+    floor_threshold : float
+        Minimum net vega before alert (default -200).
+    """
+
+    def __init__(
+        self,
+        warn_threshold: float = 500.0,
+        critical_threshold: float = 1000.0,
+        floor_threshold: float = -200.0,
+    ):
+        self.warn_threshold = warn_threshold
+        self.critical_threshold = critical_threshold
+        self.floor_threshold = floor_threshold
+        self.logger = logging.getLogger(f"{__name__}.VegaHedger")
+
+    def evaluate(
+        self,
+        net_vega: float,
+    ) -> Dict[str, object]:
+        """Evaluate vega exposure and return action recommendation.
+
+        Args:
+            net_vega: Portfolio net vega in USD.
+
+        Returns:
+            Dict with keys ``action`` ("ok" | "warn" | "reduce"),
+            ``message``, and ``net_vega``.
+        """
+        result: Dict[str, object] = {"net_vega": net_vega, "action": "ok", "message": ""}
+
+        if abs(net_vega) >= self.critical_threshold:
+            result["action"] = "reduce"
+            result["message"] = (
+                f"CRITICAL: Net vega ${net_vega:+,.0f} exceeds "
+                f"±${self.critical_threshold:,.0f} — auto-reduce needed"
+            )
+            self.logger.warning(result["message"])
+        elif net_vega >= self.warn_threshold:
+            result["action"] = "warn"
+            result["message"] = (
+                f"WARNING: Net vega ${net_vega:+,.0f} exceeds "
+                f"warn threshold ${self.warn_threshold:,.0f}"
+            )
+            self.logger.warning(result["message"])
+        elif net_vega <= self.floor_threshold:
+            result["action"] = "warn"
+            result["message"] = (
+                f"WARNING: Net vega ${net_vega:+,.0f} below "
+                f"floor ${self.floor_threshold:,.0f}"
+            )
+            self.logger.warning(result["message"])
+        else:
+            result["message"] = f"Vega OK: ${net_vega:+,.0f}"
+
+        return result
+
+
+# ============================================================================
+# TIER 2: GammaScalpRebalancer (Phase J, Item 15)
+# ============================================================================
+
+class GammaScalpRebalancer:
+    """Rebalance delta every ``interval_minutes`` when drift > threshold.
+
+    Gamma scalping strategy: hold long-gamma positions and re-hedge delta
+    when it drifts more than ``delta_drift_threshold`` from neutral.
+
+    Parameters
+    ----------
+    interval_minutes : int
+        Minimum minutes between rebalances (default 30).
+    delta_drift_threshold : float
+        Absolute delta drift that triggers a rebalance (default 2.0).
+    hedge_symbol : str
+        Underlying symbol used for delta hedging (default "SPY").
+    """
+
+    def __init__(
+        self,
+        interval_minutes: int = 30,
+        delta_drift_threshold: float = 2.0,
+        hedge_symbol: str = "SPY",
+    ):
+        self.interval_minutes = interval_minutes
+        self.delta_drift_threshold = delta_drift_threshold
+        self.hedge_symbol = hedge_symbol
+        self.last_rebalance: Optional[datetime] = None
+        self.logger = logging.getLogger(f"{__name__}.GammaScalpRebalancer")
+
+    def should_rebalance(
+        self,
+        current_delta: float,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """Check whether a rebalance is needed.
+
+        Rebalance if:
+          1. ``abs(current_delta) > delta_drift_threshold``, AND
+          2. At least ``interval_minutes`` have passed since last rebalance.
+
+        Args:
+            current_delta: Net portfolio delta.
+            now: Current time (defaults to ``datetime.now()``).
+
+        Returns:
+            True if rebalance should be triggered.
+        """
+        if now is None:
+            now = datetime.now()
+
+        if abs(current_delta) < self.delta_drift_threshold:
+            return False
+
+        if self.last_rebalance is not None:
+            elapsed = (now - self.last_rebalance).total_seconds() / 60.0
+            if elapsed < self.interval_minutes:
+                return False
+
+        return True
+
+    def compute_hedge(
+        self,
+        current_delta: float,
+        underlying_price: float,
+    ) -> Dict[str, object]:
+        """Compute the hedge order to neutralize delta.
+
+        Args:
+            current_delta: Net portfolio delta.
+            underlying_price: Price of the hedge instrument.
+
+        Returns:
+            Dict with ``symbol``, ``shares``, ``direction``, ``delta_reduction``.
+        """
+        # Each share of SPY ≈ 1 delta
+        shares_needed = int(round(-current_delta))
+        direction = "buy" if shares_needed > 0 else "sell"
+
+        result = {
+            "symbol": self.hedge_symbol,
+            "shares": abs(shares_needed),
+            "direction": direction,
+            "delta_reduction": float(-shares_needed),
+            "notional": abs(shares_needed) * underlying_price,
+        }
+        self.logger.info(
+            f"GammaScalp hedge: {direction} {abs(shares_needed)} {self.hedge_symbol} "
+            f"(delta drift={current_delta:+.2f}, notional=${result['notional']:,.0f})"
+        )
+        return result
+
+    def record_rebalance(self, now: Optional[datetime] = None) -> None:
+        """Record that a rebalance was executed."""
+        self.last_rebalance = now or datetime.now()

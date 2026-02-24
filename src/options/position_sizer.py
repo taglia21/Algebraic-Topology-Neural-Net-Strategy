@@ -410,3 +410,115 @@ def correlation_adjustment(
         )
         return reduced
     return base_contracts
+
+
+# ============================================================================
+# TIER 2: Rolling Kelly, CVaR Limit & Combined Sizing
+# ============================================================================
+
+def rolling_kelly_fraction(
+    pnl_history: list,
+    window: int = 60,
+    kelly_cap: float = 0.25,
+) -> float:
+    """Compute Kelly fraction from rolling P&L history.
+
+    Uses ``f* = mean(returns) / var(returns)`` (simplified Kelly) over
+    the last *window* trades.  Capped at ``kelly_cap`` of full Kelly
+    to avoid overbetting.
+
+    Args:
+        pnl_history: List of per-trade P&L values (positive = win).
+        window: Number of most-recent trades to consider (default 60).
+        kelly_cap: Fraction of full Kelly to use (default 0.25 = quarter-Kelly).
+
+    Returns:
+        Kelly-optimal fraction in [0, kelly_cap].
+    """
+    if len(pnl_history) < 5:
+        return 0.01  # fallback until enough data
+    recent = np.array(pnl_history[-window:], dtype=np.float64)
+    mean_r = float(np.mean(recent))
+    var_r = float(np.var(recent, ddof=1))
+    if var_r <= 0 or mean_r <= 0:
+        return 0.0
+    full_kelly = mean_r / var_r
+    return float(min(max(full_kelly, 0.0), kelly_cap))
+
+
+def cvar_position_limit(
+    returns: list,
+    portfolio_value: float,
+    alpha: float = 0.05,
+    max_cvar_pct: float = 0.02,
+) -> float:
+    """Compute maximum dollar risk from CVaR constraint.
+
+    1. Calculate 95% CVaR (expected shortfall) from *returns*.
+    2. Position limit = ``portfolio_value * max_cvar_pct / abs(CVaR)``.
+
+    Args:
+        returns: Historical daily return series.
+        portfolio_value: Total portfolio value in USD.
+        alpha: CVaR tail probability (default 5%).
+        max_cvar_pct: Maximum acceptable CVaR as fraction of NAV (default 2%).
+
+    Returns:
+        Maximum dollar allocation for a single position.
+    """
+    if len(returns) < 20:
+        return portfolio_value * max_cvar_pct
+    arr = np.array(returns, dtype=np.float64)
+    var_cutoff = float(np.percentile(arr, alpha * 100))
+    tail = arr[arr <= var_cutoff]
+    if len(tail) == 0 or var_cutoff >= 0:
+        return portfolio_value * max_cvar_pct
+    cvar = float(np.mean(tail))
+    limit = portfolio_value * max_cvar_pct / abs(cvar) if cvar != 0 else portfolio_value * max_cvar_pct
+    return float(min(limit, portfolio_value * 0.10))  # hard cap 10% of NAV
+
+
+def combined_position_size(
+    portfolio_value: float,
+    max_loss_per_contract: float,
+    pnl_history: list,
+    daily_returns: list,
+    total_portfolio_vega: float = 0.0,
+    avg_daily_vega: float = 1.0,
+    new_position_correlation: float = 0.0,
+    kelly_cap: float = 0.25,
+    max_contracts: int = 5,
+) -> int:
+    """Unified sizing: min(KellyCap, CVaR, HeatCheck), with correlation adj.
+
+    Combines:
+      1. ``rolling_kelly_fraction`` → dollar budget from Kelly
+      2. ``cvar_position_limit``  → dollar budget from CVaR
+      3. ``portfolio_heat_check``  → go/no-go vega gate
+      4. ``correlation_adjustment`` → downsize for correlated book
+
+    Returns:
+        Number of contracts (≥ 1, ≤ max_contracts).
+    """
+    if max_loss_per_contract <= 0:
+        return 1
+
+    # 1. Kelly budget
+    k_frac = rolling_kelly_fraction(pnl_history, kelly_cap=kelly_cap)
+    kelly_budget = portfolio_value * k_frac
+
+    # 2. CVaR budget
+    cvar_budget = cvar_position_limit(daily_returns, portfolio_value)
+
+    # 3. Heat check gate
+    if not portfolio_heat_check(total_portfolio_vega, avg_daily_vega):
+        return 0  # reject
+
+    # Take the minimum budget
+    budget = min(kelly_budget, cvar_budget)
+    contracts = int(budget / max_loss_per_contract) if max_loss_per_contract > 0 else 1
+    contracts = max(1, min(contracts, max_contracts))
+
+    # 4. Correlation adjustment
+    contracts = correlation_adjustment(contracts, new_position_correlation)
+    return contracts

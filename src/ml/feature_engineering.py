@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-__all__ = ["build_features"]
+__all__ = ["build_features", "FeatureDriftDetector"]
 
 
 def _clip_normalize(value: float, lo: float, hi: float) -> float:
@@ -92,3 +92,91 @@ def build_features(
 
     return np.array([f_iv_rank, f_vix, f_dte, f_delta, f_rv_iv, f_hour, f_weekday],
                     dtype=np.float64)
+
+
+# ============================================================================
+# TIER 2: Feature Drift Detection (Phase K, Item 18)
+# ============================================================================
+
+class FeatureDriftDetector:
+    """Detect feature distribution drift via Population Stability Index (PSI).
+
+    PSI measures how much a feature distribution has shifted between a
+    *reference* (training) window and a *current* (inference) window.
+
+    PSI < 0.10 → No significant change
+    PSI 0.10–0.20 → Moderate drift (monitor)
+    PSI > 0.20 → Significant drift → trigger retrain
+
+    Parameters
+    ----------
+    n_bins : int
+        Number of equal-frequency bins for PSI calculation (default 10).
+    psi_threshold : float
+        PSI value that triggers a retrain flag (default 0.20).
+    """
+
+    def __init__(self, n_bins: int = 10, psi_threshold: float = 0.20):
+        self.n_bins = n_bins
+        self.psi_threshold = psi_threshold
+        self._reference: Optional[np.ndarray] = None
+        self._bin_edges: Optional[np.ndarray] = None
+
+    def set_reference(self, data: np.ndarray) -> None:
+        """Store reference distribution and compute bin edges.
+
+        Args:
+            data: 1-D array of reference feature values.
+        """
+        data = np.asarray(data, dtype=np.float64).ravel()
+        percentiles = np.linspace(0, 100, self.n_bins + 1)
+        self._bin_edges = np.percentile(data, percentiles)
+        # Make edges strictly increasing to avoid empty bins
+        self._bin_edges = np.unique(self._bin_edges)
+        self._reference = data
+
+    def compute_psi(self, current: np.ndarray) -> float:
+        """Compute PSI between reference and current distributions.
+
+        Args:
+            current: 1-D array of current feature values.
+
+        Returns:
+            PSI value (non-negative float).
+        """
+        if self._bin_edges is None or self._reference is None:
+            return 0.0
+        current = np.asarray(current, dtype=np.float64).ravel()
+        if len(current) < 2:
+            return 0.0
+
+        edges = self._bin_edges
+        ref_counts = np.histogram(self._reference, bins=edges)[0].astype(float)
+        cur_counts = np.histogram(current, bins=edges)[0].astype(float)
+
+        # Normalize to proportions (add small epsilon to avoid log(0))
+        eps = 1e-6
+        ref_pct = ref_counts / ref_counts.sum() + eps
+        cur_pct = cur_counts / cur_counts.sum() + eps
+
+        psi = float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
+        return max(psi, 0.0)
+
+    def check_drift(self, current: np.ndarray) -> dict:
+        """Check for drift and return actionable result.
+
+        Args:
+            current: 1-D array of current feature values.
+
+        Returns:
+            Dict with ``psi``, ``drifted`` (bool), ``action``
+            ("ok" | "monitor" | "retrain").
+        """
+        psi = self.compute_psi(current)
+        if psi > self.psi_threshold:
+            action = "retrain"
+        elif psi > 0.10:
+            action = "monitor"
+        else:
+            action = "ok"
+        return {"psi": psi, "drifted": psi > self.psi_threshold, "action": action}

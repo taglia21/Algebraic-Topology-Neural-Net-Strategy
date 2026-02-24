@@ -75,6 +75,9 @@ class ExitReason(Enum):
     ROLL = "roll"
     EMERGENCY = "emergency"
     VEGA_SPIKE = "vega_spike"
+    PROFIT_TARGET_50PCT = "profit_target_50pct"
+    TIME_STOP = "time_stop"
+    DELTA_BREACH = "delta_breach"
 
 
 class PositionType(Enum):
@@ -408,6 +411,108 @@ class ExitManager:
         except Exception as e:
             logger.warning(f"VIX fetch failed: {e}")
             return None
+
+    # ====================================================================
+    # GRAND OVERHAUL EXIT METHODS
+    # ====================================================================
+
+    def profit_target_exit(self, pos: 'TrackedPosition') -> Optional['ExitAction']:
+        """Close at 50% max profit (tastylive standard).
+
+        Returns ExitAction if 50% of max profit has been captured, else None.
+        """
+        if pos.is_closed or pos.max_profit <= 0:
+            return None
+
+        profit_pct = pos.current_pnl / pos.max_profit
+        if profit_pct >= 0.50:
+            details = (
+                f"50% profit target hit: ${pos.current_pnl:+,.2f} "
+                f"= {profit_pct:.0%} of max ${pos.max_profit:,.2f}"
+            )
+            logger.info(f"PROFIT_TARGET_50PCT: {pos.underlying} — {details}")
+            return ExitAction(
+                position_id=pos.position_id,
+                underlying=pos.underlying,
+                reason=ExitReason.PROFIT_TARGET_50PCT,
+                action="close",
+                current_pnl=pos.current_pnl,
+                current_pnl_pct=profit_pct,
+                legs_to_close=pos.legs,
+                position_type=pos.position_type,
+                strategy=pos.strategy,
+                details=details,
+            )
+        return None
+
+    def time_stop_exit(self, pos: 'TrackedPosition') -> Optional['ExitAction']:
+        """Exit positions >21 DTE from entry when theta >50% decayed.
+
+        Theta decay is approximated by time_elapsed_pct — if more than
+        50% of the option's life has elapsed and we opened >21 DTE ago,
+        theta acceleration makes holding less attractive.
+        """
+        if pos.is_closed:
+            return None
+
+        entry_to_expiry_days = (pos.expiration - pos.entry_time.date()).days
+        if entry_to_expiry_days < 21:
+            return None
+
+        # Check if >50% of time has elapsed (theta decay proxy)
+        if pos.time_elapsed_pct >= 0.50:
+            details = (
+                f"Time stop: {pos.time_elapsed_pct:.0%} elapsed "
+                f"(entry DTE={entry_to_expiry_days}, now DTE={pos.dte})"
+            )
+            logger.info(f"TIME_STOP: {pos.underlying} — {details}")
+            return ExitAction(
+                position_id=pos.position_id,
+                underlying=pos.underlying,
+                reason=ExitReason.TIME_STOP,
+                action="close",
+                current_pnl=pos.current_pnl,
+                current_pnl_pct=pos.current_pnl_pct,
+                legs_to_close=pos.legs,
+                position_type=pos.position_type,
+                strategy=pos.strategy,
+                details=details,
+            )
+        return None
+
+    def delta_breach_exit(self, pos: 'TrackedPosition', position_delta: float = 0.0) -> Optional['ExitAction']:
+        """Exit if abs(position_delta) > 0.30.
+
+        Args:
+            pos: Tracked position to check.
+            position_delta: Current delta of the position (caller must compute).
+
+        Returns:
+            ExitAction if delta exceeds 0.30, else None.
+        """
+        if pos.is_closed:
+            return None
+
+        DELTA_LIMIT = 0.30
+        if abs(position_delta) > DELTA_LIMIT:
+            details = (
+                f"Delta breach: |Δ|={abs(position_delta):.2f} > "
+                f"{DELTA_LIMIT} limit"
+            )
+            logger.info(f"DELTA_BREACH: {pos.underlying} — {details}")
+            return ExitAction(
+                position_id=pos.position_id,
+                underlying=pos.underlying,
+                reason=ExitReason.DELTA_BREACH,
+                action="close",
+                current_pnl=pos.current_pnl,
+                current_pnl_pct=pos.current_pnl_pct,
+                legs_to_close=pos.legs,
+                position_type=pos.position_type,
+                strategy=pos.strategy,
+                details=details,
+            )
+        return None
 
     def check_vega_spike_exit(self) -> List[ExitAction]:
         """

@@ -24,6 +24,12 @@ from dataclasses import dataclass
 import numpy as np
 import asyncio
 
+try:
+    from scipy.optimize import minimize
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import OptionChainRequest
 from alpaca.trading.client import TradingClient
@@ -556,6 +562,160 @@ class IVDataManager:
                 
         except Exception as e:
             self.logger.error(f"Failed to get stats: {e}")
+            return {}
+
+    # ------------------------------------------------------------------
+    # Phase D – Vol Surface Engineering
+    # ------------------------------------------------------------------
+
+    def vol_surface_fit(self, chain: list) -> Dict:
+        """Fit an SVI (Stochastic Volatility Inspired) surface to chain IVs.
+
+        SVI parametrisation:
+            w(k) = a + b * (rho * (k - m) + sqrt((k - m)^2 + sigma^2))
+
+        Parameters
+        ----------
+        chain : list
+            Option contracts with ``strike``, ``implied_volatility``, and
+            ``underlying_price`` (or we infer from mid-strike).
+
+        Returns
+        -------
+        dict with keys ``a, b, rho, m, sigma, rmse``.
+        """
+        if not SCIPY_AVAILABLE:
+            self.logger.warning("scipy not installed — vol_surface_fit unavailable")
+            return {}
+        if not chain or len(chain) < 5:
+            return {}
+
+        try:
+            strikes = np.array([c.strike for c in chain if getattr(c, 'implied_volatility', 0) > 0])
+            ivs = np.array([c.implied_volatility for c in chain if getattr(c, 'implied_volatility', 0) > 0])
+            if len(strikes) < 5:
+                return {}
+
+            # Use underlying price from chain or estimate from mid-strike
+            S = getattr(chain[0], 'underlying_price', None) or float(np.median(strikes))
+            k = np.log(strikes / S)  # log-moneyness
+            w_mkt = ivs ** 2  # total variance proxy
+
+            def svi(params, k_):
+                a, b, rho, m_, sig = params
+                return a + b * (rho * (k_ - m_) + np.sqrt((k_ - m_) ** 2 + sig ** 2))
+
+            def objective(params):
+                return np.sum((svi(params, k) - w_mkt) ** 2)
+
+            x0 = [np.mean(w_mkt), 0.1, -0.5, 0.0, 0.1]
+            bounds = [(-1, 1), (1e-4, 2), (-0.999, 0.999), (-1, 1), (1e-4, 2)]
+            res = minimize(objective, x0, bounds=bounds, method='L-BFGS-B')
+
+            a, b, rho, m_, sig = res.x
+            fitted = svi(res.x, k)
+            rmse = float(np.sqrt(np.mean((fitted - w_mkt) ** 2)))
+
+            self.logger.info("SVI fit: a=%.4f b=%.4f rho=%.4f m=%.4f sigma=%.4f RMSE=%.6f",
+                             a, b, rho, m_, sig, rmse)
+            return {"a": a, "b": b, "rho": rho, "m": m_, "sigma": sig, "rmse": rmse}
+        except Exception as exc:
+            self.logger.error("vol_surface_fit failed: %s", exc)
+            return {}
+
+    def term_structure_signal(self) -> Dict:
+        """VIX term structure contango/backwardation signal.
+
+        Fetches VIX (^VIX) and VIX3M (^VIX3M) from yfinance.
+        Ratio < 1.0 → contango (normal), > 1.0 → backwardation (fear).
+
+        Returns
+        -------
+        dict with ``vix, vix3m, ratio, signal`` keys.
+        """
+        if yf is None:
+            self.logger.warning("yfinance not installed — term_structure_signal unavailable")
+            return {}
+        try:
+            vix_df = yf.download("^VIX", period="5d", progress=False)
+            vix3m_df = yf.download("^VIX3M", period="5d", progress=False)
+
+            if vix_df.empty or vix3m_df.empty:
+                self.logger.warning("VIX data unavailable")
+                return {}
+
+            vix_val = float(vix_df["Close"].iloc[-1])
+            vix3m_val = float(vix3m_df["Close"].iloc[-1])
+            if vix3m_val <= 0:
+                return {}
+
+            ratio = vix_val / vix3m_val
+            signal = "BACKWARDATION" if ratio > 1.0 else "CONTANGO"
+
+            self.logger.info("Term structure: VIX=%.2f VIX3M=%.2f ratio=%.3f → %s",
+                             vix_val, vix3m_val, ratio, signal)
+            return {"vix": vix_val, "vix3m": vix3m_val, "ratio": ratio, "signal": signal}
+        except Exception as exc:
+            self.logger.error("term_structure_signal failed: %s", exc)
+            return {}
+
+    def skew_signal(self, chain: list, lookback: int = 30) -> Dict:
+        """25-delta put-call skew z-score.
+
+        Computes (25δ put IV − 25δ call IV), z-scores against the last
+        ``lookback`` cached daily skew values.
+
+        Parameters
+        ----------
+        chain : list
+            Option contracts with ``delta`` and ``implied_volatility``.
+        lookback : int
+            Rolling window days for z-score.
+
+        Returns
+        -------
+        dict with ``put_iv, call_iv, skew, zscore``.
+        """
+        if not chain:
+            return {}
+        try:
+            puts = [c for c in chain if getattr(c, 'right', getattr(c, 'option_type', '')) in ('P', 'put')
+                    and getattr(c, 'implied_volatility', 0) > 0
+                    and getattr(c, 'delta', None) is not None]
+            calls = [c for c in chain if getattr(c, 'right', getattr(c, 'option_type', '')) in ('C', 'call')
+                     and getattr(c, 'implied_volatility', 0) > 0
+                     and getattr(c, 'delta', None) is not None]
+
+            if not puts or not calls:
+                return {}
+
+            # Closest to 25-delta
+            put_25 = min(puts, key=lambda c: abs(abs(c.delta) - 0.25))
+            call_25 = min(calls, key=lambda c: abs(abs(c.delta) - 0.25))
+
+            put_iv = float(put_25.implied_volatility)
+            call_iv = float(call_25.implied_volatility)
+            skew = put_iv - call_iv
+
+            # Z-score vs cached history
+            history = self.get_iv_history(chain[0].symbol if hasattr(chain[0], 'symbol')
+                                         else 'SPY', days=lookback)
+            if len(history) >= 10:
+                hist_skews = np.array([h.skew_25delta for h in history if h.skew_25delta != 0.0])
+                if len(hist_skews) >= 10:
+                    mean_s = np.mean(hist_skews)
+                    std_s = np.std(hist_skews)
+                    zscore = float((skew - mean_s) / std_s) if std_s > 0 else 0.0
+                else:
+                    zscore = 0.0
+            else:
+                zscore = 0.0
+
+            self.logger.info("Skew signal: put_iv=%.4f call_iv=%.4f skew=%.4f zscore=%.2f",
+                             put_iv, call_iv, skew, zscore)
+            return {"put_iv": put_iv, "call_iv": call_iv, "skew": skew, "zscore": zscore}
+        except Exception as exc:
+            self.logger.error("skew_signal failed: %s", exc)
             return {}
 
 

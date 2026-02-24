@@ -99,6 +99,15 @@ except ImportError:
     CONTINUOUS_LEARNER_AVAILABLE = False
 
 try:
+    from src.ml.online_learner import OnlineLearner as OptionsOnlineLearner
+    from src.ml.feature_engineering import build_features as ml_build_features
+    OPTIONS_ONLINE_LEARNER_AVAILABLE = True
+except ImportError:
+    OptionsOnlineLearner = None
+    ml_build_features = None
+    OPTIONS_ONLINE_LEARNER_AVAILABLE = False
+
+try:
     from src.quant_models.garch import GARCHModel
     GARCH_AVAILABLE = True
 except ImportError:
@@ -432,6 +441,20 @@ class AutonomousTradingEngine:
             "✓ Phase 6: ExitManager, GEX Analyzer, DailyPerformanceLogger loaded"
         )
 
+        # ==== GRAND OVERHAUL: OnlineLearner for signal confidence ====
+        self.options_online_learner = None
+        if OPTIONS_ONLINE_LEARNER_AVAILABLE:
+            try:
+                self.options_online_learner = OptionsOnlineLearner()
+                self.options_online_learner.load_latest_checkpoint()
+                self.logger.info("✓ Options OnlineLearner loaded (SGD confidence scoring)")
+            except Exception as e:
+                self.logger.warning(f"Options OnlineLearner init failed: {e}")
+
+        # ==== GRAND OVERHAUL: Circuit breaker counters ====
+        self.consecutive_losses = 0
+        self._loss_pause_until = None  # datetime when pause expires
+
         # Backfill IV data on startup
         self._backfill_iv_data()
         
@@ -614,7 +637,66 @@ class AutonomousTradingEngine:
             4. EXECUTE trades (gated by Greeks, VIX, safe window).
             5. MANAGE existing positions.
             6. CHECK risk limits.
+
+        Grand Overhaul: wrapped in try/except with crash logging,
+        consecutive loss pause (3 losses >2% each → 4hr pause),
+        and daily PnL halt (-3% → no entries for the day).
         """
+        try:
+            await self._trading_cycle_inner()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.logger.error(f"CRASH in _trading_cycle: {e}", exc_info=True)
+            # Log to dedicated crash log
+            try:
+                crash_log = _LOG_DIR / "options_crash.log"
+                with open(crash_log, "a") as f:
+                    import traceback
+                    f.write(f"\n{'='*60}\n")
+                    f.write(f"CRASH: {datetime.now().isoformat()}\n")
+                    f.write(traceback.format_exc())
+                    f.write(f"{'='*60}\n")
+            except Exception:
+                pass
+            raise
+
+    async def _trading_cycle_inner(self):
+        # ==== GRAND OVERHAUL: Consecutive loss pause (3 losses >2% → 4hr) ====
+        if self._loss_pause_until is not None:
+            if datetime.now() < self._loss_pause_until:
+                self.logger.warning(
+                    f"LOSS PAUSE active until {self._loss_pause_until:%H:%M:%S} "
+                    f"({self.consecutive_losses} consecutive losses)"
+                )
+                return
+            else:
+                self.logger.info("Loss pause expired — resuming trading")
+                self._loss_pause_until = None
+
+        if self.consecutive_losses >= 3:
+            from datetime import timedelta
+            self._loss_pause_until = datetime.now() + timedelta(hours=4)
+            self.logger.critical(
+                f"CIRCUIT BREAKER: {self.consecutive_losses} consecutive losses >2% "
+                f"— pausing 4 hours until {self._loss_pause_until:%H:%M:%S}"
+            )
+            self.consecutive_losses = 0  # reset after triggering pause
+            return
+
+        # ==== GRAND OVERHAUL: Daily PnL halt (-3% → no entries for day) ====
+        if self._day_start_portfolio > 0:
+            daily_pnl_pct = (self.portfolio_value - self._day_start_portfolio) / self._day_start_portfolio
+            if daily_pnl_pct < -0.03:
+                self.logger.critical(
+                    f"DAILY PNL HALT: {daily_pnl_pct:.2%} < -3% — no new entries today"
+                )
+                # Still run position management (step 5) but skip new entries
+                self._sync_positions_from_alpaca()
+                await self._manage_positions()
+                await self._run_exit_manager()
+                return
+
         # --- Daily risk-control reset ---
         self._reset_daily_counters_if_needed()
 
@@ -904,6 +986,24 @@ class AutonomousTradingEngine:
                 # PHASE 5: Log every signal, even rejected ones
                 await self._log_signal_with_reasoning(signal, execution_result=None)
                 continue
+
+            # ==== GRAND OVERHAUL: SGD ML confidence filter ====
+            if self.options_online_learner is not None and ml_build_features is not None:
+                try:
+                    feat = ml_build_features(
+                        {"iv_rank": signal.iv_rank, "dte": signal.dte, "delta": signal.delta},
+                        {"vix_level": getattr(self.vix_overlay, '_last_vix', 20),
+                         "realized_vol": 0.20, "implied_vol": 0.20},
+                    )
+                    ml_conf = self.options_online_learner.get_signal_confidence(feat)
+                    if ml_conf < 0.55:
+                        self.logger.info(
+                            f"ML_FILTER: Skipping {signal.symbol} — SGD confidence "
+                            f"{ml_conf:.2f} < 0.55"
+                        )
+                        continue
+                except Exception as e:
+                    self.logger.debug(f"ML confidence check failed: {e}")
             
             # Skip if already have position in this symbol
             if self._has_position(signal.symbol):
@@ -2581,6 +2681,8 @@ class AutonomousTradingEngine:
                         f"reason={action.reason.value} P&L=${action.current_pnl:+,.2f} "
                         f"{action.details}"
                     )
+                    # ==== GRAND OVERHAUL: retrain ML on close ====
+                    self._retrain_ml_on_exit(action)
                 else:
                     self.logger.error(
                         f"Failed to execute exit for {action.underlying}"
@@ -2598,6 +2700,35 @@ class AutonomousTradingEngine:
         elif hasattr(position, "symbol"):
             symbol = position.symbol
         return (symbol or "").upper() == action.underlying.upper()
+
+    def _retrain_ml_on_exit(self, action: ExitAction):
+        """Retrain the OnlineLearner SGD model after a position exit."""
+        if self.options_online_learner is None or ml_build_features is None:
+            return
+        try:
+            feat = ml_build_features(
+                {"iv_rank": 50, "dte": 30, "delta": 0.3},
+                {"vix_level": getattr(self.vix_overlay, '_last_vix', 20),
+                 "realized_vol": 0.20, "implied_vol": 0.20},
+            )
+            self.options_online_learner.retrain_on_close({
+                "features": feat.tolist(),
+                "pnl": action.current_pnl,
+                "pnl_pct": action.current_pnl_pct,
+            })
+
+            # Update consecutive loss counter for circuit breaker
+            if action.current_pnl < 0:
+                loss_pct = abs(action.current_pnl / max(self.portfolio_value, 1)) * 100
+                if loss_pct > 2.0:
+                    self.consecutive_losses += 1
+                else:
+                    self.consecutive_losses = 0
+            else:
+                self.consecutive_losses = 0
+
+        except Exception as e:
+            self.logger.debug(f"ML retrain on exit failed: {e}")
 
     def _log_daily_performance(self):
         """Log daily performance metrics (Phase 6).

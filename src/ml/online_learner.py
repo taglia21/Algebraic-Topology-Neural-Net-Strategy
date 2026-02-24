@@ -6,11 +6,12 @@ Self-improving ML system that retrains on live P&L feedback.
 
 Features:
 - OnlineLearner: updates model weights after every trade using actual P&L
+- SGDClassifier for online signal confidence scoring
 - Feature importance drift detection with automatic reweighting
 - SQLite rolling trade outcome database (state/trade_outcomes.db)
 - Bayesian hyperparameter optimisation (scipy.optimize, no optuna)
 - Automatic retraining every 50 trades or when Sharpe < 0.5
-- Model checkpointing to models/ with timestamps
+- Model checkpointing to models/ with timestamps + joblib persistence
 - Circuit breaker: halts if 5 consecutive losses > 2% each
 """
 
@@ -38,6 +39,17 @@ try:
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
+
+try:
+    from sklearn.linear_model import SGDClassifier
+    from sklearn.preprocessing import StandardScaler
+    import joblib
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SGDClassifier = None
+    StandardScaler = None
+    joblib = None
+    SKLEARN_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +230,16 @@ class OnlineLearner:
         # Ensure directories
         Path(self.config.models_dir).mkdir(parents=True, exist_ok=True)
         Path(self.config.metrics_log).parent.mkdir(parents=True, exist_ok=True)
+
+        # SGDClassifier for online signal confidence
+        self._sgd_model = None
+        self._sgd_scaler = None
+        self._sgd_model_path = str(Path(self.config.models_dir) / "online_model.pkl")
+        self._sgd_feature_names = [
+            "iv_rank", "vix_level", "dte", "delta", "rv_iv_ratio", "hour", "weekday"
+        ]
+        self._sgd_fit_count = 0
+        self._init_sgd_model()
 
         logger.info(
             "OnlineLearner initialised (retrain_every=%d, sharpe_floor=%.2f)",
@@ -518,4 +540,127 @@ class OnlineLearner:
             "weight_count": len(self._weights),
             "last_retrain": self._last_retrain_time.isoformat() if self._last_retrain_time else None,
             "db_total_trades": self.db.count(),
+            "sgd_fit_count": self._sgd_fit_count,
         }
+
+    # ------------------------------------------------------------------
+    # SGD-based signal confidence (Grand Overhaul Phase B)
+    # ------------------------------------------------------------------
+
+    def _init_sgd_model(self):
+        """Initialize or load the SGDClassifier model."""
+        if not SKLEARN_AVAILABLE:
+            logger.warning("sklearn not available — SGD confidence scoring disabled")
+            return
+
+        # Try loading existing model
+        if os.path.exists(self._sgd_model_path):
+            try:
+                saved = joblib.load(self._sgd_model_path)
+                self._sgd_model = saved.get("model")
+                self._sgd_scaler = saved.get("scaler")
+                self._sgd_fit_count = saved.get("fit_count", 0)
+                logger.info("SGD model loaded from %s (fit_count=%d)",
+                           self._sgd_model_path, self._sgd_fit_count)
+                return
+            except Exception as e:
+                logger.warning("Failed to load SGD model: %s", e)
+
+        # Create fresh model
+        self._sgd_model = SGDClassifier(
+            loss="log_loss",
+            penalty="l2",
+            alpha=1e-4,
+            warm_start=True,
+            random_state=42,
+        )
+        self._sgd_scaler = StandardScaler()
+        logger.info("SGD model initialized (fresh)")
+
+    def _save_sgd_model(self):
+        """Persist SGD model + scaler via joblib."""
+        if not SKLEARN_AVAILABLE or self._sgd_model is None:
+            return
+        try:
+            Path(self._sgd_model_path).parent.mkdir(parents=True, exist_ok=True)
+            joblib.dump({
+                "model": self._sgd_model,
+                "scaler": self._sgd_scaler,
+                "fit_count": self._sgd_fit_count,
+            }, self._sgd_model_path)
+            logger.debug("SGD model saved → %s", self._sgd_model_path)
+        except Exception as e:
+            logger.warning("SGD model save failed: %s", e)
+
+    def get_signal_confidence(self, features: np.ndarray) -> float:
+        """Score a signal using the SGD model.
+
+        Args:
+            features: 1-D array of length 7:
+                [iv_rank, vix_level, dte, delta, rv_iv_ratio, hour, weekday]
+                Values should be in raw form (0-1 normalized).
+
+        Returns:
+            Confidence score 0.0-1.0 (probability of profitable trade).
+            Returns 0.5 (neutral) if model is not yet trained.
+        """
+        if not SKLEARN_AVAILABLE or self._sgd_model is None:
+            return 0.5
+        if self._sgd_fit_count < 10:
+            return 0.5  # Not enough training data
+
+        try:
+            X = np.asarray(features).reshape(1, -1)
+            if self._sgd_scaler is not None and hasattr(self._sgd_scaler, 'mean_'):
+                X = self._sgd_scaler.transform(X)
+            proba = self._sgd_model.predict_proba(X)
+            # Return probability of positive class (profitable)
+            return float(proba[0, 1]) if proba.shape[1] > 1 else float(proba[0, 0])
+        except Exception as e:
+            logger.debug("SGD predict failed: %s", e)
+            return 0.5
+
+    def retrain_on_close(self, trade_dict: Dict[str, Any]) -> None:
+        """Online-update the SGD model after a trade closes.
+
+        Args:
+            trade_dict: Must contain:
+                - 'features': list/array of 7 floats
+                - 'pnl': float (dollar P&L)
+                - 'pnl_pct': float (return %)
+        """
+        if not SKLEARN_AVAILABLE or self._sgd_model is None:
+            return
+
+        features = trade_dict.get("features")
+        pnl = trade_dict.get("pnl", 0)
+        if features is None:
+            return
+
+        try:
+            X = np.asarray(features, dtype=float).reshape(1, -1)
+            y = np.array([1 if pnl > 0 else 0])  # binary: profitable or not
+
+            # Online update of scaler (running stats)
+            if self._sgd_fit_count == 0:
+                self._sgd_scaler.partial_fit(X)
+            else:
+                self._sgd_scaler.partial_fit(X)
+
+            X_scaled = self._sgd_scaler.transform(X)
+
+            # partial_fit requires all classes on first call
+            if self._sgd_fit_count == 0:
+                self._sgd_model.partial_fit(X_scaled, y, classes=[0, 1])
+            else:
+                self._sgd_model.partial_fit(X_scaled, y)
+
+            self._sgd_fit_count += 1
+
+            # Save every 10 updates
+            if self._sgd_fit_count % 10 == 0:
+                self._save_sgd_model()
+                logger.info("SGD model updated (fit_count=%d)", self._sgd_fit_count)
+
+        except Exception as e:
+            logger.warning("SGD retrain_on_close failed: %s", e)

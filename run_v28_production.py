@@ -1677,10 +1677,46 @@ if __name__ == "__main__":
     # BROKER env var overrides CLI
     broker = os.getenv("BROKER", args.broker)
 
-    try:
-        asyncio.run(main(mode, broker))
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-    except Exception as exc:
-        logger.critical(f"Fatal error: {exc}", exc_info=True)
-        sys.exit(1)
+    # Grand Overhaul: while True restart loop with crash logging
+    crash_log_path = PROJECT_ROOT / "logs" / "crash.log"
+    crash_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    while True:
+        try:
+            asyncio.run(main(mode, broker))
+            break  # Clean exit
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user")
+            break
+        except Exception as exc:
+            logger.critical(f"Fatal crash: {exc}", exc_info=True)
+
+            # Log crash to file
+            try:
+                import traceback
+                with open(crash_log_path, "a") as f:
+                    f.write(f"\n{'='*60}\n")
+                    f.write(f"CRASH: {datetime.now().isoformat()}\n")
+                    f.write(f"Error: {exc}\n")
+                    f.write(traceback.format_exc())
+                    f.write(f"{'='*60}\n")
+            except Exception:
+                pass
+
+            # Discord alert
+            try:
+                discord_url = os.getenv("DISCORD_WEBHOOK_MARCUS", "")
+                if discord_url:
+                    import requests
+                    requests.post(discord_url, json={
+                        "embeds": [{
+                            "title": "🚨 V28 CRASH — Auto-restarting",
+                            "description": f"```{str(exc)[:1500]}```",
+                            "color": 0xFF0000,
+                        }]
+                    }, timeout=10)
+            except Exception:
+                pass
+
+            logger.info("Restarting in 30 seconds...")
+            time.sleep(30)

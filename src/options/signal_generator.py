@@ -1367,6 +1367,260 @@ class EarningsIVCrushStrategy:
 
 
 # ============================================================================
+# GAMMA SCALPING STRATEGY
+# ============================================================================
+
+class GammaScalpingStrategy:
+    """
+    Generate signal when 5-day realized vol > implied vol by >5 points.
+
+    Uses yfinance for realized vol calculation. When RV dominates IV,
+    gamma scalping (long gamma) is profitable because the underlying
+    moves more than the market is pricing.
+    """
+
+    RV_LOOKBACK = 5           # 5 trading days
+    IV_RV_THRESHOLD = 5.0     # 5 vol points (e.g. 25% RV vs 20% IV)
+
+    def __init__(self):
+        self.logger = logging.getLogger(f"{__name__}.GammaScalping")
+        self.iv_data = IVDataManager()
+
+    async def generate_signals(self, symbols: List[str]) -> List[Signal]:
+        signals: List[Signal] = []
+        for symbol in symbols:
+            try:
+                sig = await self._evaluate(symbol)
+                if sig is not None:
+                    signals.append(sig)
+            except Exception as exc:
+                self.logger.debug(f"GammaScalp error {symbol}: {exc}")
+        return signals
+
+    async def _evaluate(self, symbol: str) -> Optional[Signal]:
+        if not _check_data_quality(self.iv_data, symbol, self.logger):
+            return None
+        if not _check_liquidity(symbol, self.logger):
+            return None
+
+        rv = self._compute_5d_rv(symbol)
+        if rv is None:
+            return None
+
+        iv = self.iv_data.get_current_iv(symbol)
+        if iv is None:
+            return None
+
+        # Both in annualised percentage terms (e.g. 0.25 = 25%)
+        rv_pct = rv * 100
+        iv_pct = iv * 100
+        diff = rv_pct - iv_pct
+
+        if diff > self.IV_RV_THRESHOLD:
+            confidence = min(0.95, 0.55 + 0.05 * (diff - self.IV_RV_THRESHOLD))
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.BUY,
+                signal_source=SignalSource.IV_RANK,
+                strategy="straddle",
+                confidence=round(confidence, 3),
+                timestamp=datetime.now(),
+                iv_rank=None,
+                dte=14,
+                reason=(
+                    f"Gamma scalp: 5d RV {rv_pct:.1f}% > IV {iv_pct:.1f}% "
+                    f"(diff={diff:.1f} > {self.IV_RV_THRESHOLD})"
+                ),
+            )
+        return None
+
+    def _compute_5d_rv(self, symbol: str) -> Optional[float]:
+        """5-day annualized realized vol from yfinance."""
+        try:
+            import yfinance as yf
+            import pandas as pd
+            data = yf.download(symbol, period="10d", interval="1d", progress=False)
+            if data is None or len(data) < self.RV_LOOKBACK + 1:
+                return None
+            if isinstance(data.columns, pd.MultiIndex):
+                closes = data["Close"].iloc[:, 0].dropna().values.astype(float)
+            else:
+                closes = data["Close"].dropna().values.astype(float)
+            if len(closes) < self.RV_LOOKBACK + 1:
+                return None
+            log_rets = np.diff(np.log(closes[-(self.RV_LOOKBACK + 1):]))
+            return float(np.std(log_rets) * np.sqrt(252))
+        except Exception:
+            return None
+
+
+# ============================================================================
+# VOLATILITY ARBITRAGE STRATEGY
+# ============================================================================
+
+class VolatilityArbitrageStrategy:
+    """
+    SPY vs sector ETF (XLK, XLE, XLF, XBI) vol dispersion strategy.
+
+    Generates signal when the z-score of IV dispersion across sectors
+    exceeds 2.0, indicating unusual divergence in sector-level risk pricing.
+    """
+
+    SECTOR_ETFS = ["XLK", "XLE", "XLF", "XBI"]
+    Z_THRESHOLD = 2.0
+    RV_LOOKBACK = 20
+
+    def __init__(self):
+        self.logger = logging.getLogger(f"{__name__}.VolArb")
+        self.iv_data = IVDataManager()
+
+    async def generate_signals(self, symbols: List[str] = None) -> List[Signal]:
+        """Generate vol dispersion signals. Symbols arg ignored; uses SPY + sectors."""
+        signals: List[Signal] = []
+        try:
+            sig = await self._evaluate_dispersion()
+            if sig is not None:
+                signals.append(sig)
+        except Exception as exc:
+            self.logger.debug(f"VolArb error: {exc}")
+        return signals
+
+    async def _evaluate_dispersion(self) -> Optional[Signal]:
+        spy_iv = self.iv_data.get_current_iv("SPY")
+        if spy_iv is None:
+            return None
+
+        sector_ivs = []
+        for etf in self.SECTOR_ETFS:
+            iv = self.iv_data.get_current_iv(etf)
+            if iv is not None:
+                sector_ivs.append(iv)
+
+        if len(sector_ivs) < 2:
+            return None
+
+        # Dispersion = std of sector IVs relative to SPY IV
+        dispersion = float(np.std(sector_ivs))
+        mean_disp = float(np.mean(sector_ivs))
+
+        # Z-score: use heuristic rolling baseline (20% of mean as std proxy)
+        baseline_std = max(mean_disp * 0.20, 0.01)
+        z_score = (dispersion - baseline_std) / baseline_std
+
+        if abs(z_score) > self.Z_THRESHOLD:
+            # High dispersion → sell premium on high-IV sectors, buy on low
+            if z_score > 0:
+                # Dispersion elevated → sell condors on SPY (expect convergence)
+                confidence = min(0.90, 0.55 + 0.10 * (z_score - self.Z_THRESHOLD))
+                return Signal(
+                    symbol="SPY",
+                    signal_type=SignalType.SELL,
+                    signal_source=SignalSource.IV_RANK,
+                    strategy="iron_condor",
+                    confidence=round(confidence, 3),
+                    timestamp=datetime.now(),
+                    z_score=round(z_score, 2),
+                    dte=30,
+                    reason=(
+                        f"Vol arb: sector dispersion z={z_score:.2f} > "
+                        f"{self.Z_THRESHOLD} → sell premium"
+                    ),
+                )
+        return None
+
+
+# ============================================================================
+# SKEW TRADE STRATEGY
+# ============================================================================
+
+class SkewTradeStrategy:
+    """
+    Uses 25-delta put/call skew from iv_data_manager.
+
+    - Sell put spreads when skew >2std elevated (puts overpriced)
+    - Buy call spreads when skew collapses (calls cheap)
+    """
+
+    SKEW_LOOKBACK = 30   # 30 days for z-score
+    SELL_Z_THRESHOLD = 2.0
+    BUY_Z_THRESHOLD = -2.0
+
+    def __init__(self):
+        self.logger = logging.getLogger(f"{__name__}.SkewTrade")
+        self.iv_data = IVDataManager()
+
+    async def generate_signals(self, symbols: List[str]) -> List[Signal]:
+        signals: List[Signal] = []
+        for symbol in symbols:
+            try:
+                sig = await self._evaluate(symbol)
+                if sig is not None:
+                    signals.append(sig)
+            except Exception as exc:
+                self.logger.debug(f"SkewTrade error {symbol}: {exc}")
+        return signals
+
+    async def _evaluate(self, symbol: str) -> Optional[Signal]:
+        if not _check_data_quality(self.iv_data, symbol, self.logger):
+            return None
+
+        # Get skew history
+        history = self.iv_data.get_iv_history(symbol, days=self.SKEW_LOOKBACK)
+        if len(history) < 10:
+            return None
+
+        skews = [h.skew_25delta for h in history if h.skew_25delta is not None]
+        if len(skews) < 10:
+            return None
+
+        current_skew = skews[0]  # Most recent (history is DESC)
+        mean_skew = float(np.mean(skews))
+        std_skew = float(np.std(skews))
+        if std_skew < 1e-6:
+            return None
+
+        z_score = (current_skew - mean_skew) / std_skew
+
+        # Skew elevated → puts are expensive → sell put spreads
+        if z_score > self.SELL_Z_THRESHOLD:
+            confidence = min(0.90, 0.55 + 0.10 * (z_score - self.SELL_Z_THRESHOLD))
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.SELL,
+                signal_source=SignalSource.IV_RANK,
+                strategy="put_spread",
+                confidence=round(confidence, 3),
+                timestamp=datetime.now(),
+                z_score=round(z_score, 2),
+                dte=30,
+                reason=(
+                    f"Skew trade SELL: 25Δ skew z={z_score:.2f} > "
+                    f"{self.SELL_Z_THRESHOLD} (skew={current_skew:.4f})"
+                ),
+            )
+
+        # Skew collapsed → calls are cheap → buy call spreads
+        if z_score < self.BUY_Z_THRESHOLD:
+            confidence = min(0.90, 0.55 + 0.10 * (self.BUY_Z_THRESHOLD - z_score))
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.BUY,
+                signal_source=SignalSource.IV_RANK,
+                strategy="call_spread",
+                confidence=round(confidence, 3),
+                timestamp=datetime.now(),
+                z_score=round(z_score, 2),
+                dte=21,
+                reason=(
+                    f"Skew trade BUY: 25Δ skew z={z_score:.2f} < "
+                    f"{self.BUY_Z_THRESHOLD} (skew={current_skew:.4f})"
+                ),
+            )
+
+        return None
+
+
+# ============================================================================
 # 0DTE SPX IRON BUTTERFLY STRATEGY
 # ============================================================================
 
@@ -1647,6 +1901,11 @@ class SignalGenerator:
         self.earnings_iv_crush_strategy = EarningsIVCrushStrategy()
         self.zero_dte_butterfly_strategy = ZeroDTEIronButterflyStrategy()
         
+        # Grand Overhaul alpha strategies
+        self.gamma_scalping_strategy = GammaScalpingStrategy()
+        self.vol_arb_strategy = VolatilityArbitrageStrategy()
+        self.skew_trade_strategy = SkewTradeStrategy()
+        
         # Regime detector and weight optimizer (lazy-loaded)
         self.regime_detector = None
         self.weight_optimizer = None
@@ -1662,7 +1921,8 @@ class SignalGenerator:
             self.weight_optimizer = DynamicWeightOptimizer(
                 strategies=["iv_rank", "theta_decay", "mean_reversion",
                             "delta_hedging", "vrp", "iv_crush",
-                            "earnings_iv_crush", "zero_dte_butterfly"],
+                            "earnings_iv_crush", "zero_dte_butterfly",
+                            "gamma_scalping", "vol_arb", "skew_trade"],
                 regime_detector=self.regime_detector,
             )
             self.logger.info("✓ Regime detector + weight optimizer wired into signal generation")
@@ -1768,6 +2028,9 @@ class SignalGenerator:
             self.iv_crush_strategy.generate_signals(symbols),
             self.earnings_iv_crush_strategy.generate_signals(symbols),
             self.zero_dte_butterfly_strategy.generate_signals(symbols),
+            self.gamma_scalping_strategy.generate_signals(symbols),
+            self.vol_arb_strategy.generate_signals(symbols),
+            self.skew_trade_strategy.generate_signals(symbols),
         ]
 
         # Phase 5b: Add spread strategies if available

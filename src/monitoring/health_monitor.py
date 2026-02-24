@@ -213,6 +213,8 @@ class HealthMonitor:
         results.append(self._check_daily_pnl())
         results.append(self._check_ml_freshness())
         results.append(self._check_positions_have_stops())
+        results.append(self._check_memory_usage())
+        results.append(self._check_disk_usage())
         return results
 
     def _check_ibkr_connection(self) -> HealthCheckResult:
@@ -292,6 +294,49 @@ class HealthMonitor:
             )
         except Exception as e:
             return HealthCheckResult("stop_losses", True, f"Check error: {e}")
+
+    def _check_memory_usage(self) -> HealthCheckResult:
+        """Check that memory usage is below 80%."""
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            pct = mem.percent
+            if pct > 80:
+                return HealthCheckResult(
+                    "memory", False,
+                    f"Memory usage {pct:.1f}% > 80% limit"
+                )
+            return HealthCheckResult("memory", True, f"Memory: {pct:.1f}%")
+        except ImportError:
+            # psutil not available — try /proc/meminfo
+            try:
+                with open("/proc/meminfo") as f:
+                    lines = f.readlines()
+                total = int([l for l in lines if "MemTotal" in l][0].split()[1])
+                avail = int([l for l in lines if "MemAvailable" in l][0].split()[1])
+                pct = (1 - avail / total) * 100
+                if pct > 80:
+                    return HealthCheckResult("memory", False, f"Memory {pct:.1f}% > 80%")
+                return HealthCheckResult("memory", True, f"Memory: {pct:.1f}%")
+            except Exception:
+                return HealthCheckResult("memory", True, "Memory check unavailable")
+        except Exception as e:
+            return HealthCheckResult("memory", True, f"Memory check error: {e}")
+
+    def _check_disk_usage(self) -> HealthCheckResult:
+        """Check that disk usage is below 80%."""
+        try:
+            import shutil
+            usage = shutil.disk_usage("/")
+            pct = usage.used / usage.total * 100
+            if pct > 80:
+                return HealthCheckResult(
+                    "disk", False,
+                    f"Disk usage {pct:.1f}% > 80% limit"
+                )
+            return HealthCheckResult("disk", True, f"Disk: {pct:.1f}%")
+        except Exception as e:
+            return HealthCheckResult("disk", True, f"Disk check error: {e}")
 
     # ------------------------------------------------------------------
     # IBKR reconnection with exponential backoff

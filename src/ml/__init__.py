@@ -6,6 +6,8 @@ This module contains advanced ML components:
 - TransformerPredictor: Attention-based stock direction prediction
 - StackedEnsemble: Stacked ensemble learner
 - SACAgent: Soft Actor-Critic with Prioritized Experience Replay
+- OnlineLearner: SGD-based online learning with signal confidence
+- build_features: Feature engineering for ML pipeline
 """
 
 try:
@@ -31,6 +33,16 @@ except ImportError as e:
     PrioritizedReplayBuffer = None
     Experience = None
 
+try:
+    from .online_learner import OnlineLearner, OnlineLearnerConfig, TradeOutcome
+except ImportError:
+    pass
+
+try:
+    from .feature_engineering import build_features
+except ImportError:
+    build_features = None
+
 __all__ = [
     'AdaptiveEnsemble',
     'TransformerPredictor',
@@ -38,5 +50,9 @@ __all__ = [
     'SACAgent',
     'SACConfig',
     'PrioritizedReplayBuffer',
-    'Experience'
+    'Experience',
+    'OnlineLearner',
+    'OnlineLearnerConfig',
+    'TradeOutcome',
+    'build_features',
 ]

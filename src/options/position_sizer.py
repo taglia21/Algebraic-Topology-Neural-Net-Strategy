@@ -351,3 +351,62 @@ def estimate_position_delta(
     # Use provided underlying delta
     else:
         return underlying_delta * contracts
+
+
+# ============================================================================
+# GRAND OVERHAUL: Portfolio Heat & Correlation Adjustments
+# ============================================================================
+
+def portfolio_heat_check(
+    total_portfolio_vega: float,
+    avg_daily_vega: float,
+) -> bool:
+    """Reject new position if total vega > 2x average daily vega.
+
+    Args:
+        total_portfolio_vega: Sum of abs(vega) across all positions.
+        avg_daily_vega: Average daily vega move (e.g. from VIX history).
+
+    Returns:
+        True if portfolio heat is acceptable, False if new position should
+        be rejected.
+    """
+    if avg_daily_vega <= 0:
+        return True  # Cannot evaluate; allow
+    ratio = total_portfolio_vega / avg_daily_vega
+    if ratio > 2.0:
+        logging.getLogger(__name__).warning(
+            f"PORTFOLIO_HEAT: total vega {total_portfolio_vega:.2f} > "
+            f"2x avg daily vega {avg_daily_vega:.2f} (ratio={ratio:.2f}) — REJECT"
+        )
+        return False
+    return True
+
+
+def correlation_adjustment(
+    base_contracts: int,
+    new_position_correlation: float,
+    threshold: float = 0.7,
+    reduction_pct: float = 0.30,
+) -> int:
+    """Reduce size 30% if new position correlation > 0.7 with book.
+
+    Args:
+        base_contracts: Original number of contracts.
+        new_position_correlation: Pairwise correlation of new position
+            with existing book (0 to 1).
+        threshold: Correlation threshold to trigger reduction (default 0.7).
+        reduction_pct: Fraction to reduce by (default 0.30 = 30%).
+
+    Returns:
+        Adjusted number of contracts (at least 1).
+    """
+    if new_position_correlation > threshold:
+        reduced = int(base_contracts * (1.0 - reduction_pct))
+        reduced = max(1, reduced)
+        logging.getLogger(__name__).info(
+            f"CORR_ADJ: corr={new_position_correlation:.2f} > {threshold} "
+            f"→ reduced {base_contracts} → {reduced} contracts"
+        )
+        return reduced
+    return base_contracts

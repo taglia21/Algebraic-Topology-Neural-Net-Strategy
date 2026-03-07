@@ -255,6 +255,13 @@ class SimulatedBroker(Broker):
         _ADV_WINDOW = 20  # noqa: N806 — local constant
         self._adv_window = _ADV_WINDOW
 
+        # --- Daily P&L tracking ---
+        # Start-of-day equity snapshot, used to compute today_pnl for the
+        # risk manager's daily-loss-limit check.  Reset each trading day via
+        # reset_daily().  Initialised to initial_cash so that today_pnl starts
+        # at zero on day 1.
+        self._sod_equity: float = initial_cash
+
         logger.info(
             f"SimulatedBroker initialised: "
             f"cash={initial_cash:,.2f}, slippage={slippage_bps}bps, "
@@ -682,7 +689,25 @@ class SimulatedBroker(Broker):
             )
 
     def _compute_equity(self) -> float:
-        """Compute total mark-to-market equity = cash + sum(position market values)."""
+        """Compute total mark-to-market equity = cash + sum(position market values).
+
+        For both long and short positions this formula is correct:
+
+        - **Long position** (qty > 0): cash was reduced by the purchase notional,
+          so adding ``qty * price`` restores the current market value of the holding.
+        - **Short position** (qty < 0): cash was *increased* by the sale proceeds
+          (see ``_execute_fill`` — ``cash_impact = notional - commission`` for sells).
+          Adding ``qty * price`` (a negative number) subtracts the current liability,
+          which correctly reflects the mark-to-market cost of buying back the short.
+
+        Example (short 100 shares sold @ $50, price later moves to $40):
+            cash       = initial_cash + 5_000    (short proceeds credited)
+            pos value  = -100 * 40 = -4_000      (liability at current price)
+            equity     = initial_cash + 5_000 - 4_000 = initial_cash + 1_000  ✓ (profit)
+
+        No separate short-proceeds tracking is needed because ``_cash`` already
+        includes the sale proceeds at the time of the short fill.
+        """
         return self._cash + sum(
             pos.qty * pos.current_price for pos in self._positions.values()
         )
@@ -714,6 +739,24 @@ class SimulatedBroker(Broker):
     def get_open_orders(self) -> List[Order]:
         """Return all orders with active lifecycle status."""
         return [o for o in self._orders.values() if o.is_active]
+
+    def reset_daily(self) -> None:
+        """Reset start-of-day equity snapshot for daily P&L tracking.
+
+        Call this once at the start of each new trading day (e.g. from the
+        backtester's daily loop or the live trading scheduler).  This updates
+        the ``_sod_equity`` baseline so that ``today_pnl`` computed in
+        :class:`ExecutionManager` reflects only the current day's performance.
+        """
+        self._sod_equity = self._compute_equity()
+        logger.debug(
+            f"SimulatedBroker: reset_daily — sod_equity set to {self._sod_equity:,.2f}"
+        )
+
+    @property
+    def sod_equity(self) -> float:
+        """Start-of-day equity snapshot (for daily P&L computation)."""
+        return self._sod_equity
 
 
 # ---------------------------------------------------------------------------
@@ -822,10 +865,21 @@ class ExecutionManager:
             side = "buy" if signal.direction == "long" else "sell"
             from core.risk_manager import PortfolioState as RMPortfolioState
 
+            # Compute actual today_pnl from start-of-day equity snapshot.
+            # The broker's _sod_equity is set via reset_daily() at the
+            # start of each trading day; if the broker doesn't expose it
+            # (e.g. a live broker adapter), fall back to 0.0 so that the
+            # daily-loss check is skipped safely rather than incorrectly.
+            sod_equity = getattr(self._broker, "sod_equity", None)
+            if sod_equity is not None and sod_equity > 0:
+                today_pnl = portfolio_state.equity - sod_equity
+            else:
+                today_pnl = 0.0  # fallback: live broker must track this separately
+
             rm_portfolio = RMPortfolioState(
                 equity=portfolio_state.equity,
                 peak_equity=portfolio_state.peak_equity,
-                today_pnl=0.0,  # Daily P&L is tracked by backtester, not per-signal
+                today_pnl=today_pnl,
                 positions={
                     sym: pos.market_value
                     for sym, pos in portfolio_state.positions.items()
@@ -973,11 +1027,12 @@ class ExecutionManager:
 
         Sizing formula:
             raw_strength = signal.metadata.pre_scale_strength (or signal.strength)
-            adjusted      = max(raw_strength, 0.85)
+            adjusted      = max(raw_strength, 0.10)  # 10% floor preserves signal variation
             target_value  = equity × max_position_pct × adjusted
 
-        Capped at ``max_position_value`` and bounded by gross exposure limit
-        (150% of equity) to allow aggressive deployment with leverage guard-rail.
+        Capped at ``max_position_value`` and bounded by:
+        - Gross exposure limit (150% of equity)
+        - Net exposure limit (±80% of equity) — prevents directional crowding
 
         Parameters
         ----------
@@ -1006,11 +1061,29 @@ class ExecutionManager:
             )
             return 0
 
+        # --- Net exposure cap (80% of equity in either direction) ---
+        # Prevents the portfolio from becoming excessively directional even
+        # when gross exposure is within limit (e.g. all longs or all shorts).
+        _MAX_NET_EXPOSURE_PCT = 0.80
+        side = "buy" if signal.direction == "long" else "sell"
+        net_exposure_pct = portfolio_state.net_exposure / equity
+        if abs(net_exposure_pct) > _MAX_NET_EXPOSURE_PCT:
+            # Only block if this order would push net exposure further out of bounds
+            if (side == "buy" and net_exposure_pct > 0) or (side == "sell" and net_exposure_pct < 0):
+                logger.warning(
+                    f"ExecutionManager: net exposure limit reached "
+                    f"({net_exposure_pct:.1%} vs ±{_MAX_NET_EXPOSURE_PCT:.0%}) — "
+                    f"skipping {signal.symbol} {side}"
+                )
+                return 0
+
         # Use PRE-SCALE strength for sizing (before allocation weighting).
         # The allocation weight controls conflict resolution priority, not
         # position size.  This fixes the capital deployment problem.
         raw_strength = signal.metadata.get("pre_scale_strength", signal.strength)
-        adjusted_strength = max(float(raw_strength), 0.85)
+        # Floor at 10% to avoid zero-size orders; preserve the actual signal
+        # strength signal rather than collapsing all signals to 85%.
+        adjusted_strength = max(float(raw_strength), 0.10)
         target_notional = equity * max_pct * adjusted_strength
         target_notional = min(target_notional, self._max_position_value)
 

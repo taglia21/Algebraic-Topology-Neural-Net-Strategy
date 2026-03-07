@@ -43,7 +43,7 @@ _DEFAULT_SYMBOLS: List[str] = [
     # Mega-cap tech
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO",
     # Financials
-    "BRK.B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS",
+    "BRK/B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS",
     # Healthcare
     "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT",
     # Consumer / Industrials
@@ -140,7 +140,7 @@ class StatArbConfig:
     stop_z: float = 3.0           # Hard stop at this Z-score
     min_entry_z: float = 1.0      # Minimum Z-score to trigger entry
     lookback_days: int = 126      # 6 months (was 252 — too strict for 15-stock universe)
-    coint_pvalue: float = 0.10    # Relaxed from 0.05 to find more pairs
+    coint_pvalue: float = 0.05  # Strict threshold; BH correction applied in find_pairs()
     half_life_max: float = 120.0  # Max half-life in days
     half_life_min: float = 1.0    # Min half-life in days
     max_pairs: int = 30           # Max active pairs
@@ -263,6 +263,13 @@ class RiskConfig:
     # --- Kelly criterion ---
     # Position size is capped at half-Kelly
     kelly_fraction: float = 0.5
+
+    # --- Volatility targeting ---
+    # Annualised volatility target used for vol-inverse sizing and the
+    # vol-adjustment scalar inside calculate_position_size().
+    vol_target: float = field(default_factory=lambda: float(
+        os.environ.get("RISK_VOL_TARGET", "0.20")
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -403,8 +410,29 @@ class Config:
     system: SystemConfig = field(default_factory=SystemConfig)
 
     def validate(self) -> None:
-        """Run validation on all sub-configs that support it."""
+        """Validate configuration consistency across all sub-configs."""
         self.system.validate()
+
+        # Cross-config validation
+        if self.ml.train_window_days > self.data.history_days:
+            raise ValueError(
+                f"ML train_window_days ({self.ml.train_window_days}) exceeds "
+                f"data history_days ({self.data.history_days})"
+            )
+
+        if self.strategy.stat_arb.exit_z >= self.strategy.stat_arb.entry_z:
+            raise ValueError(
+                f"StatArb exit_z ({self.strategy.stat_arb.exit_z}) must be less than "
+                f"entry_z ({self.strategy.stat_arb.entry_z})"
+            )
+
+        # Ensure max_drawdown_halt is tighter than -30%
+        if self.risk.max_drawdown_halt < -0.20:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"max_drawdown_halt={self.risk.max_drawdown_halt:.0%} is very loose; "
+                f"institutional standard is -5% to -10%"
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialise the config to a plain dictionary (for logging / audit)."""

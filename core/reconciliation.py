@@ -27,6 +27,7 @@ Usage
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List
@@ -147,13 +148,14 @@ class Reconciler:
         self,
         broker,
         mode: str = "soft",
-        qty_tolerance: int = 0,
+        qty_tolerance: float = 0,
         price_tolerance_pct: float = 0.01,
     ) -> None:
         self._broker = broker
         self._mode = mode
         self._qty_tolerance = qty_tolerance
         self._price_tolerance_pct = price_tolerance_pct
+        self._lock = threading.Lock()
 
         logger.info(f"Reconciler initialised: mode={mode}")
 
@@ -245,11 +247,12 @@ class Reconciler:
                             )
                         )
 
-        # Hard mode: apply corrections
+        # Hard mode: apply corrections (under lock to prevent concurrent mutation)
         if self._mode == "hard" and report.has_discrepancies:
-            report.corrections_applied = self._apply_corrections(
-                internal_positions, broker_positions, report.discrepancies
-            )
+            with self._lock:
+                report.corrections_applied = self._apply_corrections(
+                    internal_positions, broker_positions, report.discrepancies
+                )
 
         # Log summary
         log_fn = logger.info if report.is_clean else logger.warning

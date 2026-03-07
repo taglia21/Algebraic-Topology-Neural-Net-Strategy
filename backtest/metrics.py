@@ -395,7 +395,7 @@ class PerformanceMetrics:
         peak_level = float(running_max.iloc[trough_idx])
         peak_candidates = equity.iloc[:trough_idx + 1]
         peak_matches = peak_candidates[peak_candidates >= peak_level * 0.9999]
-        peak_date = peak_matches.index[0] if len(peak_matches) > 0 else equity.index[0]
+        peak_date = peak_matches.index[-1] if len(peak_matches) > 0 else equity.index[0]
 
         # Find recovery (first bar after trough where equity >= peak)
         post_trough = equity.iloc[trough_idx + 1:]

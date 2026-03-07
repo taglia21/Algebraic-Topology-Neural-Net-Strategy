@@ -29,11 +29,14 @@ import logging
 from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+
 logger = logging.getLogger(__name__)
 
-# Eastern Time offset (standard = UTC-5, daylight = UTC-4)
-_ET_OFFSET_STD = timedelta(hours=-5)
-_ET_OFFSET_DST = timedelta(hours=-4)
+_ET_TZ = ZoneInfo("America/New_York")
 
 # NYSE regular trading hours (Eastern Time)
 _MARKET_OPEN = time(9, 30)
@@ -73,21 +76,8 @@ _EARLY_CLOSE_DATES: set = {
 
 
 def _now_et() -> datetime:
-    """Current datetime in US Eastern Time (approximated via UTC offset)."""
-    utc_now = datetime.now(timezone.utc)
-    # Simplified DST check: DST is active roughly March second Sunday
-    # through November first Sunday.  For production, use pytz or zoneinfo.
-    month = utc_now.month
-    if 3 < month < 11:
-        offset = _ET_OFFSET_DST
-    elif month == 3:
-        # Approximate: DST starts second Sunday of March
-        offset = _ET_OFFSET_DST if utc_now.day >= 10 else _ET_OFFSET_STD
-    elif month == 11:
-        offset = _ET_OFFSET_STD if utc_now.day >= 3 else _ET_OFFSET_DST
-    else:
-        offset = _ET_OFFSET_STD
-    return utc_now + offset
+    """Current datetime in US Eastern Time (proper timezone-aware)."""
+    return datetime.now(_ET_TZ)
 
 
 class MarketCalendar:

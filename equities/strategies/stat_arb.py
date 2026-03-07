@@ -57,8 +57,8 @@ logger = logging.getLogger(__name__)
 # if unavailable)
 # ---------------------------------------------------------------------------
 
-def _engle_granger_pvalue(y: np.ndarray, x: np.ndarray) -> Tuple[float, float]:
-    """Run Engle-Granger cointegration test; return (p_value, beta).
+def _coint_test_one_direction(y: np.ndarray, x: np.ndarray) -> Tuple[float, float]:
+    """Run Engle-Granger cointegration test in one direction; return (p_value, beta).
 
     The test regresses y on x (with intercept), extracts residuals, then
     runs an Augmented Dickey-Fuller test on the residuals.  The ADF statistic
@@ -96,6 +96,34 @@ def _engle_granger_pvalue(y: np.ndarray, x: np.ndarray) -> Tuple[float, float]:
         pvalue = _approx_adf_pvalue(residuals)
 
     return pvalue, beta
+
+
+def _engle_granger_pvalue(y: np.ndarray, x: np.ndarray) -> Tuple[float, float]:
+    """Test for cointegration in both regression directions; return (p_value, beta).
+
+    Tests both Y~X and X~Y regressions and takes the minimum p-value to avoid
+    directional bias.  The beta returned corresponds to the direction with the
+    lower p-value (i.e. the stronger cointegration direction).
+
+    Parameters
+    ----------
+    y, x:
+        Equal-length price series.
+
+    Returns
+    -------
+    (p_value, beta):
+        Minimum ADF p-value across both directions and corresponding hedge ratio.
+    """
+    pval_yx, beta_yx = _coint_test_one_direction(y, x)
+    pval_xy, beta_xy = _coint_test_one_direction(x, y)
+    if pval_yx <= pval_xy:
+        return pval_yx, beta_yx
+    else:
+        # X~Y direction is stronger; invert beta so it is still expressed as
+        # "hedge ratio of y per unit of x" (i.e. 1/beta_xy)
+        inv_beta = 1.0 / beta_xy if beta_xy != 0.0 else 1.0
+        return pval_xy, inv_beta
 
 
 def _approx_adf_pvalue(residuals: np.ndarray) -> float:
@@ -443,7 +471,15 @@ class StatArbStrategy:
         if min_history_days is None:
             min_history_days = self._cfg.lookback_days
         symbols = [c for c in price_data.columns if c != "SPY"]
-        discovered: List[Pair] = []
+
+        # ---------------------------------------------------------------
+        # Pass 1: compute all cointegration p-values and candidate pairs
+        # ---------------------------------------------------------------
+        # We collect (pvalue, sym_x, sym_y, beta, pair_df) tuples before
+        # any filtering so we can apply Benjamini-Hochberg FDR correction
+        # across the full set of tests (multiple-testing correction).
+        # ---------------------------------------------------------------
+        _candidates: List[Tuple[float, str, str, float, pd.DataFrame]] = []
 
         for sym_x, sym_y in combinations(symbols, 2):
             # Drop NaN rows for this pair
@@ -454,15 +490,52 @@ class StatArbStrategy:
             y_vals = pair_df[sym_x].values.astype(float)
             x_vals = pair_df[sym_y].values.astype(float)
 
-            # Cointegration test
+            # Cointegration test (both directions — BH corrected below)
             try:
                 pvalue, beta = _engle_granger_pvalue(y_vals, x_vals)
             except Exception as exc:
                 logger.debug(f"Cointegration test failed for {sym_x}/{sym_y}: {exc}")
                 continue
 
-            if pvalue >= self._cfg.coint_pvalue:
+            _candidates.append((pvalue, sym_x, sym_y, beta, pair_df))
+
+        # ---------------------------------------------------------------
+        # Apply Benjamini-Hochberg FDR correction across all tested pairs
+        # ---------------------------------------------------------------
+        def _bh_correction(pvalues: List[float], alpha: float = 0.05) -> List[int]:
+            """Return indices of candidates that survive BH FDR correction."""
+            n = len(pvalues)
+            if n == 0:
+                return []
+            sorted_pairs = sorted(enumerate(pvalues), key=lambda item: item[1])
+            accepted: List[int] = []
+            for rank, (idx, pval) in enumerate(sorted_pairs, 1):
+                bh_threshold = alpha * rank / n
+                if pval <= bh_threshold:
+                    accepted.append(idx)
+            return accepted
+
+        all_pvalues = [c[0] for c in _candidates]
+        bh_alpha = self._cfg.coint_pvalue  # reuse configured alpha as FDR level
+        accepted_indices = set(_bh_correction(all_pvalues, alpha=bh_alpha))
+
+        logger.info(
+            f"StatArbStrategy.find_pairs: BH correction keeps "
+            f"{len(accepted_indices)}/{len(_candidates)} candidates "
+            f"at FDR alpha={bh_alpha}."
+        )
+
+        # ---------------------------------------------------------------
+        # Pass 2: build Pair objects from BH-accepted candidates
+        # ---------------------------------------------------------------
+        discovered: List[Pair] = []
+
+        for idx, (pvalue, sym_x, sym_y, beta, pair_df) in enumerate(_candidates):
+            if idx not in accepted_indices:
                 continue
+
+            y_vals = pair_df[sym_x].values.astype(float)
+            x_vals = pair_df[sym_y].values.astype(float)
 
             # Compute spread using static hedge ratio (OU fitting uses static spread)
             spread = y_vals - beta * x_vals
@@ -525,11 +598,17 @@ class StatArbStrategy:
                 observation_cov=self._kalman_observation_cov,
                 initial_state=np.array([0.0, pair.hedge_ratio]),
             )
-            # Warm-up Kalman filter on historical data
+            # Warm-up Kalman filter by processing bars sequentially in
+            # walk-forward (online) order — NO look-ahead bias.
+            # batch_update() internally calls self.update() for each bar in
+            # chronological order so the filter only ever sees past data.
+            # This is safe for initialisation: we process the full history
+            # up to the discovery point so the filter is "warm" when live
+            # signal generation begins.
             pair_df = price_data[[pair.symbol_x, pair.symbol_y]].dropna()
             y_arr = pair_df[pair.symbol_x].values.astype(float)
             x_arr = pair_df[pair.symbol_y].values.astype(float)
-            kf.batch_update(y_arr, x_arr)
+            kf.batch_update(y_arr, x_arr)  # sequential online update — no look-ahead
             self._kalman_filters[pair.pair_id] = kf
 
         logger.info(
@@ -570,29 +649,33 @@ class StatArbStrategy:
         y_arr = pair_df[pair.symbol_x].values.astype(float)
         x_arr = pair_df[pair.symbol_y].values.astype(float)
 
-        # Get time-varying hedge ratios from Kalman filter (read-only predict pass)
+        # Use the current online Kalman hedge ratio — do NOT re-run Kalman on
+        # historical data, which would introduce look-ahead bias by seeding a
+        # fresh filter from a state that already incorporates future information.
         kf = self._kalman_filters.get(pair.pair_id)
         if kf is None:
-            # Fall back to static hedge ratio
-            hedge_ratios = np.full(len(y_arr), pair.hedge_ratio)
+            # Fall back to static hedge ratio from cointegration regression
+            hedge_ratio = pair.hedge_ratio
         else:
-            # Re-run Kalman on this window to get latest ratios without mutation
-            kf_temp = KalmanHedgeRatio(
-                transition_cov=self._kalman_transition_cov,
-                observation_cov=self._kalman_observation_cov,
-                initial_state=np.array([kf.intercept, kf.hedge_ratio]),
-            )
-            _, hedge_ratios = kf_temp.batch_update(y_arr, x_arr)
+            # Use the current (live) hedge ratio from the online filter
+            hedge_ratio = kf.hedge_ratio
+
+        # Rolling z-score window = 2 × half_life
+        window = max(int(pair.half_life * 2), 20)
+
+        # Compute spread using the current online hedge ratio over the lookback
+        # window only — avoids introducing future data into the spread computation.
+        spread_arr = y_arr[-window:] - hedge_ratio * x_arr[-window:]
+        spread_index = pair_df.index[-window:]
 
         # Compute spread using time-varying hedge ratio
         spread = pd.Series(
-            y_arr - hedge_ratios * x_arr,
-            index=pair_df.index,
+            spread_arr,
+            index=spread_index,
             name=f"spread_{pair.pair_id}",
         )
 
-        # Rolling window = 2 × half_life
-        window = max(int(pair.half_life * 2), 20)
+        # Compute rolling z-score over the window already defined above
         roll_mean = spread.rolling(window=window, min_periods=window // 2).mean()
         roll_std = spread.rolling(window=window, min_periods=window // 2).std()
 
@@ -737,65 +820,113 @@ class StatArbStrategy:
             )
 
             if latest_z < -self._entry_z:
-                # Long spread: buy symbol_x, sell symbol_y
-                signal = Signal(
+                # Long spread: buy symbol_x (long leg), sell symbol_y (short leg).
+                # Both legs MUST be emitted as separate signals so the
+                # ExecutionManager opens both sides of the market-neutral spread.
+                _strength = max(strength, 0.01)
+
+                # Long leg signal
+                signals.append(Signal(
                     symbol=pair.symbol_x,
                     direction="long",
-                    strength=max(strength, 0.01),
+                    strength=_strength,
                     strategy=self.STRATEGY_NAME,
                     metadata={
-                        "symbol_long": pair.symbol_x,
+                        "pair_id": pair_id,
                         "symbol_short": pair.symbol_y,
-                        "hedge_ratio": pair.hedge_ratio,
                         "z_score": latest_z,
+                        "hedge_ratio": pair.hedge_ratio,
+                        "side": "long_spread",
                         "half_life": pair.half_life,
                         "action": "entry_long_spread",
-                        "pair_id": pair_id,
                         "ou_theta": pair.ou_theta,
                         "ou_mu": pair.ou_mu,
                         "coint_pvalue": pair.coint_pvalue,
                     },
-                )
-                signals.append(signal)
+                ))
+                # Short leg signal — must also be emitted for the spread to be market-neutral
+                signals.append(Signal(
+                    symbol=pair.symbol_y,
+                    direction="short",
+                    strength=_strength,
+                    strategy=self.STRATEGY_NAME,
+                    metadata={
+                        "pair_id": pair_id,
+                        "symbol_long": pair.symbol_x,
+                        "z_score": latest_z,
+                        "hedge_ratio": pair.hedge_ratio,
+                        "side": "short_spread",
+                        "half_life": pair.half_life,
+                        "action": "entry_long_spread",
+                        "ou_theta": pair.ou_theta,
+                        "ou_mu": pair.ou_mu,
+                        "coint_pvalue": pair.coint_pvalue,
+                    },
+                ))
+
                 self._open_positions[pair_id] = _PairPosition(
                     pair_id=pair_id,
                     side="long_spread",
                     entry_zscore=latest_z,
                 )
                 self._log.log_signal(
-                    self.STRATEGY_NAME, pair.symbol_x, "BUY", float(signal.strength),
-                    {"pair_id": pair_id, "z_score": latest_z},
+                    self.STRATEGY_NAME, pair.symbol_x, "BUY", _strength,
+                    {"pair_id": pair_id, "z_score": latest_z, "short_leg": pair.symbol_y},
                 )
 
             elif latest_z > self._entry_z:
-                # Short spread: sell symbol_x, buy symbol_y
-                signal = Signal(
+                # Short spread: sell symbol_x (short leg), buy symbol_y (long leg).
+                # Both legs MUST be emitted as separate signals so the
+                # ExecutionManager opens both sides of the market-neutral spread.
+                _strength = max(strength, 0.01)
+
+                # Short leg signal
+                signals.append(Signal(
                     symbol=pair.symbol_x,
                     direction="short",
-                    strength=max(strength, 0.01),
+                    strength=_strength,
                     strategy=self.STRATEGY_NAME,
                     metadata={
+                        "pair_id": pair_id,
                         "symbol_long": pair.symbol_y,
-                        "symbol_short": pair.symbol_x,
-                        "hedge_ratio": pair.hedge_ratio,
                         "z_score": latest_z,
+                        "hedge_ratio": pair.hedge_ratio,
+                        "side": "short_spread",
                         "half_life": pair.half_life,
                         "action": "entry_short_spread",
-                        "pair_id": pair_id,
                         "ou_theta": pair.ou_theta,
                         "ou_mu": pair.ou_mu,
                         "coint_pvalue": pair.coint_pvalue,
                     },
-                )
-                signals.append(signal)
+                ))
+                # Long leg signal — must also be emitted for the spread to be market-neutral
+                signals.append(Signal(
+                    symbol=pair.symbol_y,
+                    direction="long",
+                    strength=_strength,
+                    strategy=self.STRATEGY_NAME,
+                    metadata={
+                        "pair_id": pair_id,
+                        "symbol_short": pair.symbol_x,
+                        "z_score": latest_z,
+                        "hedge_ratio": pair.hedge_ratio,
+                        "side": "long_spread",
+                        "half_life": pair.half_life,
+                        "action": "entry_short_spread",
+                        "ou_theta": pair.ou_theta,
+                        "ou_mu": pair.ou_mu,
+                        "coint_pvalue": pair.coint_pvalue,
+                    },
+                ))
+
                 self._open_positions[pair_id] = _PairPosition(
                     pair_id=pair_id,
                     side="short_spread",
                     entry_zscore=latest_z,
                 )
                 self._log.log_signal(
-                    self.STRATEGY_NAME, pair.symbol_x, "SELL", float(signal.strength),
-                    {"pair_id": pair_id, "z_score": latest_z},
+                    self.STRATEGY_NAME, pair.symbol_x, "SELL", _strength,
+                    {"pair_id": pair_id, "z_score": latest_z, "long_leg": pair.symbol_y},
                 )
 
         return signals

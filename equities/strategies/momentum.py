@@ -216,6 +216,10 @@ class MomentumStrategy:
         self._bar_count: int = 0
         # Bar index of the last rebalance (0 = never rebalanced)
         self._last_rebalance_bar: int = 0
+        # Date-based rebalance tracking: replaces bar-counter alignment
+        # so that restarts don't cause an immediate spurious rebalance and
+        # rebalance cadence is calendar-driven rather than bar-count-driven.
+        self._last_rebalance_date = None
         # Currently held positions: symbol → direction ("long" | "short")
         self._current_longs: Set[str] = set()
         self._current_shorts: Set[str] = set()
@@ -269,6 +273,7 @@ class MomentumStrategy:
         price_data: pd.DataFrame,
         lookback: int = 252,
         skip: int = 21,
+        bar_dt=None,
     ) -> pd.DataFrame:
         """Rank all stocks by residual 12-1 month momentum.
 
@@ -286,6 +291,11 @@ class MomentumStrategy:
         skip:
             Number of most-recent trading days to skip (default 21 ≈ 1 month)
             to avoid short-term reversal.
+        bar_dt:
+            Optional current bar datetime.  When provided, price_data is
+            truncated to rows up to and including this date to prevent
+            look-ahead bias (the caller may pass a full history slice but
+            this guard ensures no future bars leak into the computation).
 
         Returns
         -------
@@ -297,6 +307,17 @@ class MomentumStrategy:
             - ``realized_vol``:    60-day annualised realised volatility
             - ``sector``:          GICS sector string
         """
+        # Defensive: truncate price_data to current bar to prevent look-ahead bias.
+        # Caller must pass bar_dt equal to the current point-in-time date.
+        if bar_dt is not None and hasattr(price_data.index, 'max'):
+            try:
+                price_data = price_data.loc[:bar_dt]
+            except Exception as _trunc_err:
+                logger.warning(
+                    f"MomentumStrategy.rank_stocks: could not truncate to bar_dt "
+                    f"{bar_dt}: {_trunc_err}"
+                )
+
         if len(price_data) < lookback + 10:
             logger.warning(
                 f"MomentumStrategy.rank_stocks: insufficient history "
@@ -404,6 +425,7 @@ class MomentumStrategy:
         self,
         price_data: pd.DataFrame,
         regime_state: RegimeState,
+        bar_dt=None,
     ) -> List[Signal]:
         """Generate long/short momentum signals with monthly rebalancing.
 
@@ -413,6 +435,13 @@ class MomentumStrategy:
             Wide-format close price DataFrame.
         regime_state:
             Current market regime.
+        bar_dt:
+            Optional current bar datetime.  When provided, rebalance timing
+            is determined by calendar days elapsed since the last rebalance
+            rather than by a raw bar counter, which prevents spurious
+            immediate rebalances after restarts and aligns rebalances to
+            calendar intervals.  Also forwarded to ``rank_stocks`` to guard
+            against look-ahead bias.
 
         Returns
         -------
@@ -453,10 +482,29 @@ class MomentumStrategy:
         bear_scalar = 0.5 if regime_state.regime == Regime.BEAR else 1.0
 
         # -----------------------------------------------------------------
-        # Between rebalances: only emit stop-loss CLOSE signals
+        # Rebalance timing: calendar-date-based (preferred) or bar-counter
+        # fallback when bar_dt is not provided.
+        # Date-based tracking prevents spurious immediate rebalances after
+        # restarts and aligns the cadence to calendar intervals.
         # -----------------------------------------------------------------
         rebalance_days = max(1, self._cfg.rebalance_days)
-        is_rebalance_bar = (self._bar_count % rebalance_days == 0)
+
+        if bar_dt is not None:
+            # Calendar-based rebalance check
+            current_date = bar_dt.date() if hasattr(bar_dt, 'date') else bar_dt
+            if self._last_rebalance_date is None:
+                # First bar — force a rebalance so we enter positions once
+                # we have sufficient history (rank_stocks guards via its own
+                # lookback check; an empty rankings list is handled below).
+                days_since = rebalance_days
+            else:
+                days_since = (current_date - self._last_rebalance_date).days
+            is_rebalance_bar = days_since >= rebalance_days
+            if is_rebalance_bar:
+                self._last_rebalance_date = current_date
+        else:
+            # Fallback: bar-counter-based rebalance (legacy behaviour)
+            is_rebalance_bar = (self._bar_count % rebalance_days == 0)
 
         if not is_rebalance_bar:
             stop_signals = self._check_stop_losses(price_data)
@@ -476,6 +524,7 @@ class MomentumStrategy:
             price_data,
             lookback=self._cfg.lookback_days,
             skip=self._cfg.skip_days,
+            bar_dt=bar_dt,
         )
         if rankings.empty:
             logger.warning("MomentumStrategy.generate_signals: rankings are empty.")
@@ -686,38 +735,44 @@ class MomentumStrategy:
     # ------------------------------------------------------------------
 
     def _check_stop_losses(self, price_data: pd.DataFrame) -> List[Signal]:
-        """Emit CLOSE signals for longs that have dropped below stop-loss.
+        """Emit CLOSE signals for positions that have hit their stop-loss.
 
-        Only longs are stop-loss checked (shorts have unlimited upside risk
-        but are handled at rebalance; asymmetric treatment avoids
-        prematurely covering shorts in normal drawdown noise).
+        Both long and short positions are checked:
+          - **Long stop**: current price has dropped more than
+            ``_STOP_LOSS_PCT`` below the entry price.
+          - **Short stop**: current price has risen more than
+            ``_STOP_LOSS_PCT`` above the entry price.
 
         Returns
         -------
         List of CLOSE signals.
         """
-        if not self._current_longs or not self._entry_prices:
+        all_positions = self._current_longs | self._current_shorts
+        if not all_positions or not self._entry_prices:
             return []
 
         latest_prices = self._get_latest_prices(price_data)
         signals: List[Signal] = []
 
-        triggered: Set[str] = set()
+        triggered_longs: Set[str] = set()
+        triggered_shorts: Set[str] = set()
+
+        # --- Check long positions: stop triggers when price falls too far ---
         for sym in list(self._current_longs):
             entry = self._entry_prices.get(sym)
             current = latest_prices.get(sym)
             if entry is None or current is None or entry <= 0:
                 continue
-            drawdown = (current - entry) / entry  # negative = loss
-            if drawdown < -self._STOP_LOSS_PCT:
+            pnl_pct = (current - entry) / entry  # negative = loss
+            if pnl_pct <= -self._STOP_LOSS_PCT:
                 signals.append(Signal(
                     symbol=sym,
                     direction="close",
                     strength=1.0,
                     strategy=MomentumStrategy.STRATEGY_NAME,
                     metadata={
-                        "reason": "stop_loss",
-                        "drawdown": round(drawdown, 4),
+                        "reason": "stop_loss_long",
+                        "pnl_pct": round(pnl_pct, 4),
                         "entry_price": entry,
                         "current_price": current,
                         "bar": self._bar_count,
@@ -725,13 +780,43 @@ class MomentumStrategy:
                 ))
                 self._log.log_signal(
                     MomentumStrategy.STRATEGY_NAME, sym, "CLOSE", 1.0,
-                    {"reason": "stop_loss", "drawdown": round(drawdown, 4)},
+                    {"reason": "stop_loss_long", "pnl_pct": round(pnl_pct, 4)},
                 )
-                triggered.add(sym)
+                triggered_longs.add(sym)
+
+        # --- Check short positions: stop triggers when price rises too far ---
+        for sym in list(self._current_shorts):
+            entry = self._entry_prices.get(sym)
+            current = latest_prices.get(sym)
+            if entry is None or current is None or entry <= 0:
+                continue
+            # For a short, profit = (entry - current) / entry.
+            # A negative value means the price has risen (adverse move).
+            pnl_pct = (entry - current) / entry
+            if pnl_pct <= -self._STOP_LOSS_PCT:
+                signals.append(Signal(
+                    symbol=sym,
+                    direction="close",
+                    strength=1.0,
+                    strategy=MomentumStrategy.STRATEGY_NAME,
+                    metadata={
+                        "reason": "stop_loss_short",
+                        "pnl_pct": round(pnl_pct, 4),
+                        "entry_price": entry,
+                        "current_price": current,
+                        "bar": self._bar_count,
+                    },
+                ))
+                self._log.log_signal(
+                    MomentumStrategy.STRATEGY_NAME, sym, "CLOSE", 1.0,
+                    {"reason": "stop_loss_short", "pnl_pct": round(pnl_pct, 4)},
+                )
+                triggered_shorts.add(sym)
 
         # Remove stopped-out positions from tracking
-        self._current_longs -= triggered
-        for sym in triggered:
+        self._current_longs -= triggered_longs
+        self._current_shorts -= triggered_shorts
+        for sym in triggered_longs | triggered_shorts:
             self._entry_prices.pop(sym, None)
 
         return signals

@@ -632,7 +632,24 @@ class DataManager:
             except KeyError:
                 continue
 
-            # ---- 1. NaN handling ------------------------------------------
+            # ---- 1. Drop negative/invalid prices FIRST (before fill-forward) ----
+            if price_cols:
+                neg_mask = (sym_df[price_cols] < 0).any(axis=1)
+                if neg_mask.any():
+                    n_neg = int(neg_mask.sum())
+                    self._logger.log_info(f"Dropping {n_neg} rows with negative prices for {sym}")
+                    warnings.warn(
+                        f"DataManager [{sym}]: dropping {n_neg} rows with "
+                        "negative prices.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    self._logger.log_info(
+                        f"DataManager: dropped {n_neg} negative-price rows for {sym}"
+                    )
+                    sym_df = sym_df.loc[~neg_mask]
+
+            # ---- 2. NaN handling (fill forward AFTER removing bad data) ----
             nan_counts = sym_df[price_cols].isna().sum()
             total_nans = int(nan_counts.sum())
             if total_nans > 0:
@@ -655,22 +672,6 @@ class DataManager:
                     sym_df[price_cols]
                     .ffill(limit=_MAX_FFILL_BARS)
                 )
-
-            # ---- 2. Negative prices ----------------------------------------
-            if price_cols:
-                neg_mask = (sym_df[price_cols] < 0).any(axis=1)
-                if neg_mask.any():
-                    n_neg = int(neg_mask.sum())
-                    warnings.warn(
-                        f"DataManager [{sym}]: dropping {n_neg} rows with "
-                        "negative prices.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
-                    self._logger.log_info(
-                        f"DataManager: dropped {n_neg} negative-price rows for {sym}"
-                    )
-                    sym_df = sym_df.loc[~neg_mask]
 
             # ---- 3. Zero volume --------------------------------------------
             if "volume" in sym_df.columns:

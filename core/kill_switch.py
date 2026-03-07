@@ -122,29 +122,28 @@ class KillSwitch:
     # ------------------------------------------------------------------
 
     def is_trading_allowed(self) -> bool:
-        """Check if trading is permitted right now.
-
-        Returns
-        -------
-        bool
-            True if trading may proceed.
-        """
+        """Check if trading is permitted right now."""
         if self._kill_engaged:
             return False
-
         if self._breaker_tripped:
-            # Check if cooldown has expired
-            if self._breaker_trip_time is not None:
-                elapsed = (time.time() - self._breaker_trip_time) / 60.0
-                if elapsed >= self.config.cooldown_minutes:
-                    self._breaker_tripped = False
-                    self._breaker_reason = ""
-                    self._breaker_trip_time = None
-                    logger.info("KillSwitch: circuit breaker cooldown expired — trading resumed.")
-                    return True
             return False
-
         return True
+
+    def check_cooldown_expired(self) -> bool:
+        """Check if circuit breaker cooldown has expired. Call explicitly to reset.
+
+        Returns True if the breaker was reset, False otherwise.
+        """
+        if not self._breaker_tripped or self._breaker_trip_time is None:
+            return False
+        elapsed = (time.time() - self._breaker_trip_time) / 60.0
+        if elapsed >= self.config.cooldown_minutes:
+            self._breaker_tripped = False
+            self._breaker_reason = ""
+            self._breaker_trip_time = None
+            logger.info("KillSwitch: circuit breaker cooldown expired — trading resumed.")
+            return True
+        return False
 
     @property
     def block_reason(self) -> str:
@@ -227,20 +226,18 @@ class KillSwitch:
             )
             return False
 
-        # Max open positions
+        # Max open positions — block but do NOT trip breaker (normal condition)
         n_positions = len(portfolio_state.positions)
         if n_positions >= self.config.max_open_positions:
-            self._trip_breaker(
-                f"Max open positions reached: {n_positions} "
-                f"(max {self.config.max_open_positions})"
+            logger.info(
+                f"KillSwitch: max open positions reached ({n_positions}/{self.config.max_open_positions}) — order blocked"
             )
             return False
 
         # Drawdown check
         equity = portfolio_state.equity
-        if equity > self._peak_equity:
-            self._peak_equity = equity
-
+        # Compute drawdown BEFORE updating peak — otherwise dd is always 0
+        # when equity has recovered even slightly
         dd = (equity - self._peak_equity) / max(self._peak_equity, 1.0)
         if dd <= self.config.max_drawdown_pct:
             self._trip_breaker(
@@ -248,6 +245,10 @@ class KillSwitch:
                 f"(threshold {self.config.max_drawdown_pct:.2%})"
             )
             return False
+
+        # Update peak AFTER the drawdown check
+        if equity > self._peak_equity:
+            self._peak_equity = equity
 
         # Daily loss check
         daily_pnl = (equity - self._sod_equity) / max(self._sod_equity, 1.0)
@@ -301,7 +302,7 @@ class KillSwitch:
             "daily_fills": self._daily_fills,
             "peak_equity": self._peak_equity,
             "sod_equity": self._sod_equity,
-        }
+        }.copy()
 
     # ------------------------------------------------------------------
     # Private

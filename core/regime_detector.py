@@ -343,6 +343,7 @@ class RegimeDetector:
         self._state_to_regime: Dict[int, Regime] = {}
         self._is_fitted: bool = False
         self._n_training_bars: int = 0
+        self._min_training_days: int = MIN_TRAINING_DAYS
 
     # ------------------------------------------------------------------
     # Fitting
@@ -397,15 +398,18 @@ class RegimeDetector:
             f"(n_states={self.n_states}, n_samples={len(X)}) ..."
         )
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")  # suppress convergence warnings during fit
-            model = GaussianHMM(
-                n_components=self.n_states,
-                covariance_type="full",
-                n_iter=self.n_iter,
-                random_state=self.random_state,
+        model = GaussianHMM(
+            n_components=self.n_states,
+            covariance_type="full",
+            n_iter=self.n_iter,
+            random_state=self.random_state,
+        )
+        model.fit(X)
+        if not model.monitor_.converged:
+            logger.warning(
+                f"HMM did not converge after {model.n_iter} iterations — "
+                f"regime predictions may be unreliable"
             )
-            model.fit(X)
 
         self._model = model
         self._n_training_bars = len(X)
@@ -448,9 +452,20 @@ class RegimeDetector:
         state_indices = list(range(self.n_states))
 
         # BEAR: worst combination of negative return and high volatility.
-        # Score: penalise by (−return) + volatility
+        # Normalize both features to the same scale before scoring so that
+        # large-magnitude volatility values (~0.15-0.35) cannot dominate
+        # over small-magnitude return values (~0.001).
+        mean_returns = means[:, returns_idx]
+        mean_vols = means[:, vol_idx]
+
+        # Z-score normalize across states
+        ret_std = np.std(mean_returns) if np.std(mean_returns) > 0 else 1.0
+        vol_std = np.std(mean_vols) if np.std(mean_vols) > 0 else 1.0
+        norm_returns = (mean_returns - np.mean(mean_returns)) / ret_std
+        norm_vols = (mean_vols - np.mean(mean_vols)) / vol_std
+
         bear_scores = [
-            -means[i, returns_idx] + means[i, vol_idx]
+            -norm_returns[i] + norm_vols[i]
             for i in state_indices
         ]
         bear_state = int(np.argmax(bear_scores))
@@ -539,9 +554,7 @@ class RegimeDetector:
             )
 
         # HMM posterior probabilities
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            posteriors: np.ndarray = self._model.predict_proba(X)  # (n, n_states)
+        posteriors: np.ndarray = self._model.predict_proba(X)  # (n, n_states)
 
         latest_posteriors = posteriors[-1]  # shape (n_states,)
 
@@ -639,10 +652,32 @@ class RegimeDetector:
         if len(X) == 0:
             return pd.DataFrame()
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            states: np.ndarray = self._model.predict(X)
-            posteriors: np.ndarray = self._model.predict_proba(X)
+        # For backtesting: use a fixed-size rolling window so that the
+        # prediction at bar t only uses data from [t-window_size, t].
+        # This avoids look-ahead bias from full-sequence Viterbi / forward-
+        # backward smoothing which gives bar t information from t+1...T.
+        window_size = 252  # 1-year lookback
+        min_window = max(self._min_training_days, 60)
+
+        states = np.zeros(len(X), dtype=int)
+        posteriors = np.zeros((len(X), self._model.n_components))
+
+        for t in range(len(X)):
+            start = max(0, t - window_size)
+            window = X[start : t + 1]
+            if len(window) >= min_window:
+                states[t] = self._model.predict(window)[-1]
+                posteriors[t] = self._model.predict_proba(window)[-1]
+            # else: stays zero (filled below once we have enough data)
+
+        # Fill early bars (before min_window) with the first valid prediction
+        first_valid = next(
+            (t for t in range(len(X)) if len(X[max(0, t - window_size): t + 1]) >= min_window),
+            None,
+        )
+        if first_valid is not None and first_valid > 0:
+            states[:first_valid] = states[first_valid]
+            posteriors[:first_valid] = posteriors[first_valid]
 
         result = pd.DataFrame(index=valid_index)
         result["hmm_state"] = states

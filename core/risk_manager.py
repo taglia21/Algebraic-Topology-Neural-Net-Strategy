@@ -110,12 +110,19 @@ class PortfolioState:
     sector_map:
         Optional mapping of symbol → sector string.  Required for sector
         exposure checks; if absent the sector check is skipped.
+    sod_equity:
+        Start-of-day (SOD) portfolio equity in USD.  Used as the denominator
+        in the daily loss limit check so that intraday P&L is expressed as a
+        fraction of the *opening* balance rather than the current (already
+        impaired) balance.  If not provided, *equity* is used as a fallback
+        with a warning — callers should always supply this value.
     """
     equity: float
     peak_equity: float
     today_pnl: float
     positions: Dict[str, float] = field(default_factory=dict)
     sector_map: Dict[str, str] = field(default_factory=dict)
+    sod_equity: Optional[float] = None  # start-of-day equity for daily loss check
 
 
 # ---------------------------------------------------------------------------
@@ -158,24 +165,30 @@ class RiskManager:
         proposed_qty: float,
         proposed_price: float,
         portfolio_value: float,
+        current_position_qty: float = 0.0,
     ) -> bool:
         """Return True if the proposed trade keeps position size within limit.
 
-        The check is evaluated on the *resulting* position value: the
-        combination of any existing exposure in *portfolio_state* and the new
-        order.  Callers that need to validate an incremental add to an
-        existing position should pass the total resulting notional.
+        The check is evaluated on the *resulting* total position value:
+        the combination of any existing exposure in the portfolio and the
+        new order.  Pass *current_position_qty* to include an already-held
+        position in the symbol so that incremental adds are checked against
+        the full resulting notional, not just the new order.
 
         Parameters
         ----------
         symbol:
             Ticker symbol.
         proposed_qty:
-            Absolute number of shares (always positive).
+            Absolute number of shares being added (always positive).
         proposed_price:
             Estimated execution price.
         portfolio_value:
             Current total portfolio value in USD.
+        current_position_qty:
+            Number of shares (absolute value) already held in *symbol*.
+            Defaults to 0 (i.e. no existing position).  Pass the existing
+            holding so that the check covers the *total* resulting position.
 
         Returns
         -------
@@ -195,7 +208,12 @@ class RiskManager:
             )
 
         notional = proposed_qty * proposed_price
-        position_pct = notional / portfolio_value
+        # Include existing position to check TOTAL resulting position, not
+        # just the incremental order.  This prevents bypassing the limit by
+        # sending multiple smaller orders.
+        existing_notional = abs(current_position_qty) * proposed_price
+        total_notional = existing_notional + notional
+        position_pct = total_notional / portfolio_value
         max_pct = self._cfg.max_position_pct
 
         if position_pct > max_pct:
@@ -204,6 +222,8 @@ class RiskManager:
                 {
                     "symbol": symbol,
                     "proposed_notional": round(notional, 2),
+                    "existing_notional": round(existing_notional, 2),
+                    "total_notional": round(total_notional, 2),
                     "position_pct": round(position_pct, 4),
                     "max_pct": max_pct,
                     "portfolio_value": portfolio_value,
@@ -427,7 +447,12 @@ class RiskManager:
         today_pnl:
             Realised + unrealised P&L for the current day (negative = loss).
         portfolio_value:
-            Portfolio value at the start of today (used as denominator).
+            **Start-of-day** portfolio equity in USD.  Using the opening
+            balance as the denominator ensures the daily loss percentage is
+            not artificially inflated by an already-declining equity base
+            mid-day.  Callers MUST pass SOD equity here — passing the current
+            (intraday) equity would understate the loss fraction when the
+            portfolio is already down.
 
         Returns
         -------
@@ -552,12 +577,14 @@ class RiskManager:
 
             # Half-Kelly
             half_kelly_f = kelly_f * self._cfg.kelly_fraction
-            # Scale by signal strength and additional volatility adjustment
-            vol_adj = min(1.0, 0.20 / max(volatility, 1e-6))  # target 20 % vol
+            # Scale by signal strength and additional volatility adjustment.
+            # Use the configured vol_target instead of a hardcoded 20 % constant.
+            vol_adj = min(1.0, self._cfg.vol_target / max(volatility, 1e-6))
             notional = half_kelly_f * signal_strength * vol_adj * portfolio_value
         else:
-            # Volatility-inverse fallback
-            target_vol = 0.20  # annualised 20 % vol target
+            # Volatility-inverse fallback: size so that position contributes
+            # vol_target annualised volatility to the portfolio.
+            target_vol = self._cfg.vol_target
             vol_adj = min(1.0, target_vol / max(volatility, 1e-6))
             notional = signal_strength * vol_adj * portfolio_value
 
@@ -636,16 +663,29 @@ class RiskManager:
         today_pnl = portfolio_state.today_pnl
         positions = portfolio_state.positions
         sector_map = portfolio_state.sector_map
+        # Use start-of-day equity as the denominator for the daily loss check.
+        # Fall back to current equity if sod_equity was not supplied, but log
+        # a warning because this will understate the loss when the portfolio
+        # is already down intraday.
+        if portfolio_state.sod_equity is not None and portfolio_state.sod_equity > 0:
+            sod_equity = portfolio_state.sod_equity
+        else:
+            logger.warning(
+                "approve_trade: PortfolioState.sod_equity not set; falling back to "
+                "current equity for daily loss check.  Provide sod_equity for an "
+                "accurate daily loss percentage."
+            )
+            sod_equity = equity
 
         # ----------------------------------------------------------------
         # 1. Daily loss limit
         # ----------------------------------------------------------------
         checks_run.append("daily_loss")
-        if not self.check_daily_loss(today_pnl, equity):
+        if not self.check_daily_loss(today_pnl, sod_equity):
             checks_failed.append("daily_loss")
             denial_reasons.append(
                 f"Daily loss limit breached "
-                f"({today_pnl / equity:.2%} vs limit {self._cfg.daily_loss_limit:.2%})"
+                f"({today_pnl / sod_equity:.2%} vs limit {self._cfg.daily_loss_limit:.2%})"
             )
 
         # ----------------------------------------------------------------
@@ -671,12 +711,19 @@ class RiskManager:
         # 3. Position size
         # ----------------------------------------------------------------
         checks_run.append("position_size")
-        if not self.check_position_size(symbol, qty, price, equity):
+        # Derive existing position qty from the positions dict (market value ÷ price).
+        # positions stores signed market value; abs() handles shorts correctly.
+        existing_mkt_value = positions.get(symbol, 0.0)
+        current_position_qty = abs(existing_mkt_value) / price if price > 0 else 0.0
+        if not self.check_position_size(symbol, qty, price, equity, current_position_qty):
             checks_failed.append("position_size")
             notional = qty * price
+            existing_notional = current_position_qty * price
+            total_notional = existing_notional + notional
             denial_reasons.append(
-                f"Position size {notional / equity:.2%} exceeds limit "
-                f"{self._cfg.max_position_pct:.0%} of portfolio"
+                f"Total resulting position size {total_notional / equity:.2%} "
+                f"(existing {existing_notional / equity:.2%} + new {notional / equity:.2%}) "
+                f"exceeds limit {self._cfg.max_position_pct:.0%} of portfolio"
             )
 
         # ----------------------------------------------------------------
@@ -727,7 +774,24 @@ class RiskManager:
                 abs(v) for v in positions.values() if v < 0
             )
             proposed_notional = qty * price
-            total_short_exposure = current_short_exposure + proposed_notional
+
+            # Determine how much of this sell genuinely creates NEW short
+            # exposure vs. simply closing an existing long position.
+            # A sell that closes a long reduces risk; only any qty sold
+            # *beyond* the existing long constitutes new short exposure.
+            existing_long_value = positions.get(symbol, 0.0)
+            if existing_long_value > 0:
+                # The existing position is long; derive share count from mkt value.
+                existing_long_qty = existing_long_value / price if price > 0 else 0.0
+                # Shares sold beyond the existing long become a new short.
+                net_new_short_qty = max(0.0, qty - existing_long_qty)
+                net_new_short_notional = net_new_short_qty * price
+            else:
+                # No existing long (either no position or already short);
+                # the entire sell order adds to short exposure.
+                net_new_short_notional = proposed_notional
+
+            total_short_exposure = current_short_exposure + net_new_short_notional
             short_pct = total_short_exposure / equity if equity > 0 else 999
 
             # Check gross short exposure limit
@@ -739,6 +803,7 @@ class RiskManager:
                         "symbol": symbol,
                         "current_short_pct": round(current_short_exposure / equity, 4),
                         "proposed_short_pct": round(short_pct, 4),
+                        "net_new_short_notional": round(net_new_short_notional, 2),
                         "max_short_exposure": self._cfg.max_short_exposure,
                     },
                 )
@@ -747,8 +812,8 @@ class RiskManager:
                     f"limit {self._cfg.max_short_exposure:.0%}"
                 )
 
-            # Check individual short position limit
-            individual_short_pct = proposed_notional / equity if equity > 0 else 999
+            # Check individual short position limit (only for net-new short qty)
+            individual_short_pct = net_new_short_notional / equity if equity > 0 else 999
             if individual_short_pct > self._cfg.max_short_position_pct:
                 if "short_exposure" not in checks_failed:
                     checks_failed.append("short_exposure")

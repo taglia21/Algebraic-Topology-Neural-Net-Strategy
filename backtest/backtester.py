@@ -178,6 +178,10 @@ class Backtester:
         self._regime_log: Dict[datetime, str] = {}
         self._trades_log: List[dict] = []
 
+        # First datetime of the live-trading period (post-warmup).
+        # Set during run() so get_results() can trim the equity curve.
+        self._live_start_dt: Optional[datetime] = None
+
         logger.info(
             "Backtester initialised: "
             f"cash={_cash:,.0f}, slippage={_slippage}bps, "
@@ -367,6 +371,11 @@ class Backtester:
             if bar_dt < start_dt:
                 continue
 
+            # Record the first live-trading bar so the equity curve can be
+            # trimmed to exclude warmup when computing return metrics.
+            if self._live_start_dt is None:
+                self._live_start_dt = bar_dt
+
             # ---- Step 2: Update regime detector ----
             spy_history = self._get_spy_history(history, benchmark_symbol)
             if spy_history is not None and len(spy_history) >= 60:
@@ -393,17 +402,20 @@ class Backtester:
                     spy_df = self._get_spy_history(history, benchmark_symbol)
                     fe = _FE(spy_data=spy_df)
                     self.ml_pipeline = _MLP(feature_engine=fe, config=self.config)
-                    # Initial training on all warmup data per-symbol
+                    # Initial training on all warmup data — train on every
+                    # viable symbol so the model sees the full universe.
+                    # Do NOT break after the first symbol.
+                    trained_count = 0
                     for sym in symbols:
                         try:
                             sym_history = self._get_spy_history(history, sym)
                             if sym_history is not None and len(sym_history) >= 252:
                                 self.ml_pipeline.train_all(sym_history, symbol=sym, run_validation=False)
                                 logger.info(f"ML pipeline trained on {sym} ({len(sym_history)} bars)")
-                                break  # train on first viable symbol; meta-learner generalises
+                                trained_count += 1
                         except Exception as exc:
-                            logger.debug(f"ML train skip {sym}: {exc}")
-                    logger.info("ML pipeline initialised and trained.")
+                            logger.warning(f"ML training failed for {sym}: {exc}")
+                    logger.info(f"ML pipeline initialised and trained on {trained_count}/{len(symbols)} symbols.")
                 except Exception as exc:
                     logger.warning(f"ML pipeline init failed: {exc}")
                     self.ml_pipeline = None
@@ -414,9 +426,20 @@ class Backtester:
                     # Retrain on configured cadence (~monthly)
                     if bar_idx % (self.config.ml.retrain_freq_days * 5) == 0:
                         self.ml_pipeline.retrain_if_needed(history)
-                    # Predict weekly (every 5 bars) to balance cost vs responsiveness
+                    # Predict weekly (every 5 bars) to balance cost vs responsiveness.
+                    # Iterate per symbol — predict() requires single-symbol OHLCV data
+                    # and raises ValueError on a MultiIndex DataFrame.
                     if bar_idx % 5 == 0 or bar_idx <= warmup_end_idx + 2:
-                        ml_preds = self.ml_pipeline.predict(history, regime_state)
+                        ml_preds: Dict[str, dict] = {}
+                        for sym in symbols:
+                            try:
+                                sym_history = self._get_spy_history(history, sym)
+                                if sym_history is not None:
+                                    pred = self.ml_pipeline.predict(sym_history, regime_state, symbol=sym)
+                                    if pred:
+                                        ml_preds.update(pred)
+                            except Exception as exc:
+                                logger.debug(f"ML predict failed for {sym}: {exc}")
                         ml_adjustments = {
                             sym: float(pred.get("score", 0.5))
                             for sym, pred in ml_preds.items()
@@ -665,6 +688,10 @@ class Backtester:
             daily_returns = pd.Series(dtype=float)
         else:
             equity_curve = pd.Series(self._equity_curve).sort_index()
+            # Trim to live trading period (exclude warmup bars) so that
+            # flat zero-return periods don't deflate volatility / inflate Sharpe.
+            if hasattr(self, '_live_start_dt') and self._live_start_dt is not None:
+                equity_curve = equity_curve.loc[self._live_start_dt:]
             daily_returns = equity_curve.pct_change().dropna()
 
         regime_history = pd.Series(self._regime_log).sort_index()
@@ -1063,7 +1090,9 @@ class Backtester:
         """Convert SimulatedBroker fill history into a list of trade records.
 
         Pairs buy and sell fills for each symbol to construct closed trade
-        records with P&L and holding period.
+        records with P&L and holding period.  Handles both long trades
+        (buy to open, sell to close) and short trades (sell to open,
+        buy to cover).
 
         Returns
         -------
@@ -1074,39 +1103,70 @@ class Backtester:
         if not fills:
             return []
 
-        # Accumulate fills per symbol in order
-        from collections import defaultdict
-        fill_queues: dict = defaultdict(list)
-        for fill in fills:
-            fill_queues[fill.symbol].append(fill)
-
         trades: List[dict] = []
-        for sym, sym_fills in fill_queues.items():
-            # Match buys to subsequent sells (FIFO)
-            open_lots: List[dict] = []
-            for fill in sym_fills:
-                if fill.side == "buy":
-                    open_lots.append({
-                        "dt":    fill.timestamp,
-                        "price": fill.fill_price,
-                        "qty":   fill.fill_qty,
-                    })
-                elif fill.side == "sell" and open_lots:
-                    # Close against oldest open lot
-                    entry = open_lots.pop(0)
-                    holding = self._days_between(entry["dt"], fill.timestamp)
-                    pnl = (fill.fill_price - entry["price"]) * min(fill.fill_qty, entry["qty"])
+        # Track open lots per symbol: list of {side, qty, price, timestamp}
+        open_lots: Dict[str, list] = {}
+
+        for fill in fills:
+            symbol = fill.symbol
+            if symbol not in open_lots:
+                open_lots[symbol] = []
+
+            lots = open_lots[symbol]
+
+            if fill.side == "buy":
+                # Check if this closes a short position
+                if lots and lots[0]["side"] == "sell":
+                    # Buy to cover — close the short
+                    open_lot = lots.pop(0)
+                    pnl = (open_lot["price"] - fill.fill_price) * fill.fill_qty
+                    holding = self._days_between(open_lot["timestamp"], fill.timestamp)
                     trades.append({
-                        "symbol":      sym,
-                        "side":        "long",
-                        "entry_date":  entry["dt"],
-                        "exit_date":   fill.timestamp,
-                        "entry_price": entry["price"],
-                        "exit_price":  fill.fill_price,
-                        "qty":         min(fill.fill_qty, entry["qty"]),
-                        "pnl":         pnl,
+                        "symbol":       symbol,
+                        "side":         "short",
+                        "entry_date":   open_lot["timestamp"],
+                        "exit_date":    fill.timestamp,
+                        "entry_price":  open_lot["price"],
+                        "exit_price":   fill.fill_price,
+                        "qty":          fill.fill_qty,
+                        "pnl":          pnl,
                         "holding_days": holding,
-                        "strategy":    "combined",
+                        "strategy":     "combined",
+                    })
+                else:
+                    # Open a long position
+                    lots.append({
+                        "side":      "buy",
+                        "qty":       fill.fill_qty,
+                        "price":     fill.fill_price,
+                        "timestamp": fill.timestamp,
+                    })
+            elif fill.side == "sell":
+                # Check if this closes a long position
+                if lots and lots[0]["side"] == "buy":
+                    # Sell to close — close the long
+                    open_lot = lots.pop(0)
+                    pnl = (fill.fill_price - open_lot["price"]) * fill.fill_qty
+                    holding = self._days_between(open_lot["timestamp"], fill.timestamp)
+                    trades.append({
+                        "symbol":       symbol,
+                        "side":         "long",
+                        "entry_date":   open_lot["timestamp"],
+                        "exit_date":    fill.timestamp,
+                        "entry_price":  open_lot["price"],
+                        "exit_price":   fill.fill_price,
+                        "qty":          fill.fill_qty,
+                        "pnl":          pnl,
+                        "holding_days": holding,
+                        "strategy":     "combined",
+                    })
+                else:
+                    # Open a short position
+                    lots.append({
+                        "side":      "sell",
+                        "qty":       fill.fill_qty,
+                        "price":     fill.fill_price,
+                        "timestamp": fill.timestamp,
                     })
 
         return trades

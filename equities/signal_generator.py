@@ -106,6 +106,7 @@ _REGIME_DIRECTION_BIAS: Dict[str, Dict[str, float]] = {
     Regime.BEAR.value:     {"long": 0.6, "short": 1.2},
     Regime.SIDEWAYS.value: {"long": 1.1, "short": 0.80},
     Regime.UNKNOWN.value:  {"long": 1.0, "short": 0.70},
+    "CRISIS":              {"long": 0.3, "short": 1.4},  # Crisis (VIX>=35): suppress longs, favor shorts
 }
 
 
@@ -262,12 +263,15 @@ class SignalGenerator:
             scaled: List[Signal] = []
             for sig in strat_signals:
                 new_strength = float(sig.strength * alloc)
+                # Drop signals scaled to effectively zero (no floor — allow true cancellation)
+                if new_strength < 0.001:
+                    continue  # Skip this signal entirely rather than keeping a ghost
                 # Create a copy with scaled strength
                 scaled.append(
                     Signal(
                         symbol=sig.symbol,
                         direction=sig.direction,
-                        strength=max(new_strength, 0.001),
+                        strength=min(new_strength, 1.0),
                         strategy=sig.strategy,
                         metadata={
                             **sig.metadata,
@@ -285,7 +289,8 @@ class SignalGenerator:
             )
 
         # Apply regime directional bias before combination
-        regime_key = regime_state.regime.value
+        # Use CRISIS bias when VIX is extreme, regardless of HMM regime
+        regime_key = "CRISIS" if regime_state.is_crisis else regime_state.regime.value
         bias = _REGIME_DIRECTION_BIAS.get(regime_key, _REGIME_DIRECTION_BIAS[Regime.UNKNOWN.value])
         biased_signals: List[Signal] = []
         for sig in raw_signals:

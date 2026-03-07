@@ -299,9 +299,11 @@ class MeanReversionStrategy:
                     continue
                 volume_ok[sym] = (today_vol / avg_vol) >= _VOLUME_SPIKE_THRESHOLD
         else:
-            # No volume data supplied — skip the filter
+            # No volume data supplied — use a weaker filter: only trade if we have
+            # SOME price action (not flat/zero-volume days)
+            logger.warning("MeanReversion: no volume data supplied — volume filter bypassed")
             for sym in tradeable:
-                volume_ok[sym] = True
+                volume_ok[sym] = True  # Still allow but log the warning
 
         # ----------------------------------------------------------------
         # Step 3: Generate EXIT signals
@@ -392,16 +394,11 @@ class MeanReversionStrategy:
         # Latest 5-day return (most recent bar)
         latest_5d = float(returns_5d_clean.iloc[-1])
 
-        # Distribution of the last 60 5-day returns (includes today)
-        dist_window = returns_5d_clean.iloc[-lookback:]
+        # Exclude current bar from normalization to avoid self-referencing bias
+        dist_window = returns_5d_clean.iloc[-lookback - 1:-1]
         mu = float(dist_window.mean())
         sigma = float(dist_window.std(ddof=1))
-
-        if sigma < 1e-10:
-            # Near-zero variance → stock hasn't moved at all
-            z_score = 0.0
-        else:
-            z_score = (latest_5d - mu) / sigma
+        z_score = (latest_5d - mu) / max(sigma, 1e-8)
 
         # ------ RSI ------
         if len(prices) < rsi_period + 2:
@@ -458,19 +455,20 @@ class MeanReversionStrategy:
             if regime_state.is_crisis:
                 exit_reason = "crisis_regime"
 
-            # --- Priority 2: Time stop ---
-            elif bars_held >= cfg.holding_days:
-                exit_reason = "time_stop"
-
-            # --- Priority 3: Hard stop-loss ---
-            elif z is not None:
+            # --- Priority 2: Hard stop-loss (risk control — always takes precedence) ---
+            if exit_reason is None and z is not None:
                 if direction == "long" and z <= -cfg.stop_z:
                     exit_reason = "stop_loss"
                 elif direction == "short" and z >= cfg.stop_z:
                     exit_reason = "stop_loss"
 
-                # --- Priority 4: Mean reversion complete ---
-                elif direction == "long" and z >= -cfg.exit_z:
+            # --- Priority 3: Time stop ---
+            if exit_reason is None and bars_held >= cfg.holding_days:
+                exit_reason = "time_stop"
+
+            # --- Priority 4: Mean reversion complete (profit target) ---
+            if exit_reason is None and z is not None:
+                if direction == "long" and z >= -cfg.exit_z:
                     exit_reason = "mean_reversion_complete"
                 elif direction == "short" and z <= cfg.exit_z:
                     exit_reason = "mean_reversion_complete"

@@ -587,14 +587,16 @@ class FeatureEngine:
 
         vol_available = volume.notna().any()
 
-        # OBV and OBV slope (5-day linear slope approximated as ROC)
+        # OBV rate-of-change (stationary, no cumulative look-ahead bias)
+        # Raw OBV is a cumulative sum and is non-stationary; its pct_change is
+        # stationary and contains no future information.
         if vol_available:
-            obv = _obv(close, volume)
-            f["obv"] = obv
-            f["obv_slope_5d"] = obv.diff(5) / (obv.abs().rolling(5).mean().replace(0.0, np.nan))
+            raw_obv = _obv(close, volume)
+            f["obv_roc_20"] = raw_obv.pct_change(20)  # 20-bar rate of change
+            f["obv_roc_5"]  = raw_obv.pct_change(5)   # 5-bar rate of change
         else:
-            f["obv"] = pd.Series(np.nan, index=close.index)
-            f["obv_slope_5d"] = pd.Series(np.nan, index=close.index)
+            f["obv_roc_20"] = pd.Series(np.nan, index=close.index)
+            f["obv_roc_5"]  = pd.Series(np.nan, index=close.index)
 
         # VWAP deviation: (close - VWAP) / VWAP
         # Approximate daily VWAP as rolling sum(tp * vol) / rolling sum(vol)
@@ -643,13 +645,15 @@ class FeatureEngine:
         else:
             f["vw_rsi_14"] = pd.Series(np.nan, index=close.index)
 
-        # Accumulation/Distribution line (normalised by recent range)
+        # Chaikin Oscillator (3-day EMA of A/D minus 10-day EMA of A/D)
+        # Replaces the raw cumulative A/D line which has look-ahead bias from
+        # the full-dataset cumsum.  The Chaikin Oscillator is stationary and
+        # captures momentum in the A/D line without leaking future data.
         if vol_available:
-            ad = _ad_line(high, low, close, volume)
-            ad_scale = ad.rolling(20, min_periods=20).std().replace(0.0, np.nan)
-            f["ad_line_norm"] = (ad - ad.rolling(20, min_periods=20).mean()) / ad_scale
+            raw_ad = _ad_line(high, low, close, volume)
+            f["chaikin_osc"] = raw_ad.ewm(span=3, adjust=False).mean() - raw_ad.ewm(span=10, adjust=False).mean()
         else:
-            f["ad_line_norm"] = pd.Series(np.nan, index=close.index)
+            f["chaikin_osc"] = pd.Series(np.nan, index=close.index)
 
         return f
 

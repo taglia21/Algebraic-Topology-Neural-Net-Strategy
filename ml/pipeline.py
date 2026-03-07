@@ -373,7 +373,24 @@ class MLPipeline:
             )
             labels = model_tmp.prepare_labels(price_data)
 
-            # --- Step 2: Dynamic feature selection (mutual information) ---
+            # --- Step 2: Purged walk-forward to collect OOS predictions ---
+            # MI feature selection is now performed INSIDE each walk-forward fold
+            # (on training data only) to prevent look-ahead bias from future bars
+            # leaking into feature selection.  The full feature matrix is passed
+            # and _walk_forward_oos calls _select_features_mi per fold.
+            oos_preds_arr, oos_labels_arr, oos_index, wf_oos_sharpe = (
+                self._walk_forward_oos(
+                    features = features,
+                    labels   = labels,
+                    horizon  = horizon,
+                    ml_cfg   = ml_cfg,
+                )
+            )
+
+            # --- Step 2b: Final MI selection on full dataset for prediction mask ---
+            # This is the feature mask stored for use at prediction time.  It is
+            # computed on the full training dataset and is separate from the
+            # per-fold selections used inside the walk-forward loop above.
             selected_feats = self._select_features_mi(
                 features = features,
                 labels   = labels,
@@ -382,17 +399,8 @@ class MLPipeline:
             features_h = features[selected_feats]
             logger.info(
                 f"MLPipeline.train_all: horizon={horizon}d selected "
-                f"{len(selected_feats)}/{len(features.columns)} features via MI."
-            )
-
-            # --- Step 3: Purged walk-forward to collect OOS predictions ---
-            oos_preds_arr, oos_labels_arr, oos_index, wf_oos_sharpe = (
-                self._walk_forward_oos(
-                    features = features_h,
-                    labels   = labels,
-                    horizon  = horizon,
-                    ml_cfg   = ml_cfg,
-                )
+                f"{len(selected_feats)}/{len(features.columns)} features via MI "
+                f"(full-dataset pass for prediction mask)."
             )
 
             oos_sharpe_by_horizon[horizon] = wf_oos_sharpe
@@ -600,6 +608,14 @@ class MLPipeline:
         Returns an empty dict if no models are fitted or price data is
         insufficient.
         """
+        # Validate input is single-symbol — a MultiIndex DataFrame means the
+        # caller passed the full multi-symbol history instead of per-symbol data.
+        if isinstance(price_data.index, pd.MultiIndex):
+            raise ValueError(
+                "MLPipeline.predict() expects single-symbol OHLCV data, "
+                "got MultiIndex. Call predict() per symbol."
+            )
+
         if not self.models:
             logger.warning("MLPipeline.predict: no models fitted.")
             return {}
@@ -908,12 +924,17 @@ class MLPipeline:
         features: pd.DataFrame,
         labels: pd.Series,
         horizon: int,
+        train_idx: Optional[Any] = None,
     ) -> List[str]:
         """Select top-K features by mutual information with the binary label.
 
         K = min(50, n_features // 2) to control the curse of dimensionality.
         Selected names are stored in ``self._selected_features[horizon]`` for
-        reuse at prediction time.
+        reuse at prediction time **only when train_idx is None** (i.e. the
+        final full-dataset selection).  When train_idx is provided (fold-level
+        selection inside the walk-forward loop) the result is returned but NOT
+        written to ``self._selected_features`` so it does not pollute the
+        prediction-time feature mask.
 
         Parameters
         ----------
@@ -923,12 +944,22 @@ class MLPipeline:
             Binary label series aligned with features.
         horizon:
             Horizon identifier used as the storage key.
+        train_idx:
+            Optional positional index slice (e.g. ``slice(0, n)`` or an array
+            of integer positions) that restricts MI computation to training
+            data only.  When provided, only those rows are used, preventing
+            any look-ahead from future bars leaking into feature selection.
 
         Returns
         -------
         List[str]
             Ordered list of selected feature names (highest MI first).
         """
+        # Restrict to training fold when index bounds are provided
+        if train_idx is not None:
+            features = features.iloc[train_idx]
+            labels   = labels.iloc[train_idx]
+
         n_total = len(features.columns)
         k = min(50, max(1, n_total // 2))
 
@@ -940,7 +971,8 @@ class MLPipeline:
         if len(X) < 50 or n_total == 0:
             # Fallback: use all features
             selected = list(features.columns)
-            self._selected_features[horizon] = selected
+            if train_idx is None:
+                self._selected_features[horizon] = selected
             return selected
 
         try:
@@ -959,7 +991,9 @@ class MLPipeline:
             )
             selected = list(features.columns)
 
-        self._selected_features[horizon] = selected
+        # Only update the persistent prediction-time mask when called on full data
+        if train_idx is None:
+            self._selected_features[horizon] = selected
         return selected
 
     # ------------------------------------------------------------------
@@ -978,10 +1012,15 @@ class MLPipeline:
         Uses ``_WF_TRAIN_WINDOW=504``, ``_WF_TEST_WINDOW=63``,
         ``_WF_STEP=21`` with ``_EMBARGO_BARS=25`` purge between folds.
 
+        Mutual-information feature selection is performed **inside each fold**
+        using only that fold's training data, so no future bars leak into the
+        feature selection process.
+
         Parameters
         ----------
         features:
-            Feature matrix (already MI-filtered for this horizon).
+            Full (unfiltered) feature matrix for this horizon.  MI selection
+            is applied per fold inside the loop.
         labels:
             Binary label series.
         horizon:
@@ -1031,9 +1070,21 @@ class MLPipeline:
             if test_end > n:
                 break
 
-            X_train = pd.DataFrame(feats_arr[start:train_end],    columns=feats.columns)
+            # --- Per-fold MI feature selection using ONLY training rows ---
+            # Pass train_idx so _select_features_mi never sees future bars.
+            # We rebuild fold DataFrames from feats (not feats_arr) to keep
+            # column names available for MI selection.
+            fold_train_idx = slice(start, train_end)
+            fold_sel_feats = self._select_features_mi(
+                features  = feats,
+                labels    = labs,
+                horizon   = horizon,
+                train_idx = fold_train_idx,
+            )
+
+            X_train = feats.iloc[start:train_end][fold_sel_feats]
             y_train = pd.Series(labs_arr[start:train_end])
-            X_test  = pd.DataFrame(feats_arr[test_start:test_end], columns=feats.columns)
+            X_test  = feats.iloc[test_start:test_end].reindex(columns=fold_sel_feats, fill_value=0.0)
             y_test  = pd.Series(labs_arr[test_start:test_end])
 
             try:

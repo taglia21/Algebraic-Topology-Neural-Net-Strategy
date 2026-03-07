@@ -98,12 +98,17 @@ class TestKillSwitch:
         assert result is False
         assert "daily loss" in ks.block_reason.lower()
 
-    def test_max_positions_trips_breaker(self):
+    def test_max_positions_blocks_order(self):
+        """Max positions blocks the order but does NOT trip the breaker.
+        This is a normal operational constraint, not an emergency condition."""
         ks = self._make_ks(max_open_positions=5)
         portfolio = self._portfolio(n_positions=6)
         result = ks.pre_order_check(portfolio)
         assert result is False
-        assert "positions" in ks.block_reason.lower()
+        # Breaker should NOT be tripped — just a soft block
+        assert ks._breaker_tripped is False
+        # Trading is still allowed for other actions (e.g., closing positions)
+        assert ks.is_trading_allowed() is True
 
     def test_consecutive_losses_trips_breaker(self):
         ks = self._make_ks(max_consecutive_losses=3)
@@ -140,8 +145,10 @@ class TestKillSwitch:
     def test_cooldown_auto_release(self):
         ks = self._make_ks(max_consecutive_losses=1, cooldown_minutes=0.0)
         ks.on_fill(-100.0)
-        # Cooldown is 0 minutes — breaker trips but immediately expires
-        # on the next is_trading_allowed() check, so trading resumes.
+        # Breaker trips
+        assert ks.is_trading_allowed() is False
+        # Cooldown is 0 minutes — calling check_cooldown_expired() resets it
+        assert ks.check_cooldown_expired() is True
         assert ks.is_trading_allowed() is True
 
     def test_breaker_blocks_during_cooldown(self):

@@ -108,6 +108,9 @@ class TradeLogger:
         Python logging level string (DEBUG, INFO, WARNING, ERROR).
     echo_stdout:
         When True (default), records are also printed to stdout as JSON.
+    risk_free_rate:
+        Annualised risk-free rate used for Sharpe / Sortino calculation
+        (default 0.05 = 5%, representative of current Fed Funds regime).
     """
 
     def __init__(
@@ -116,8 +119,10 @@ class TradeLogger:
         log_dir: str = "logs",
         log_level: str = "INFO",
         echo_stdout: bool = True,
+        risk_free_rate: float = 0.05,
     ) -> None:
         self.session_id: str = session_id or str(uuid.uuid4())[:8]
+        self._risk_free_rate: float = risk_free_rate
         self._log_dir = log_dir
         self._echo_stdout = echo_stdout
 
@@ -401,17 +406,25 @@ class TradeLogger:
         total_return = (values[-1] / values[0]) - 1.0
 
         # Sharpe (annualised, assuming 252 trading days)
-        rf_daily = 0.0  # risk-free rate; set to 0 for simplicity
+        # Use annualized risk-free rate (default 5% for current regime)
+        rf_annual = getattr(self, '_risk_free_rate', 0.05)
+        rf_daily = rf_annual / 252
         excess = daily_returns - rf_daily
         sharpe = float("nan")
-        if excess.std() > 0:
-            sharpe = float((excess.mean() / excess.std()) * math.sqrt(252))
+        sample_std = float(np.std(excess, ddof=1))
+        if sample_std > 0:
+            sharpe = float((excess.mean() / sample_std) * math.sqrt(252))
 
         # Sortino
-        downside = excess[excess < 0]
+        # Correct Sortino: downside deviation = sqrt(mean(min(r - target, 0)^2))
+        # computed over ALL returns, not just the std of losing days.
+        # target = 0 (excess returns already net of risk-free)
         sortino = float("nan")
-        if len(downside) > 0 and downside.std() > 0:
-            sortino = float((excess.mean() / downside.std()) * math.sqrt(252))
+        target = 0.0
+        downside_diff = np.minimum(excess - target, 0.0)
+        downside_dev = float(np.sqrt(np.mean(downside_diff ** 2)))
+        if downside_dev > 0:
+            sortino = float((excess.mean() / downside_dev) * math.sqrt(252))
 
         # Max drawdown
         running_max = np.maximum.accumulate(values)

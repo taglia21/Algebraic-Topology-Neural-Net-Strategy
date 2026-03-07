@@ -173,6 +173,7 @@ class SystemOrchestrator:
         from equities.strategies.stat_arb import StatArbStrategy
         from equities.strategies.momentum import MomentumStrategy
         from equities.strategies.factor_model import FactorModelStrategy
+        from equities.strategies.mean_reversion import MeanReversionStrategy
         from core.regime_detector import RegimeDetector
         from core.risk_manager import RiskManager
         from core.market_hours import MarketCalendar
@@ -223,6 +224,7 @@ class SystemOrchestrator:
                 StatArbStrategy(config=cfg.strategy.stat_arb),
                 MomentumStrategy(config=cfg.strategy.momentum),
                 FactorModelStrategy(config=cfg.strategy.factor_model),
+                MeanReversionStrategy(config=cfg.strategy.mean_reversion),
             ],
             trade_logger=self._log,
         )

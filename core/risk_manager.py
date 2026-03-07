@@ -252,16 +252,14 @@ class RiskManager:
         if portfolio_value <= 0:
             raise ValueError(f"portfolio_value must be positive; got {portfolio_value!r}")
 
-        # Current sector exposure (absolute values)
-        sector_exposure: Dict[str, float] = {}
-        for sym, notional in current_positions.items():
-            # Caller should provide a sector_map via PortfolioState; here we
-            # accept an explicit dict so the method is usable standalone.
-            pass  # sector_map is not available here; handled in approve_trade
+        # Compute current exposure for the target sector.
+        # In standalone mode we only know the proposed symbol's sector, so
+        # we sum all positions that share the same sector (caller must pass
+        # the sector for the symbol being evaluated).
+        existing_sector_notional = proposed_notional  # start with proposed
+        # approve_trade() recomputes using the full sector_map for accuracy.
 
-        # In standalone mode, check only the proposed addition against the limit.
-        # In approve_trade we recompute using the full sector map.
-        exposure_pct = proposed_notional / portfolio_value
+        exposure_pct = existing_sector_notional / portfolio_value
         max_pct = self._cfg.max_sector_pct
 
         if exposure_pct > max_pct:

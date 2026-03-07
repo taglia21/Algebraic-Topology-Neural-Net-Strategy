@@ -588,10 +588,9 @@ class RegimeDetector:
             not np.isnan(adx_value) and adx_value > ADX_TRENDING_THRESHOLD
         )
 
-        # Crisis flag: VIX crisis OR (BEAR with high confidence)
-        is_crisis = vix_level == VIXLevel.CRISIS or (
-            regime == Regime.BEAR and confidence > 0.80
-        )
+        # Crisis flag: only on extreme VIX.  Normal bear regimes should NOT
+        # trigger crisis mode — the separate BEAR allocations handle those.
+        is_crisis = vix_level == VIXLevel.CRISIS
 
         state = RegimeState(
             regime=regime,

@@ -478,7 +478,7 @@ class StatArbStrategy:
             if not (1.0 <= half_life <= 120.0):
                 logger.debug(
                     f"Rejected {sym_x}/{sym_y}: half_life={half_life:.1f} days "
-                    f"(must be in [1, 60])."
+                    f"(must be in [1, 120])."
                 )
                 continue
 
@@ -502,6 +502,17 @@ class StatArbStrategy:
 
         # Sort by half-life (faster mean reversion first)
         discovered.sort(key=lambda p: p.half_life)
+
+        # Cap at 25 pairs to keep per-bar evaluation fast.
+        # Pairs are already sorted by half-life, so we keep the
+        # fastest-reverting ones which are the highest-quality signals.
+        _MAX_ACTIVE_PAIRS = 25
+        if len(discovered) > _MAX_ACTIVE_PAIRS:
+            logger.info(
+                f"StatArbStrategy: capping pairs from {len(discovered)} "
+                f"to {_MAX_ACTIVE_PAIRS} (by half-life)."
+            )
+            discovered = discovered[:_MAX_ACTIVE_PAIRS]
 
         # Store and initialise Kalman filters
         self._pairs = discovered

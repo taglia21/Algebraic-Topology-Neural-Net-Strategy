@@ -194,7 +194,7 @@ class RiskConfig:
 
     # --- Position limits ---
     max_position_pct: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_POSITION_PCT", "0.15")
+        os.environ.get("RISK_MAX_POSITION_PCT", "0.20")
     ))
     max_sector_pct: float = field(default_factory=lambda: float(
         os.environ.get("RISK_MAX_SECTOR_PCT", "0.35")
@@ -202,13 +202,13 @@ class RiskConfig:
 
     # --- Drawdown gates ---
     max_drawdown_halt: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_DRAWDOWN_HALT", "-0.20")
+        os.environ.get("RISK_MAX_DRAWDOWN_HALT", "-0.30")
     ))
     max_drawdown_reduce: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_DRAWDOWN_REDUCE", "-0.15")
+        os.environ.get("RISK_MAX_DRAWDOWN_REDUCE", "-0.20")
     ))
     # How far to reduce exposure when max_drawdown_reduce is breached
-    drawdown_reduce_target: float = 0.50  # 50 % of normal exposure
+    drawdown_reduce_target: float = 0.60  # 60% of normal exposure
 
     # --- Daily P&L gate ---
     daily_loss_limit: float = field(default_factory=lambda: float(

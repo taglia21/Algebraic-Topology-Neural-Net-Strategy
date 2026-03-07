@@ -54,7 +54,7 @@ def main():
             symbols=UNIVERSE,
             start_date=START,
             end_date=END,
-            use_ml=False,
+            use_ml=True,
         )
     except Exception as exc:
         print(f"\n{'='*70}")

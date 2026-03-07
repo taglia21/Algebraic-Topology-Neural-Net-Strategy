@@ -763,17 +763,22 @@ def _bar_cache_key(
 
 
 def _max_consecutive_nans(df: pd.DataFrame) -> int:
-    """Return the maximum consecutive NaN run across all columns of *df*."""
+    """Return the maximum consecutive NaN run across all columns of *df*.
+
+    Vectorised implementation using pandas groupby on non-NaN boundaries.
+    """
     max_run = 0
     for col in df.columns:
-        series = df[col]
-        run = 0
-        for val in series:
-            if pd.isna(val):
-                run += 1
-                max_run = max(max_run, run)
-            else:
-                run = 0
+        is_nan = df[col].isna()
+        if not is_nan.any():
+            continue
+        # Group consecutive NaN sequences and find the longest
+        groups = (~is_nan).cumsum()
+        nan_groups = groups[is_nan]
+        if len(nan_groups) == 0:
+            continue
+        longest = nan_groups.value_counts().max()
+        max_run = max(max_run, int(longest))
     return max_run
 
 

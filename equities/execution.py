@@ -896,11 +896,11 @@ class ExecutionManager:
         Number of shares (0 if below minimum lot size).
         """
         max_pct = get_config().risk.max_position_pct
-        # Floor signal strength at 0.7 — if a signal passed all filters and
-        # regime gates, it deserves a substantial allocation.  This prevents
-        # the regime-scaling from creating micro-positions that generate
-        # churn without contributing returns.
-        adjusted_strength = max(signal.strength, 0.7)
+        # Floor signal strength at 0.5 — if a signal passed all filters and
+        # regime gates, it deserves a meaningful allocation.  Lower floor
+        # allows regime-scaled positions to be smaller in uncertain markets
+        # while still participating.
+        adjusted_strength = max(signal.strength, 0.5)
         target_notional = (
             portfolio_state.equity
             * max_pct

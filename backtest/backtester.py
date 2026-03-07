@@ -155,6 +155,8 @@ class Backtester:
 
         # ML pipeline (optional)
         self.ml_pipeline = None
+        self._ml_imports_ok: bool = False
+        self._use_ml_requested: bool = False
 
         # Results storage
         self._equity_curve: Dict[datetime, float] = {}
@@ -355,36 +357,64 @@ class Backtester:
             self._regime_log[bar_dt] = regime_state.regime.value
 
             # ---- Step 3: ML features (if enabled) ----
+            # Lazy-init: create MLPipeline on first post-warmup bar so
+            # FeatureEngine has SPY data available for cross-sectional features.
             ml_adjustments: Dict[str, float] = {}
+            if use_ml and self.ml_pipeline is None and self._ml_imports_ok:
+                try:
+                    from ml.feature_engine import FeatureEngine as _FE
+                    from ml.pipeline import MLPipeline as _MLP
+                    spy_df = self._get_spy_history(history, benchmark_symbol)
+                    fe = _FE(spy_data=spy_df)
+                    self.ml_pipeline = _MLP(feature_engine=fe, config=self.config)
+                    # Initial training on all warmup data per-symbol
+                    for sym in symbols:
+                        try:
+                            sym_history = self._get_spy_history(history, sym)
+                            if sym_history is not None and len(sym_history) >= 252:
+                                self.ml_pipeline.train_all(sym_history, symbol=sym, run_validation=False)
+                                logger.info(f"ML pipeline trained on {sym} ({len(sym_history)} bars)")
+                                break  # train on first viable symbol; meta-learner generalises
+                        except Exception as exc:
+                            logger.debug(f"ML train skip {sym}: {exc}")
+                    logger.info("ML pipeline initialised and trained.")
+                except Exception as exc:
+                    logger.warning(f"ML pipeline init failed: {exc}")
+                    self.ml_pipeline = None
+                    self._ml_imports_ok = False  # don't retry
+
             if use_ml and self.ml_pipeline is not None:
                 try:
-                    # Only retrain on the configured cadence
+                    # Retrain on configured cadence (~monthly)
                     if bar_idx % (self.config.ml.retrain_freq_days * 5) == 0:
                         self.ml_pipeline.retrain_if_needed(history)
-                    ml_preds = self.ml_pipeline.predict(history, regime_state)
-                    ml_adjustments = {
-                        sym: float(pred.get("score", 0.5))
-                        for sym, pred in ml_preds.items()
-                    }
+                    # Predict weekly (every 5 bars) to balance cost vs responsiveness
+                    if bar_idx % 5 == 0 or bar_idx <= warmup_end_idx + 2:
+                        ml_preds = self.ml_pipeline.predict(history, regime_state)
+                        ml_adjustments = {
+                            sym: float(pred.get("score", 0.5))
+                            for sym, pred in ml_preds.items()
+                        }
                 except Exception as exc:
                     logger.warning(f"ML pipeline failed on bar {bar_dt}: {exc}")
 
             # ---- Step 4-5: Generate and combine signals ----
-            # Generate signals on weekly cadence (every 5 bars) to reduce computation
+            # Every-other-bar for full signal generation (stat_arb pair
+            # evaluation is O(n²) in the universe size).  Factor model and
+            # momentum run every bar because they're O(n).
             signals = []
-            if bar_idx % 2 == 0 or bar_idx <= warmup_end_idx + 1:
-                price_data = self._build_price_pivot(history, symbols)
-                if price_data is not None and len(price_data) >= 20:
-                    try:
-                        signals = self.signal_generator.generate_all_signals(
-                            price_data, regime_state
-                        )
-                    except Exception as exc:
-                        logger.error(
-                            f"SignalGenerator raised on bar {bar_dt}: {exc}\n"
-                            + traceback.format_exc()
-                        )
-                        # Per spec: if signal generation fails, log and continue
+            price_data = self._build_price_pivot(history, symbols)
+            if price_data is not None and len(price_data) >= 20:
+                try:
+                    signals = self.signal_generator.generate_all_signals(
+                        price_data, regime_state
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"SignalGenerator raised on bar {bar_dt}: {exc}\n"
+                        + traceback.format_exc()
+                    )
+                    # Per spec: if signal generation fails, log and continue
 
             # ---- Step 6: ML meta-learner signal weight adjustment ----
             if ml_adjustments and signals:
@@ -541,17 +571,21 @@ class Backtester:
             max_position_value=self.broker._initial_cash * self.config.risk.max_position_pct * 2,
         )
 
-        # Optional ML pipeline
+        # Optional ML pipeline — mark for lazy init after warmup
+        # because FeatureEngine needs SPY data that only becomes available
+        # after data loading is complete.
+        self._use_ml_requested = use_ml
         if use_ml:
             try:
-                from ml.feature_engine import FeatureEngine
-                from ml.pipeline import MLPipeline
-                # FeatureEngine needs SPY data — will be lazy-initialised in run()
-                self.ml_pipeline = None   # defer until we have spy data
-                logger.info("ML pipeline will be initialised after first warmup bar.")
+                import ml.feature_engine  # noqa: F401  — verify import works
+                import ml.pipeline        # noqa: F401
+                self._ml_imports_ok = True
+                logger.info("ML pipeline will be initialised after warmup.")
             except ImportError as exc:
                 logger.warning(f"ML pipeline unavailable: {exc}")
-                self.ml_pipeline = None
+                self._ml_imports_ok = False
+        else:
+            self._ml_imports_ok = False
 
         logger.info(
             f"Pipeline setup: {len(strategies)} strategies, "

@@ -574,8 +574,7 @@ class MLPipeline:
             }
             meta_path = os.path.join(save_dir, "meta_learner.pkl")
             with open(meta_path, "wb") as fh:
-                import pickle as pkl
-                pkl.dump(meta_payload, fh)
+                pickle.dump(meta_payload, fh)
             logger.info(f"Meta-learner saved to {meta_path}")
 
     def load_all(self, directory: Optional[str] = None) -> None:
@@ -663,9 +662,20 @@ class MLPipeline:
 
         meta_X = pd.concat(score_frames, axis=1).dropna()
 
-        # Add regime column (use a static neutral 0 for IS training;
-        # in production, the live regime is passed to predict())
-        meta_X["regime"] = 0.0
+        # Construct regime labels from price data using a simple trend
+        # heuristic (SMA crossover).  This gives the meta-learner useful
+        # regime conditioning rather than the useless static 0.0.
+        try:
+            close = price_data["close"] if "close" in price_data.columns else price_data["Close"]
+            sma_50  = close.rolling(50, min_periods=50).mean()
+            sma_200 = close.rolling(200, min_periods=200).mean()
+            regime_series = pd.Series(0.0, index=close.index)
+            regime_series[sma_50 > sma_200] = 1.0   # BULL
+            regime_series[sma_50 < sma_200] = -1.0   # BEAR
+            meta_X["regime"] = regime_series.reindex(meta_X.index).fillna(0.0)
+        except Exception:
+            # Fallback to neutral if price columns unavailable
+            meta_X["regime"] = 0.0
 
         # Use the 5-day forward return as the meta-learner target
         primary_model = self.models.get(5) or next(iter(self.models.values()))

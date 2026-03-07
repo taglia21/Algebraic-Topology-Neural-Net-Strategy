@@ -290,11 +290,15 @@ def _fracdiff(series: pd.Series, d: float = 0.4,
     log_series = np.log(series.clip(lower=1e-9))
     vals = log_series.values
     n = len(vals)
-    result = np.full(n, np.nan)
 
-    for i in range(w_len - 1, n):
-        window_vals = vals[i - w_len + 1: i + 1][::-1]  # most recent first
-        result[i] = float(np.dot(weights_arr, window_vals))
+    # Vectorised convolution: dot product of reversed weights with rolling window
+    if w_len > n:
+        return pd.Series(np.full(n, np.nan), index=series.index, name="fracdiff_close")
+
+    # Use numpy convolution for O(n) performance instead of O(n*w_len) Python loop
+    conv = np.convolve(vals, weights_arr, mode='full')[:n]
+    result = np.full(n, np.nan)
+    result[w_len - 1:] = conv[w_len - 1:]
 
     return pd.Series(result, index=series.index, name="fracdiff_close")
 
@@ -906,7 +910,7 @@ class FeatureEngine:
         # Rolling autocorrelation (lag-1, 20-day window)
         f["autocorr_lag1_20d"] = log_returns.rolling(20, min_periods=20).apply(
             lambda x: pd.Series(x).autocorr(lag=1) if len(x) >= 2 else np.nan,
-            raw=True,
+            raw=False,
         )
 
         # Return skewness (rolling 20d)

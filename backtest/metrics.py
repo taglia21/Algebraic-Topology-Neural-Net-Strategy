@@ -43,8 +43,7 @@ Usage
 from __future__ import annotations
 
 import math
-import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -179,6 +178,7 @@ class PerformanceMetrics:
         equity_curve: pd.Series,
         trades: List[dict],
         benchmark: Optional[pd.Series] = None,
+        regime_history: Optional[pd.Series] = None,
     ) -> dict:
         """Calculate the full suite of performance metrics.
 
@@ -258,6 +258,13 @@ class PerformanceMetrics:
         # ----------------------------------------------------------------
         # Assemble result
         # ----------------------------------------------------------------
+        # ----------------------------------------------------------------
+        # Regime-aware breakdown (optional)
+        # ----------------------------------------------------------------
+        regime_metrics = PerformanceMetrics._calculate_regime_metrics(
+            returns, regime_history
+        )
+
         metrics = {
             "total_return":          total_return,
             "annual_return":         annual_return,
@@ -274,6 +281,7 @@ class PerformanceMetrics:
             "turnover":              turnover,
             **trade_metrics,
             **bench_metrics,
+            **regime_metrics,
         }
         return metrics
 
@@ -693,6 +701,72 @@ class PerformanceMetrics:
             "information_ratio":  information_ratio,
             "tracking_error":     tracking_error,
         }
+
+    @staticmethod
+    def _calculate_regime_metrics(
+        returns: pd.Series,
+        regime_history: Optional[pd.Series],
+    ) -> dict:
+        """Compute per-regime Sharpe ratios and return contributions.
+
+        Parameters
+        ----------
+        returns:
+            Portfolio daily returns.
+        regime_history:
+            Series of regime labels (e.g. 'BULL', 'BEAR', 'SIDEWAYS')
+            aligned to the same index as returns.
+
+        Returns
+        -------
+        dict
+            Keys: ``regime_sharpe_<regime>``, ``regime_return_<regime>``,
+            ``regime_bars_<regime>`` for each regime observed.
+            Empty dict when regime_history is not provided.
+        """
+        if regime_history is None or len(regime_history) == 0:
+            return {}
+        if returns is None or len(returns) < 2:
+            return {}
+
+        # Align on common index
+        common = returns.index.intersection(regime_history.index)
+        if len(common) < 10:
+            return {}
+
+        ret_aligned = returns.loc[common]
+        reg_aligned = regime_history.loc[common]
+
+        result: dict = {}
+        for regime in reg_aligned.unique():
+            mask = reg_aligned == regime
+            regime_rets = ret_aligned.loc[mask]
+            n_bars = int(mask.sum())
+            regime_key = str(regime).lower()
+
+            if n_bars < 5:
+                result[f"regime_sharpe_{regime_key}"] = float("nan")
+                result[f"regime_return_{regime_key}"] = float("nan")
+                result[f"regime_bars_{regime_key}"] = n_bars
+                continue
+
+            # Annualised Sharpe for this regime
+            mu = float(regime_rets.mean())
+            sigma = float(regime_rets.std())
+            daily_rf = _DEFAULT_RISK_FREE_RATE / _TRADING_DAYS_PER_YEAR
+            if sigma > 0:
+                regime_sharpe = (mu - daily_rf) / sigma * math.sqrt(_TRADING_DAYS_PER_YEAR)
+            else:
+                regime_sharpe = float("nan")
+
+            # Total return contribution from this regime
+            regime_total = float(regime_rets.sum())
+
+            result[f"regime_sharpe_{regime_key}"] = round(regime_sharpe, 4)
+            result[f"regime_return_{regime_key}"] = round(regime_total, 6)
+            result[f"regime_bars_{regime_key}"] = n_bars
+
+        return result
 
 
 # ---------------------------------------------------------------------------

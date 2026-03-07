@@ -63,6 +63,14 @@ _PSI_THRESHOLD: float = 0.2
 # Minimum bars required to run prediction
 _MIN_PREDICT_BARS: int = 201
 
+# Embargo window: bars purged between train/val to prevent label leakage
+# (the longest prediction horizon is 20d, so embargo of 25 bars is safe)
+_EMBARGO_BARS: int = 25
+
+# Feature pruning: drop features with zero importance across all horizons
+# after the first training pass. Reduces noise and speeds up retraining.
+_MIN_IMPORTANCE_THRESHOLD: float = 0.0
+
 
 # ===========================================================================
 # Drift detector (Population Stability Index)
@@ -164,6 +172,9 @@ class MLPipeline:
         # Drift monitoring: store training feature statistics
         self._train_feature_stats: Dict[str, Tuple[np.ndarray, int]] = {}
 
+        # Feature pruning: features identified as zero-importance across models
+        self._pruned_features: List[str] = []
+
         # Timestamps
         self._last_train_time: Optional[float] = None
         self._train_data_hash: Optional[str]   = None
@@ -247,15 +258,18 @@ class MLPipeline:
 
             labels = model.prepare_labels(price_data)
 
-            # --- Walk-forward split for final model training ---
-            train_end = len(features) - ml_cfg.train_window_days // 10  # ~10% holdout
+            # --- Walk-forward split with embargo window ---
+            holdout_size = max(ml_cfg.train_window_days // 10, 42)  # ~10% or 2 months
+            train_end = len(features) - holdout_size - _EMBARGO_BARS
+            val_start = train_end + _EMBARGO_BARS  # skip embargo window
             if train_end < 100:
                 train_end = len(features)
+                val_start = train_end  # no validation if insufficient data
 
             X_train = features.iloc[:train_end]
             y_train = labels.iloc[:train_end]
-            X_val   = features.iloc[train_end:]
-            y_val   = labels.iloc[train_end:]
+            X_val   = features.iloc[val_start:]
+            y_val   = labels.iloc[val_start:]
 
             model.train(X_train, y_train, X_val, y_val)
             self.models[horizon] = model
@@ -303,6 +317,24 @@ class MLPipeline:
                         f"MLPipeline.train_all: validation failed for horizon {horizon}: {exc}"
                     )
                     reports[horizon] = {"error": str(exc), "pass": False}
+
+        # --- Feature pruning: identify zero-importance features ---
+        # Aggregate importance across all horizons; prune features with zero
+        # importance in ALL models (they add noise, not signal).
+        if len(self.models) > 1:
+            all_imps = {}
+            for _h, _m in self.models.items():
+                for feat_name, imp_val in _m.feature_importances.items():
+                    all_imps[feat_name] = all_imps.get(feat_name, 0.0) + imp_val
+            dead_features = [f for f, v in all_imps.items() if v <= _MIN_IMPORTANCE_THRESHOLD]
+            if dead_features:
+                self._pruned_features = dead_features
+                logger.info(
+                    f"MLPipeline.train_all: identified {len(dead_features)} "
+                    f"zero-importance features for pruning on next retrain."
+                )
+            else:
+                self._pruned_features = []
 
         # --- Train meta-learner ---
         logger.info("MLPipeline.train_all: training meta-learner ...")

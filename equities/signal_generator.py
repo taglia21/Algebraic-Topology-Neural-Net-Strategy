@@ -12,10 +12,11 @@ Regime-Dependent Strategy Allocations
 --------------------------------------
 ::
 
-    BULL:     stat_arb=20%, momentum=35%, factor=30%  (total 85% deployed)
-    BEAR:     stat_arb=30%, momentum=10%, factor=20%  (total 60% deployed)
-    SIDEWAYS: stat_arb=35%, momentum=15%, factor=25%  (total 75% deployed)
-    CRISIS:   stat_arb=10%, momentum= 0%, factor=10%  (total 20% — mostly cash)
+    BULL:     stat_arb=10%, momentum=60%, factor=25%  (total 95% deployed)
+    BEAR:     stat_arb=45%, momentum=10%, factor=30%  (total 85% deployed)
+    SIDEWAYS: stat_arb=25%, momentum=35%, factor=25%  (total 85% deployed)
+    UNKNOWN:  stat_arb=20%, momentum=30%, factor=25%  (total 75% deployed)
+    CRISIS:   stat_arb=30%, momentum= 5%, factor=20%  (total 55% deployed)
 
 The remaining allocation stays in cash / is not allocated.
 
@@ -33,11 +34,10 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional
 
 import pandas as pd
 
-from core.config import get_config
 from core.logger import TradeLogger, get_trade_logger
 from core.regime_detector import Regime, RegimeState
 from equities.models import Signal
@@ -404,14 +404,16 @@ class SignalGenerator:
                     )
                 )
             else:
-                # Net direction wins
+                # Net direction wins.  Strength = abs(net) which already
+                # accounts for the partial offset from opposing signals.
+                # Capping at 1.0 ensures we don't exceed the max.
                 direction = "long" if net_strength > 0 else "short"
                 dominant_sigs = long_sigs if direction == "long" else short_sigs
-                avg_strength = abs_net / max(len(dominant_sigs), 1)
+                net_signal_strength = min(abs_net, 1.0)
 
-                if avg_strength >= _MIN_COMBINED_STRENGTH:
+                if net_signal_strength >= _MIN_COMBINED_STRENGTH:
                     result.append(
-                        self._merge_signals(symbol, direction, dominant_sigs, avg_strength)
+                        self._merge_signals(symbol, direction, dominant_sigs, net_signal_strength)
                     )
 
         return result

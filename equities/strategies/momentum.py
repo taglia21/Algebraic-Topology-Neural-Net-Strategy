@@ -29,12 +29,13 @@ References
 - Jegadeesh & Titman (1993), Journal of Finance
 - Blitz, Huij & Martens (2011) — Residual Momentum (Journal of Empirical Finance)
 - Asness, Moskowitz & Pedersen (2013) — Value and Momentum Everywhere
+- Barroso & Santa-Clara (2015) — Momentum Has Its Moments (volatility-scaled momentum)
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -331,14 +332,8 @@ class MomentumStrategy:
         else:
             residual_momentum = dict(raw_momentum)
 
-        # Cross-sectional percentile rank
-        symbols = list(residual_momentum.keys())
-        values = np.array([residual_momentum[s] for s in symbols])
-
-        # Percentile rank: 0 = worst, 1 = best
-        ranks = pd.Series(values, index=symbols).rank(pct=True)
-
         # 60-day realised volatility (latest)
+        symbols = list(residual_momentum.keys())
         vol_60 = self._compute_realized_vol(returns, window=60)
         latest_vol: Dict[str, float] = {}
         for sym in symbols:
@@ -348,11 +343,26 @@ class MomentumStrategy:
             else:
                 latest_vol[sym] = 0.20  # default 20% vol
 
+        # Volatility-adjusted momentum (Barroso & Santa-Clara 2015):
+        # Normalise residual return by realised vol to avoid momentum crashes.
+        # Stocks with strong momentum AND low vol rank highest.
+        vol_adj_momentum: Dict[str, float] = {}
+        for sym in symbols:
+            vol = latest_vol.get(sym, 0.20)
+            vol_adj_momentum[sym] = residual_momentum[sym] / max(vol, 0.05)
+
+        # Cross-sectional percentile rank on vol-adjusted momentum
+        values = np.array([vol_adj_momentum[s] for s in symbols])
+
+        # Percentile rank: 0 = worst, 1 = best
+        ranks = pd.Series(values, index=symbols).rank(pct=True)
+
         # Build result DataFrame
         result = pd.DataFrame(
             {
                 "raw_momentum": pd.Series(raw_momentum),
                 "residual_momentum": pd.Series(residual_momentum),
+                "vol_adj_momentum": pd.Series(vol_adj_momentum),
                 "rank": ranks,
                 "score": ranks * 2.0 - 1.0,   # re-scale to [-1, 1]
                 "realized_vol": pd.Series(latest_vol),

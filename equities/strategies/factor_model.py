@@ -200,14 +200,25 @@ class FundamentalDataProvider:
 
             # Fall back to price-based heuristics where real data is missing
             if np.isnan(ey):
-                rolling_mean = sym_prices.rolling(
-                    window=self._lookback, min_periods=self._lookback // 2
-                ).mean()
+                # Value proxy: inverse of price-to-52-week-high ratio.
+                # Stocks trading far below their 52-week high are "cheaper".
+                # This aligns better with value investing intuition than
+                # the old rolling-mean / price approach (which was really
+                # just a mean-reversion signal).
                 latest_price = float(sym_prices.iloc[-1])
-                latest_mean = float(rolling_mean.iloc[-1]) if not pd.isna(rolling_mean.iloc[-1]) else latest_price
-                ey = latest_mean / max(latest_price, 0.01)
+                high_252 = float(sym_prices.iloc[-min(252, len(sym_prices)):].max())
+                if high_252 > 0 and latest_price > 0:
+                    # Ratio in (0, 1]; closer to 0 = cheaper relative to peak
+                    price_to_high = latest_price / high_252
+                    # Invert so higher = better value (cheaper stock)
+                    ey = (1.0 / max(price_to_high, 0.01)) - 1.0
+                else:
+                    ey = 0.0
 
             if np.isnan(gp):
+                # Quality proxy: inverse of realised vol. Lower vol implies
+                # more stable earnings (Novy-Marx quality is correlated with
+                # lower vol in cross-section).
                 vol_60 = float(
                     sym_rets.rolling(60, min_periods=30).std().iloc[-1]
                     * np.sqrt(252)

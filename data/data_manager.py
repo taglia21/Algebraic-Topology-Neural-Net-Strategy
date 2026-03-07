@@ -56,12 +56,11 @@ import warnings
 from datetime import datetime, timezone
 from typing import Dict, Generator, Iterator, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 
 from core.config import get_config
 from core.logger import get_trade_logger
-from data.cache import DataCache, TTL_BARS, TTL_FEATURES, TTL_QUOTE
+from data.cache import DataCache, TTL_BARS
 from data.market_data import (
     AlpacaDataProvider,
     DataProvider,
@@ -785,24 +784,26 @@ def _max_consecutive_nans(df: pd.DataFrame) -> int:
 def _count_out_of_hours(sym_df: pd.DataFrame) -> int:
     """Count bars whose timestamp falls outside 09:30–16:00 ET (approximate).
 
-    We convert UTC timestamps to a rough ET by subtracting 5 hours
-    (standard time; daylight saving is not accounted for here as this
-    check is advisory only).
+    Fully vectorised implementation using pandas DatetimeIndex operations.
+    We convert UTC timestamps to approximate ET by subtracting 5 hours
+    (standard time; daylight saving is not accounted for as this check
+    is advisory only).
     """
     datetimes = sym_df.index.get_level_values("datetime")
-    if not hasattr(datetimes, "__iter__"):
+    if len(datetimes) == 0:
         return 0
 
-    count = 0
-    for dt in datetimes:
-        try:
-            # Approximate ET: UTC - 5h
-            et_hour = (dt.hour - _ET_OFFSET_HOURS) % 24  # subtract negative offset
-            et_minute = dt.minute
-            before_open = (et_hour, et_minute) < (_MARKET_OPEN_HOUR, _MARKET_OPEN_MINUTE)
-            after_close = (et_hour, et_minute) > (_MARKET_CLOSE_HOUR, 0)
-            if before_open or after_close:
-                count += 1
-        except (AttributeError, TypeError):
-            pass
-    return count
+    try:
+        # Vectorised: extract hour and minute as integer arrays
+        et_hours = (datetimes.hour - _ET_OFFSET_HOURS) % 24
+        et_minutes = datetimes.minute
+
+        # Encode as fractional hours for simple comparison
+        et_time = et_hours + et_minutes / 60.0
+        market_open = _MARKET_OPEN_HOUR + _MARKET_OPEN_MINUTE / 60.0  # 9.5
+        market_close = float(_MARKET_CLOSE_HOUR)                      # 16.0
+
+        outside = (et_time < market_open) | (et_time > market_close)
+        return int(outside.sum())
+    except (AttributeError, TypeError):
+        return 0

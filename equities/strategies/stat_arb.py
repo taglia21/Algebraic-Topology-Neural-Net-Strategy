@@ -46,7 +46,7 @@ from scipy import stats
 
 from core.config import StatArbConfig, get_config
 from core.logger import TradeLogger, get_trade_logger
-from core.regime_detector import Regime, RegimeState
+from core.regime_detector import RegimeState
 from equities.models import Pair, Signal
 
 logger = logging.getLogger(__name__)
@@ -426,7 +426,7 @@ class StatArbStrategy:
             and the index is a date-sorted DatetimeIndex.
         min_history_days:
             Minimum number of overlapping trading days required for a pair to
-            be tested (default 504 ≈ 2 trading years).
+            be tested (default 252 ≈ 1 trading year).
 
         Returns
         -------
@@ -459,7 +459,7 @@ class StatArbStrategy:
                 logger.debug(f"Cointegration test failed for {sym_x}/{sym_y}: {exc}")
                 continue
 
-            if pvalue >= 0.10:
+            if pvalue >= 0.05:
                 continue
 
             # Compute spread using static hedge ratio (OU fitting uses static spread)

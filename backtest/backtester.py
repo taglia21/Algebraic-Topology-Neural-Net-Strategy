@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import logging
 import traceback
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -57,12 +56,12 @@ import numpy as np
 import pandas as pd
 
 from core.config import Config, get_config
+from core.kill_switch import KillSwitch, CircuitBreakerConfig
 from core.logger import get_trade_logger
 from core.regime_detector import RegimeDetector, RegimeState, Regime
 from core.risk_manager import RiskManager
 from data.data_manager import DataManager
 from equities.execution import ExecutionManager, SimulatedBroker
-from equities.models import PortfolioState
 from equities.signal_generator import SignalGenerator
 from equities.strategies.stat_arb import StatArbStrategy
 from equities.strategies.momentum import MomentumStrategy
@@ -152,6 +151,20 @@ class Backtester:
         # because they depend on the strategy universe.
         self.signal_generator: Optional[SignalGenerator] = None
         self.execution_manager: Optional[ExecutionManager] = None
+
+        # Kill switch — same circuit breaker logic as live, but with
+        # cooldown disabled (backtest has no real-time clock).
+        self.kill_switch = KillSwitch(
+            config=CircuitBreakerConfig(
+                max_drawdown_pct=self.config.risk.max_drawdown_halt,
+                max_daily_loss_pct=-0.03,
+                max_consecutive_losses=8,   # more lenient in backtest
+                max_open_positions=40,
+                max_orders_per_minute=10_000,  # disabled in backtest (no real exchange)
+                cooldown_minutes=0.0,          # instant resume in backtest
+            ),
+            initial_equity=_cash,
+        )
 
         # ML pipeline (optional)
         self.ml_pipeline = None
@@ -288,12 +301,20 @@ class Backtester:
         # 6. Event loop — bar by bar
         # ----------------------------------------------------------------
         bar_idx = 0
+        _prev_trading_date = None   # track date changes for kill switch reset
         regime_state = RegimeDetector().predict(  # default UNKNOWN before fit
             pd.DataFrame()
         ) if False else self._default_regime_state()
 
         for bar_dt, bar_df in self.data_manager.iter_bars():
             bar_idx += 1
+
+            # Reset kill-switch daily tracking on each new trading date
+            _cur_date = bar_dt.date() if hasattr(bar_dt, 'date') else None
+            if _cur_date is not None and _cur_date != _prev_trading_date:
+                portfolio = self.broker.get_portfolio_state()
+                self.kill_switch.reset_daily(portfolio.equity)
+                _prev_trading_date = _cur_date
 
             # Skip bars before our entire warmup window
             # (we still need to iterate them to build history)
@@ -401,6 +422,18 @@ class Backtester:
                         }
                 except Exception as exc:
                     logger.warning(f"ML pipeline failed on bar {bar_dt}: {exc}")
+
+            # ---- Kill switch / circuit breaker check ----
+            self.kill_switch.pre_order_check(portfolio)
+            if not self.kill_switch.is_trading_allowed():
+                if self._verbose and bar_idx % _PROGRESS_EVERY == 0:
+                    print(
+                        f"  [bar {bar_idx}] CIRCUIT BREAKER: "
+                        f"{self.kill_switch.block_reason}",
+                        flush=True,
+                    )
+                # Reset daily tracking if we detect a new trading day
+                continue
 
             # ---- Step 4-5: Generate and combine signals ----
             # Every-other-bar for full signal generation (stat_arb pair
@@ -638,6 +671,7 @@ class Backtester:
             equity_curve,
             self._trades_log,
             benchmark=benchmark,
+            regime_history=regime_history,
         )
 
         # Serialise config (strip non-serialisable values)

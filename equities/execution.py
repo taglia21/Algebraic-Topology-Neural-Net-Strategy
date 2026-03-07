@@ -28,8 +28,20 @@ Order Lifecycle
 
 Slippage Model
 --------------
-The ``SimulatedBroker`` applies configurable slippage to all fills:
-- **Market orders**: fill at ``next_open × (1 ± slippage_bps/10000)``.
+The ``SimulatedBroker`` applies a two-component slippage model:
+
+1. **Fixed component** (``slippage_bps``): baseline execution cost.
+2. **Market impact component** (square-root model): scales with order size
+   relative to average daily volume (ADV).  Impact formula:
+
+       impact_bps = k × σ_daily × √(Q / ADV) × 10_000
+
+   where *k* is a calibration constant (default 0.1), *σ_daily* is the
+   realised daily volatility, *Q* is the order quantity, and *ADV* is the
+   20-day average daily volume.  This is the standard Almgren-Chriss
+   temporary impact model used in institutional execution analytics.
+
+- **Market orders**: fill at ``bar_open × (1 ± total_slippage_bps / 10_000)``.
 - **Limit orders**: fill only when price touches the limit; no additional
   slippage (since price had to reach the limit).
 """
@@ -46,7 +58,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from core.config import BacktestConfig, get_config
+from core.config import get_config
 from core.logger import TradeLogger, get_trade_logger
 from core.risk_manager import RiskManager
 from equities.models import (
@@ -200,6 +212,10 @@ class SimulatedBroker(Broker):
         Audit logger.
     """
 
+    # Almgren-Chriss temporary impact calibration constant.
+    # Kyle's lambda ≈ 0.1 is a widely-used institutional default.
+    _IMPACT_K: float = 0.1
+
     def __init__(
         self,
         initial_cash: float = 100_000.0,
@@ -231,9 +247,18 @@ class SimulatedBroker(Broker):
         # Current simulated bar datetime (set by backtester each bar)
         self._current_bar_dt: Optional[datetime] = None
 
+        # --- Volume & volatility tracking for market impact model ---
+        # Rolling 20-bar ADV per symbol (updated each on_bar call)
+        self._volume_history: Dict[str, List[float]] = defaultdict(list)
+        # Rolling 20-bar close prices for realised vol computation
+        self._price_history: Dict[str, List[float]] = defaultdict(list)
+        _ADV_WINDOW = 20  # noqa: N806 — local constant
+        self._adv_window = _ADV_WINDOW
+
         logger.info(
             f"SimulatedBroker initialised: "
-            f"cash={initial_cash:,.2f}, slippage={slippage_bps}bps."
+            f"cash={initial_cash:,.2f}, slippage={slippage_bps}bps, "
+            f"market_impact=sqrt (k={self._IMPACT_K})."
         )
 
     # ------------------------------------------------------------------
@@ -363,6 +388,19 @@ class SimulatedBroker(Broker):
         bar_high = float(bar_lower.get("high", bar_open * 1.002))
         bar_low = float(bar_lower.get("low", bar_open * 0.998))
         bar_close = float(bar_lower.get("close", bar_open))
+        bar_volume = float(bar_lower.get("volume", 0.0))
+
+        # --- Track volume and price for market impact model ---
+        if bar_volume > 0:
+            hist = self._volume_history[symbol]
+            hist.append(bar_volume)
+            if len(hist) > self._adv_window:
+                hist.pop(0)
+        if bar_close > 0:
+            phist = self._price_history[symbol]
+            phist.append(bar_close)
+            if len(phist) > self._adv_window + 1:
+                phist.pop(0)
 
         # Update position mark-to-market
         if symbol in self._positions:
@@ -399,6 +437,51 @@ class SimulatedBroker(Broker):
     # Private fill logic
     # ------------------------------------------------------------------
 
+    def _compute_market_impact_bps(self, symbol: str, qty: int) -> float:
+        """Compute additional market-impact slippage using the square-root model.
+
+        Uses the Almgren-Chriss temporary impact formula:
+
+            impact_bps = k × σ_daily × √(Q / ADV) × 10_000
+
+        Parameters
+        ----------
+        symbol:
+            Ticker symbol (used to look up ADV and vol history).
+        qty:
+            Order quantity in shares.
+
+        Returns
+        -------
+        float
+            Additional slippage in basis points (0.0 if insufficient data).
+        """
+        vol_hist = self._volume_history.get(symbol, [])
+        price_hist = self._price_history.get(symbol, [])
+
+        # Need at least 5 bars of history for a meaningful estimate
+        if len(vol_hist) < 5 or len(price_hist) < 5:
+            return 0.0
+
+        adv = float(np.mean(vol_hist))
+        if adv <= 0:
+            return 0.0
+
+        # Realised daily volatility from log returns
+        prices = np.array(price_hist, dtype=float)
+        log_returns = np.diff(np.log(prices))
+        if len(log_returns) < 2:
+            return 0.0
+        sigma_daily = float(np.std(log_returns, ddof=1))
+        if sigma_daily <= 0:
+            return 0.0
+
+        participation_rate = float(qty) / adv
+        impact = self._IMPACT_K * sigma_daily * np.sqrt(participation_rate)
+
+        # Convert to basis points (impact is in decimal return units)
+        return impact * 10_000.0
+
     def _try_fill(
         self,
         order: Order,
@@ -421,8 +504,10 @@ class SimulatedBroker(Broker):
         :class:`Fill` if the order was filled; ``None`` otherwise.
         """
         if order.order_type == "market":
-            # Market order: fill at open + slippage
-            slippage_factor = self._slippage_bps / 10_000.0
+            # Market order: fill at open + fixed slippage + market impact
+            impact_bps = self._compute_market_impact_bps(order.symbol, order.qty)
+            total_slippage_bps = self._slippage_bps + impact_bps
+            slippage_factor = total_slippage_bps / 10_000.0
             if order.side == "buy":
                 fill_price = bar_open * (1.0 + slippage_factor)
             else:
@@ -472,8 +557,12 @@ class SimulatedBroker(Broker):
 
         self._cash += cash_impact
 
-        # Compute slippage vs. reference (bar_open approximated by fill_price / slippage factor)
-        slippage_bps = self._slippage_bps if order.order_type == "market" else 0.0
+        # Compute total slippage (fixed + market impact)
+        if order.order_type == "market":
+            impact_bps = self._compute_market_impact_bps(order.symbol, fill_qty)
+            slippage_bps = self._slippage_bps + impact_bps
+        else:
+            slippage_bps = 0.0
 
         # Update position
         self._update_position(order.symbol, fill_qty, fill_price, order.side, order.strategy)

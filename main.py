@@ -49,14 +49,8 @@ from backtest.metrics import BacktestResult, PerformanceMetrics
 
 logger = logging.getLogger(__name__)
 
-# Default symbol universe for standalone runs
-_DEFAULT_SYMBOLS: List[str] = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META",
-    "JPM", "BAC", "V", "MA",
-    "UNH", "JNJ", "LLY",
-    "XOM", "CVX",
-    "WMT", "HD", "COST",
-]
+# Default symbol universe for standalone runs — sourced from config
+from core.config import _DEFAULT_SYMBOLS
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +167,7 @@ class SystemOrchestrator:
         orders to Alpaca.
         """
         from data.data_manager import DataManager
+        from data.cache import DataCache
         from equities.execution import ExecutionManager, SimulatedBroker
         from equities.signal_generator import SignalGenerator
         from equities.strategies.stat_arb import StatArbStrategy
@@ -188,6 +183,7 @@ class SystemOrchestrator:
 
         cfg = self.config
         data_manager = DataManager(mode=self.mode)
+        data_cache = DataCache(max_entries=5000)
         regime_detector = RegimeDetector()
         risk_manager = RiskManager(cfg.risk, self._log)
         market_cal = MarketCalendar()
@@ -348,6 +344,12 @@ class SystemOrchestrator:
                             logger.warning(recon_report.summary())
                     except Exception as exc:
                         logger.warning(f"Reconciliation failed: {exc}")
+
+                # --- Cache maintenance (every 20 cycles ≈ 100 min) ---
+                if cycle % 20 == 0:
+                    purged = data_cache.purge_expired()
+                    if purged > 0:
+                        logger.debug(f"Cache: purged {purged} stale entries.")
 
                 # Print portfolio snapshot
                 mins_left = market_cal.minutes_until_close()

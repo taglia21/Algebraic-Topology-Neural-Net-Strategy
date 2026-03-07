@@ -12,13 +12,15 @@ Regime-Dependent Strategy Allocations
 --------------------------------------
 ::
 
-    BULL:     stat_arb=10%, momentum=40%, factor=20%, mean_rev=25%  (total 95% deployed)
-    BEAR:     stat_arb=30%, momentum=10%, factor=20%, mean_rev=30%  (total 90% deployed)
-    SIDEWAYS: stat_arb=20%, momentum=25%, factor=20%, mean_rev=25%  (total 90% deployed)
-    UNKNOWN:  stat_arb=15%, momentum=25%, factor=20%, mean_rev=25%  (total 85% deployed)
-    CRISIS:   stat_arb=25%, momentum= 5%, factor=15%, mean_rev=30%  (total 75% deployed)
+    BULL:     stat_arb= 5%, momentum=50%, factor=30%, mean_rev=13%  (total 98% deployed)
+    BEAR:     stat_arb=25%, momentum=15%, factor=25%, mean_rev=30%  (total 95% deployed)
+    SIDEWAYS: stat_arb=25%, momentum=30%, factor=25%, mean_rev=18%  (total 98% deployed)
+    UNKNOWN:  stat_arb=20%, momentum=30%, factor=25%, mean_rev=20%  (total 95% deployed)
+    CRISIS:   stat_arb=25%, momentum= 5%, factor=15%, mean_rev=35%  (total 80% deployed)
 
-The remaining allocation stays in cash / is not allocated.
+Maximum capital deployment is critical — the old 75-90% allocations left
+the system sitting in 10-25% cash, which is the single largest drag on
+returns vs SPY.
 
 Conflict Resolution
 -------------------
@@ -53,43 +55,43 @@ logger = logging.getLogger(__name__)
 # Regime → Strategy allocation tables
 # ---------------------------------------------------------------------------
 
-# Allocations by regime (sum < 1.0 intentionally — remaining stays in cash)
+# Allocations by regime — deploy 95-100% of capital in all regimes.
+# Holding excessive cash is the #1 drag on returns vs SPY.
 _REGIME_ALLOCATIONS: Dict[str, Dict[str, float]] = {
     Regime.BULL.value: {
-        "stat_arb":       0.10,
-        "momentum":       0.40,
-        "factor_model":   0.20,
-        "mean_reversion": 0.25,
-    },
+        "stat_arb":       0.05,
+        "momentum":       0.50,
+        "factor_model":   0.30,
+        "mean_reversion": 0.13,
+    },  # total 98% — heavy momentum + factor = long-biased
     Regime.BEAR.value: {
-        "stat_arb":       0.30,
-        "momentum":       0.10,
-        "factor_model":   0.20,
-        "mean_reversion": 0.30,   # mean reversion thrives in bear
-    },
+        "stat_arb":       0.25,
+        "momentum":       0.15,
+        "factor_model":   0.25,
+        "mean_reversion": 0.30,
+    },  # total 95%
     Regime.SIDEWAYS.value: {
-        "stat_arb":       0.20,
-        "momentum":       0.25,
-        "factor_model":   0.20,
-        "mean_reversion": 0.25,
-    },
+        "stat_arb":       0.25,
+        "momentum":       0.30,
+        "factor_model":   0.25,
+        "mean_reversion": 0.18,
+    },  # total 98%
     Regime.UNKNOWN.value: {
-        "stat_arb":       0.15,
-        "momentum":       0.25,
-        "factor_model":   0.20,
-        "mean_reversion": 0.25,
-    },
+        "stat_arb":       0.20,
+        "momentum":       0.30,
+        "factor_model":   0.25,
+        "mean_reversion": 0.20,
+    },  # total 95%
 }
 
-# Crisis override — reduced exposure but still trading.
-# Previous version zeroed out momentum entirely, causing the system to sit
-# idle during bear markets and miss mean-reversion opportunities.
+# Crisis override — still deploy 80% of capital.  Crisis is a regime, not a
+# reason to sit in cash.  Mean reversion and stat-arb thrive in high-vol.
 _CRISIS_ALLOCATIONS: Dict[str, float] = {
     "stat_arb":       0.25,
     "momentum":       0.05,
     "factor_model":   0.15,
-    "mean_reversion": 0.30,   # short-term reversal is best in crisis
-}
+    "mean_reversion": 0.35,
+}  # total 80%
 
 # Minimum weighted strength to keep a combined signal (avoids noise)
 _MIN_COMBINED_STRENGTH: float = 0.02
@@ -97,13 +99,13 @@ _MIN_COMBINED_STRENGTH: float = 0.02
 # Cancellation threshold: if opposing signals are within this band, emit close
 _CANCELLATION_THRESHOLD: float = 0.15
 
-# Regime directional bias: in BULL, penalise short signals; in BEAR, penalise longs.
-# A multiplier of 0.25 means short signals keep only 25% of their strength in BULL.
+# Directional bias: softer penalties so capital actually deploys.
+# Previous 0.40 short penalty in BULL killed stat-arb pair shorts entirely.
 _REGIME_DIRECTION_BIAS: Dict[str, Dict[str, float]] = {
-    Regime.BULL.value:     {"long": 1.5, "short": 0.40},  # reduced penalty; small universe needs short opportunities
-    Regime.BEAR.value:     {"long": 0.5, "short": 1.2},
-    Regime.SIDEWAYS.value: {"long": 1.1, "short": 0.7},
-    Regime.UNKNOWN.value:  {"long": 1.0, "short": 0.6},
+    Regime.BULL.value:     {"long": 1.3, "short": 0.60},
+    Regime.BEAR.value:     {"long": 0.6, "short": 1.2},
+    Regime.SIDEWAYS.value: {"long": 1.1, "short": 0.80},
+    Regime.UNKNOWN.value:  {"long": 1.0, "short": 0.70},
 }
 
 

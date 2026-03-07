@@ -41,7 +41,7 @@ _DEFAULT_SYMBOLS: List[str] = [
     # Benchmarks
     "SPY", "QQQ", "IWM",
     # Mega-cap tech
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO",
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO",
     # Financials
     "BRK.B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS",
     # Healthcare
@@ -155,15 +155,15 @@ class MomentumConfig:
 
     lookback_days: int = 252      # 12-month lookback
     skip_days: int = 21           # Skip most recent month (1-month reversal)
-    long_pct: float = 0.30        # Top 30% (was 20% — too narrow for 15 stocks)
-    short_pct: float = 0.20       # Bottom 20%
-    # Sector-neutral construction — DISABLED for small universe (<30 stocks)
+    long_pct: float = 0.30        # Top 30% of universe (aggressive long)
+    short_pct: float = 0.05       # Bottom 5% only (minimal shorts)
+    # Sector-neutral construction — enabled for 50+ stock universe
     sector_neutral: bool = False
     # Volatility scaling: inverse-vol weight positions
     vol_scale: bool = True
-    vol_target: float = 0.15      # Annualised volatility target (tighter for Barroso scaling)
-    # Rebalance cadence in trading days (21 = monthly)
-    rebalance_days: int = 21
+    vol_target: float = 0.15      # Annualised volatility target (Barroso scaling)
+    # Rebalance cadence in trading days (5 = weekly)
+    rebalance_days: int = 5
     # Rank change threshold to trigger rebalance (0 = always rebalance)
     min_rank_change: float = 0.15
 
@@ -191,7 +191,7 @@ class FactorModelConfig:
 
     lookback_days: int = 63       # ~3 months for factor estimation
     # Factor composite Z-score thresholds
-    entry_z: float = 0.50         # Relaxed from 0.75 to generate more signals
+    entry_z: float = 0.40         # Low bar = more signals = more capital deployed
     exit_z: float = -0.10         # Exit earlier for turnover
     # Factor weights — overweight momentum per research
     quality_weight: float = 0.20
@@ -199,7 +199,7 @@ class FactorModelConfig:
     low_vol_weight: float = 0.20
     momentum_weight: float = 0.35
     # Rebalance cadence
-    rebalance_days: int = 21      # Monthly
+    rebalance_days: int = 5       # Weekly
 
 
 @dataclass
@@ -222,7 +222,7 @@ class RiskConfig:
 
     # --- Position limits ---
     max_position_pct: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_POSITION_PCT", "0.20")
+        os.environ.get("RISK_MAX_POSITION_PCT", "0.15")
     ))
     max_sector_pct: float = field(default_factory=lambda: float(
         os.environ.get("RISK_MAX_SECTOR_PCT", "0.35")

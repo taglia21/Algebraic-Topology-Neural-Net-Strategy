@@ -2,12 +2,13 @@
 """
 run_backtest.py — Quick standalone backtest runner.
 
-15-stock diversified universe covering all major GICS sectors.
-105 stat-arb pairs (C(15,2)) for manageable runtime.
+Uses the full 50+ stock _DEFAULT_SYMBOLS universe from core.config to match
+live trading.  Pass --small to use a 15-stock subset for faster iteration.
 
 Usage:
-    python run_backtest.py                      # No ML (fast, ~6 min)
-    python run_backtest.py --ml                 # With ML meta-learner (~15 min)
+    python run_backtest.py                      # Full 50-stock, no ML
+    python run_backtest.py --ml                 # With ML meta-learner
+    python run_backtest.py --small              # 15-stock subset (fast)
     python run_backtest.py --start 2020-01-01   # Custom date range
 """
 
@@ -17,18 +18,17 @@ import sys
 import time
 import traceback
 
-# 15-stock diversified universe (liquid mega-caps across sectors)
-UNIVERSE = [
-    "AAPL", "MSFT", "NVDA",   # Tech
-    "JNJ", "UNH",              # Healthcare
-    "JPM", "GS",               # Financials
-    "AMZN", "TSLA",            # Consumer Discretionary
-    "XOM",                     # Energy
-    "CAT",                     # Industrials
-    "PG",                      # Consumer Staples
-    "GOOGL",                   # Communication
-    "LIN",                     # Materials
-    "NEE",                     # Utilities
+from core.config import _DEFAULT_SYMBOLS
+
+# Full universe = _DEFAULT_SYMBOLS minus ETF benchmarks (SPY/QQQ/IWM are not
+# traded as individual positions — they're used for regime detection/hedging).
+_BENCHMARKS = {"SPY", "QQQ", "IWM"}
+UNIVERSE_FULL = [s for s in _DEFAULT_SYMBOLS if s not in _BENCHMARKS]
+
+# Small subset for quick iteration / debugging
+UNIVERSE_SMALL = [
+    "AAPL", "MSFT", "NVDA", "JNJ", "UNH", "JPM", "GS",
+    "AMZN", "TSLA", "XOM", "CAT", "PG", "GOOGL", "LIN", "NEE",
 ]
 
 
@@ -41,16 +41,18 @@ def main() -> None:
     parser.add_argument("--end", default="2025-12-31", help="End date (YYYY-MM-DD)")
     parser.add_argument("--ml", action="store_true", help="Enable ML meta-learner pipeline")
     parser.add_argument("--capital", type=float, default=100_000.0, help="Initial capital")
+    parser.add_argument("--small", action="store_true", help="Use 15-stock subset (faster)")
     args = parser.parse_args()
 
     from main import SystemOrchestrator
 
-    n_pairs = len(UNIVERSE) * (len(UNIVERSE) - 1) // 2
-    print(f"\nUniverse : {len(UNIVERSE)} stocks → {n_pairs} stat-arb pairs")
+    universe = UNIVERSE_SMALL if args.small else UNIVERSE_FULL
+    n_pairs = len(universe) * (len(universe) - 1) // 2
+    print(f"\nUniverse : {len(universe)} stocks → {n_pairs} stat-arb pairs")
     print(f"Period   : {args.start} → {args.end}")
     print(f"Capital  : ${args.capital:,.0f}")
     print(f"ML       : {'enabled' if args.ml else 'disabled'}")
-    print(f"Stocks   : {', '.join(UNIVERSE)}")
+    print(f"Stocks   : {', '.join(universe)}")
     print("-" * 70)
 
     orchestrator = SystemOrchestrator(mode="backtest")
@@ -60,7 +62,7 @@ def main() -> None:
         result = orchestrator.run_backtest(
             start=args.start,
             end=args.end,
-            symbols=UNIVERSE,
+            symbols=universe,
             initial_capital=args.capital,
             use_ml=args.ml,
         )
@@ -84,7 +86,8 @@ def main() -> None:
     m = result.metrics
     output = {
         "elapsed_seconds": elapsed,
-        "universe": UNIVERSE,
+        "universe": universe,
+        "universe_size": len(universe),
         "start": args.start,
         "end": args.end,
     }

@@ -45,7 +45,7 @@ check("imports", test_config_imports)
 def test_config_get_config():
     from core.config import get_config
     cfg = get_config(reload=True)
-    assert cfg.risk.max_position_pct == 0.20
+    assert cfg.risk.max_position_pct == 0.15
     assert cfg.risk.max_drawdown_halt == -0.30
     assert cfg.risk.daily_loss_limit == -0.03
     assert cfg.risk.max_correlation == 0.85
@@ -94,7 +94,7 @@ def test_config_to_dict():
     d = cfg.to_dict()
     assert isinstance(d, dict)
     assert "risk" in d
-    assert d["risk"]["max_position_pct"] == 0.20
+    assert d["risk"]["max_position_pct"] == 0.15
 check("to_dict() serialisation", test_config_to_dict)
 
 # ----------------------------------------------------------------
@@ -369,15 +369,15 @@ def _make_rm():
 
 def test_risk_check_position_size_ok():
     rm, log = _make_rm()
-    # 20 % of 100k = 20000; 100 shares @ 190 = 19000 → pass
-    assert rm.check_position_size("AAPL", 100, 190.0, 100_000)
+    # 15% of 100k = 15000; 70 shares @ 190 = 13300 → pass
+    assert rm.check_position_size("AAPL", 70, 190.0, 100_000)
     log.close()
 check("check_position_size() — within limit", test_risk_check_position_size_ok)
 
 def test_risk_check_position_size_breach():
     rm, log = _make_rm()
-    # 500 shares @ 50 = 25_000 = 25 % > 20 % limit
-    assert not rm.check_position_size("AAPL", 500, 50.0, 100_000)
+    # 400 shares @ 50 = 20_000 = 20% > 15% limit
+    assert not rm.check_position_size("AAPL", 400, 50.0, 100_000)
     log.close()
 check("check_position_size() — breach denied", test_risk_check_position_size_breach)
 

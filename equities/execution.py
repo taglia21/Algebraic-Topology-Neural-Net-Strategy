@@ -965,15 +965,19 @@ class ExecutionManager:
     ) -> int:
         """Compute the number of shares to order based on signal strength.
 
-        Position sizing formula:
-            target_value = equity × max_position_fraction × adjusted_strength
-            qty = target_value / price
+        Position sizing uses the *pre-scale* signal strength (before regime
+        allocation weighting) so that allocation weights control *which*
+        signals pass the pipeline, not *how large* positions are.  This is
+        critical for capital deployment — allocation-scaled strengths of
+        0.3-0.6 produced tiny positions and kept 70%+ cash.
 
-        Signal strength is floored at 0.5 to ensure meaningful position sizes
-        for any signal that passes the pipeline filters.
+        Sizing formula:
+            raw_strength = signal.metadata.pre_scale_strength (or signal.strength)
+            adjusted      = max(raw_strength, 0.85)
+            target_value  = equity × max_position_pct × adjusted
 
         Capped at ``max_position_value`` and bounded by gross exposure limit
-        (150% of equity) to prevent excessive leverage.
+        (150% of equity) to allow aggressive deployment with leverage guard-rail.
 
         Parameters
         ----------
@@ -992,7 +996,6 @@ class ExecutionManager:
         equity = max(portfolio_state.equity, 1.0)
 
         # --- Gross exposure cap (150% of equity) ---
-        # This prevents the system from becoming a de-facto leveraged fund.
         _MAX_GROSS_EXPOSURE_PCT = 1.50
         current_gross = portfolio_state.gross_exposure
         remaining_capacity = max(equity * _MAX_GROSS_EXPOSURE_PCT - current_gross, 0.0)
@@ -1003,9 +1006,11 @@ class ExecutionManager:
             )
             return 0
 
-        # Floor signal strength at 0.5 — if a signal passed all filters and
-        # regime gates, it deserves a meaningful allocation.
-        adjusted_strength = max(signal.strength, 0.5)
+        # Use PRE-SCALE strength for sizing (before allocation weighting).
+        # The allocation weight controls conflict resolution priority, not
+        # position size.  This fixes the capital deployment problem.
+        raw_strength = signal.metadata.get("pre_scale_strength", signal.strength)
+        adjusted_strength = max(float(raw_strength), 0.85)
         target_notional = equity * max_pct * adjusted_strength
         target_notional = min(target_notional, self._max_position_value)
 

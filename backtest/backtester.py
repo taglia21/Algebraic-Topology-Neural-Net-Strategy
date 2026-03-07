@@ -68,6 +68,7 @@ from equities.strategies.momentum import MomentumStrategy
 from equities.strategies.factor_model import FactorModelStrategy
 from equities.strategies.mean_reversion import MeanReversionStrategy
 from backtest.metrics import BacktestResult, PerformanceMetrics
+from ml.hrp import apply_hrp_to_signals
 
 logger = logging.getLogger(__name__)
 
@@ -314,11 +315,15 @@ class Backtester:
         for bar_dt, bar_df in self.data_manager.iter_bars():
             bar_idx += 1
 
-            # Reset kill-switch daily tracking on each new trading date
+            # Reset daily tracking on each new trading date
             _cur_date = bar_dt.date() if hasattr(bar_dt, 'date') else None
             if _cur_date is not None and _cur_date != _prev_trading_date:
                 portfolio = self.broker.get_portfolio_state()
+                # Reset BOTH kill switch and broker SOD equity so that:
+                # 1) Circuit breaker daily-loss check uses fresh SOD equity
+                # 2) ExecutionManager's today_pnl (broker.sod_equity) resets
                 self.kill_switch.reset_daily(portfolio.equity)
+                self.broker.reset_daily()
                 _prev_trading_date = _cur_date
 
             # Skip bars before our entire warmup window
@@ -394,7 +399,7 @@ class Backtester:
             # ---- Step 3: ML features (if enabled) ----
             # Lazy-init: create MLPipeline on first post-warmup bar so
             # FeatureEngine has SPY data available for cross-sectional features.
-            ml_adjustments: Dict[str, float] = {}
+            ml_adjustments: Dict[str, Any] = {}
             if use_ml and self.ml_pipeline is None and self._ml_imports_ok:
                 try:
                     from ml.feature_engine import FeatureEngine as _FE
@@ -440,10 +445,7 @@ class Backtester:
                                         ml_preds.update(pred)
                             except Exception as exc:
                                 logger.debug(f"ML predict failed for {sym}: {exc}")
-                        ml_adjustments = {
-                            sym: float(pred.get("score", 0.5))
-                            for sym, pred in ml_preds.items()
-                        }
+                        ml_adjustments = ml_preds
                 except Exception as exc:
                     logger.warning(f"ML pipeline failed on bar {bar_dt}: {exc}")
 
@@ -480,6 +482,19 @@ class Backtester:
             # ---- Step 6: ML meta-learner signal weight adjustment ----
             if ml_adjustments and signals:
                 signals = self._apply_ml_adjustments(signals, ml_adjustments)
+
+            # ---- Step 6b: HRP portfolio construction ----
+            # Scale signal strengths by Hierarchical Risk Parity weights
+            # so capital allocation follows risk-parity principles.
+            if signals and price_data is not None and len(price_data) >= 60:
+                try:
+                    returns_for_hrp = price_data.pct_change().dropna()
+                    if len(returns_for_hrp) >= 20:
+                        signals = apply_hrp_to_signals(
+                            signals, returns_for_hrp.tail(120)
+                        )
+                except Exception as exc:
+                    logger.debug(f"HRP adjustment failed: {exc}")
 
             # ---- Step 7-8: Risk check + order submission ----
             if signals:
@@ -1000,19 +1015,25 @@ class Backtester:
     def _apply_ml_adjustments(
         self,
         signals: list,
-        ml_adjustments: Dict[str, float],
+        ml_adjustments: Dict[str, Any],
     ) -> list:
-        """Scale signal strengths by ML meta-learner scores.
+        """Scale signal strengths by ML meta-learner scores and bet sizing.
 
-        The meta-learner outputs a score in [0, 1].  We multiply the signal
-        strength by this score, then clamp to [0.001, 1.0].
+        The meta-learner outputs a dict per symbol containing:
+        - ``score``: composite probability in [0, 1]
+        - ``bet_size``: ML-driven position scale factor from meta-labeler
+        - ``take_trade``: boolean gate from meta-labeler
+
+        Bet sizing (AFML Ch. 10): the meta-labeler's predicted probability
+        is converted to a bet size via ``2p - 1``.  This scales the signal
+        strength so that higher-confidence trades get larger positions.
 
         Parameters
         ----------
         signals:
             List of :class:`~equities.models.Signal` objects.
         ml_adjustments:
-            Mapping of symbol → ML score in [0, 1].
+            Mapping of symbol → ML prediction dict (or float score).
 
         Returns
         -------
@@ -1022,9 +1043,30 @@ class Backtester:
 
         adjusted = []
         for sig in signals:
-            score = ml_adjustments.get(sig.symbol)
+            adj = ml_adjustments.get(sig.symbol)
+            if adj is None:
+                adjusted.append(sig)
+                continue
+
+            # Handle both dict (new) and float (legacy) formats
+            if isinstance(adj, dict):
+                score = adj.get("score", 0.5)
+                bet_size = adj.get("bet_size", 1.0)
+                take_trade = adj.get("take_trade", True)
+            else:
+                score = float(adj)
+                bet_size = 1.0
+                take_trade = True
+
+            if not take_trade:
+                # Meta-labeler says skip this trade
+                continue
+
             if score is not None and not np.isnan(score):
-                new_strength = float(np.clip(sig.strength * score, 0.001, 1.0))
+                # Scale by ML score AND meta-labeler bet size
+                new_strength = float(
+                    np.clip(sig.strength * score * max(bet_size, 0.1), 0.001, 1.0)
+                )
                 adjusted.append(
                     Signal(
                         symbol=sig.symbol,
@@ -1034,6 +1076,7 @@ class Backtester:
                         metadata={
                             **sig.metadata,
                             "ml_score":          score,
+                            "ml_bet_size":       bet_size,
                             "pre_ml_strength":   sig.strength,
                         },
                         timestamp=sig.timestamp,

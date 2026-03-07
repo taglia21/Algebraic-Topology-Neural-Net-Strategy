@@ -884,6 +884,7 @@ class ExecutionManager:
                     sym: pos.market_value
                     for sym, pos in portfolio_state.positions.items()
                 },
+                sod_equity=sod_equity if sod_equity and sod_equity > 0 else portfolio_state.equity,
             )
 
             approval = self._risk_manager.approve_trade(

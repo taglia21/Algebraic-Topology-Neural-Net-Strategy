@@ -87,6 +87,8 @@ from core.regime_detector import Regime
 from ml.feature_engine import FeatureEngine
 from ml.models.gradient_boost import GradientBoostModel
 from ml.validation import validate_model, walk_forward_validate
+from ml.cusum_filter import cusum_filter, cusum_sample_weights
+from ml.meta_labeler import MetaLabeler
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +279,15 @@ class MLPipeline:
         # Feature pruning: features identified as zero-importance across models
         self._pruned_features: List[str] = []
 
+        # CUSUM event filter
+        self._cusum_events: Optional[pd.DatetimeIndex] = None
+
+        # Meta-labeler (AFML Ch. 3.6 + Ch. 10)
+        self.meta_labeler: MetaLabeler = MetaLabeler(
+            max_bet_size=1.0,
+            min_probability=0.55,
+        )
+
         # Timestamps
         self._last_train_time: Optional[float] = None
 
@@ -339,6 +350,19 @@ class MLPipeline:
         # --- Data fingerprint for change detection ---
         new_fingerprint = _fingerprint_data(price_data)
         self._data_fingerprint = new_fingerprint
+
+        # --- CUSUM event-driven sampling ---
+        close_col = price_data.get("close", price_data.get("Close"))
+        if close_col is not None and len(close_col) > 50:
+            self._cusum_events = cusum_filter(
+                close_col, vol_multiplier=1.0, vol_lookback=20
+            )
+            logger.info(
+                f"MLPipeline.train_all: CUSUM detected {len(self._cusum_events)} "
+                f"structural events from {len(close_col)} bars."
+            )
+        else:
+            self._cusum_events = None
 
         # --- Compute features ---
         logger.info("MLPipeline.train_all: computing features ...")
@@ -545,6 +569,23 @@ class MLPipeline:
             logger.warning(f"MLPipeline.train_all: meta-learner training failed: {exc}")
             reports["meta"] = {"error": str(exc)}
 
+        # ------------------------------------------------------------------
+        # Train meta-labeler (AFML Ch. 3.6) — secondary model for
+        # trade gating + bet sizing from predicted probabilities
+        # ------------------------------------------------------------------
+        logger.info("MLPipeline.train_all: training meta-labeler ...")
+        try:
+            meta_label_report = self._train_meta_labeler(
+                price_data=price_data,
+                features=features,
+                oos_scores_for_meta=oos_scores_for_meta,
+                symbol=symbol,
+            )
+            reports["meta_labeler"] = meta_label_report
+        except Exception as exc:
+            logger.warning(f"MLPipeline.train_all: meta-labeler training failed: {exc}")
+            reports["meta_labeler"] = {"error": str(exc)}
+
         self._last_train_time = time.time()
 
         # --- Summary ---
@@ -557,6 +598,8 @@ class MLPipeline:
             "base_models_passing": pass_count,
             "total_base_models":   len(horizons),
             "meta_learner_fitted": self._meta_fitted,
+            "meta_labeler_fitted": self.meta_labeler.is_fitted,
+            "cusum_events":        len(self._cusum_events) if self._cusum_events is not None else 0,
             "data_fingerprint":    self._data_fingerprint,
         }
 
@@ -699,6 +742,23 @@ class MLPipeline:
         mode_dir   = int(np.round(np.mean(directions)))
         agreement  = sum(1 for d in directions if d == mode_dir) / len(directions)
 
+        # --- Meta-labeler: trade gating + bet sizing (AFML Ch. 3.6 + 10) ---
+        bet_size = 1.0
+        take_trade = True
+        meta_label_prob = None
+        if self.meta_labeler.is_fitted:
+            try:
+                ml_result = self.meta_labeler.predict(features.iloc[[-1]])
+                bet_size = ml_result.get("bet_size", 1.0)
+                take_trade = ml_result.get("take_trade", True)
+                meta_label_prob = ml_result.get("probability")
+                if not take_trade:
+                    # Meta-labeler says skip — set score to 0.5 (neutral)
+                    final_score = 0.5
+                    bet_size = 0.0
+            except Exception as exc:
+                logger.debug(f"Meta-labeler prediction failed: {exc}")
+
         key = symbol or "default"
         return {
             key: {
@@ -709,6 +769,9 @@ class MLPipeline:
                 "calibrated_scores":  calibrated_scores,
                 "meta_score":         meta_score,
                 "regime":             regime_val,
+                "bet_size":           bet_size,
+                "take_trade":         take_trade,
+                "meta_label_prob":    meta_label_prob,
             }
         }
 
@@ -1298,6 +1361,95 @@ class MLPipeline:
             f"Non-zero coefs={np.sum(self.meta_learner.coef_ != 0)}"
         )
         return meta_report
+
+    # ------------------------------------------------------------------
+    # Private helpers — meta-labeler training (AFML Ch. 3.6)
+    # ------------------------------------------------------------------
+
+    def _train_meta_labeler(
+        self,
+        price_data: pd.DataFrame,
+        features: pd.DataFrame,
+        oos_scores_for_meta: Dict[int, pd.Series],
+        symbol: Optional[str] = None,
+    ) -> Dict:
+        """Train the meta-labeler: secondary model for trade gating + bet sizing.
+
+        The meta-labeler learns to predict whether the primary model's
+        directional prediction will be correct.  It uses:
+        - All computed features (same as base models)
+        - CUSUM events for sample weighting (structural events get more weight)
+        - OOS predictions from base models as the primary direction signal
+
+        Parameters
+        ----------
+        price_data : pd.DataFrame
+            Raw OHLCV data.
+        features : pd.DataFrame
+            Computed feature matrix.
+        oos_scores_for_meta : dict
+            OOS scores from base models keyed by horizon.
+        symbol : str, optional
+            Ticker label.
+
+        Returns
+        -------
+        dict
+            Training report.
+        """
+        # Use the 5d horizon OOS scores as the primary direction signal
+        primary_scores = oos_scores_for_meta.get(5)
+        if primary_scores is None:
+            # Fall back to any available horizon
+            for h in sorted(oos_scores_for_meta.keys()):
+                primary_scores = oos_scores_for_meta[h]
+                break
+
+        if primary_scores is None or len(primary_scores) < 100:
+            return {"fitted": False, "reason": "insufficient OOS scores for meta-labeler"}
+
+        # Primary direction: score > 0.5 → long (+1), else short (-1)
+        primary_direction = pd.Series(
+            np.where(primary_scores > 0.5, 1.0, -1.0),
+            index=primary_scores.index,
+        )
+
+        # Forward returns for the primary horizon (5d)
+        close = price_data.get("close", price_data.get("Close"))
+        if close is None:
+            return {"fitted": False, "reason": "no close prices"}
+
+        fwd_ret = np.log(close.shift(-5) / close).dropna()
+
+        # Create meta-labels: 1 if primary was correct, 0 if wrong
+        meta_labels = MetaLabeler.create_meta_labels(primary_direction, fwd_ret)
+
+        if len(meta_labels) < 100:
+            return {"fitted": False, "reason": f"only {len(meta_labels)} meta-labels"}
+
+        # Align features with meta-labels
+        common = features.index.intersection(meta_labels.index)
+        if len(common) < 100:
+            return {"fitted": False, "reason": f"only {len(common)} aligned samples"}
+
+        # CUSUM sample weights: events at structural breakpoints get more weight
+        sample_weight = None
+        if self._cusum_events is not None and len(self._cusum_events) > 10:
+            event_set = set(self._cusum_events)
+            sw = pd.Series(1.0, index=common)
+            for dt in common:
+                if dt in event_set:
+                    sw[dt] = 3.0  # 3x weight for CUSUM events
+            sample_weight = sw
+
+        # Train
+        report = self.meta_labeler.train(
+            features=features.loc[common],
+            meta_labels=meta_labels.loc[common],
+            sample_weight=sample_weight,
+        )
+
+        return report
 
     # ------------------------------------------------------------------
     # Private helpers — feature importance aggregation

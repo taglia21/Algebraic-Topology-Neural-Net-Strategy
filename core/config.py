@@ -43,7 +43,7 @@ _DEFAULT_SYMBOLS: List[str] = [
     # Mega-cap tech
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO",
     # Financials
-    "BRK/B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS",
+    "BRK.B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS",
     # Healthcare
     "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT",
     # Consumer / Industrials

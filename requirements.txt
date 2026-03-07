@@ -21,8 +21,8 @@ yfinance>=0.2.28
 # Technical analysis (requires system-level TA-Lib C library)
 # TA-Lib>=0.4.28
 
-# Live trading (install separately for live/paper modes)
-# alpaca-py>=0.21
+# Live/paper trading
+alpaca-py>=0.21
 
-# Market calendar (optional, enhances market hours detection)
-# exchange-calendars>=4.2
+# Market calendar
+exchange-calendars>=4.2

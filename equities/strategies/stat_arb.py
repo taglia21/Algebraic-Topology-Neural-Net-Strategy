@@ -411,7 +411,7 @@ class StatArbStrategy:
     def find_pairs(
         self,
         price_data: pd.DataFrame,
-        min_history_days: int = 252,
+        min_history_days: Optional[int] = None,
     ) -> List[Pair]:
         """Discover cointegrated pairs from a price matrix.
 
@@ -440,6 +440,8 @@ class StatArbStrategy:
             f"with {len(price_data)} bars of history."
         )
 
+        if min_history_days is None:
+            min_history_days = self._cfg.lookback_days
         symbols = [c for c in price_data.columns if c != "SPY"]
         discovered: List[Pair] = []
 
@@ -459,7 +461,7 @@ class StatArbStrategy:
                 logger.debug(f"Cointegration test failed for {sym_x}/{sym_y}: {exc}")
                 continue
 
-            if pvalue >= 0.05:
+            if pvalue >= self._cfg.coint_pvalue:
                 continue
 
             # Compute spread using static hedge ratio (OU fitting uses static spread)
@@ -475,7 +477,7 @@ class StatArbStrategy:
             half_life = _half_life_from_theta(theta)
 
             # Half-life filter: reject pairs that mean-revert too slowly or instantly
-            if not (1.0 <= half_life <= 120.0):
+            if not (self._cfg.half_life_min <= half_life <= self._cfg.half_life_max):
                 logger.debug(
                     f"Rejected {sym_x}/{sym_y}: half_life={half_life:.1f} days "
                     f"(must be in [1, 120])."
@@ -503,10 +505,10 @@ class StatArbStrategy:
         # Sort by half-life (faster mean reversion first)
         discovered.sort(key=lambda p: p.half_life)
 
-        # Cap at 25 pairs to keep per-bar evaluation fast.
+        # Cap at max_pairs to keep per-bar evaluation fast.
         # Pairs are already sorted by half-life, so we keep the
         # fastest-reverting ones which are the highest-quality signals.
-        _MAX_ACTIVE_PAIRS = 25
+        _MAX_ACTIVE_PAIRS = self._cfg.max_pairs
         if len(discovered) > _MAX_ACTIVE_PAIRS:
             logger.info(
                 f"StatArbStrategy: capping pairs from {len(discovered)} "

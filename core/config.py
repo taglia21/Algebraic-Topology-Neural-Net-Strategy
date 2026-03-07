@@ -135,11 +135,15 @@ class DataConfig:
 class StatArbConfig:
     """Pairs / statistical-arbitrage strategy parameters."""
 
-    entry_z: float = 1.5          # Enter when spread Z-score exceeds this
-    exit_z: float = 0.3           # Exit when spread Z-score falls below this
-    stop_z: float = 3.5           # Hard stop at this Z-score
+    entry_z: float = 1.25         # Enter when spread Z-score exceeds this
+    exit_z: float = 0.4           # Exit when spread Z-score falls below this
+    stop_z: float = 3.0           # Hard stop at this Z-score
     min_entry_z: float = 1.0      # Minimum Z-score to trigger entry
-    lookback_days: int = 252      # 1 year minimum cointegration history
+    lookback_days: int = 126      # 6 months (was 252 — too strict for 15-stock universe)
+    coint_pvalue: float = 0.10    # Relaxed from 0.05 to find more pairs
+    half_life_max: float = 120.0  # Max half-life in days
+    half_life_min: float = 1.0    # Min half-life in days
+    max_pairs: int = 30           # Max active pairs
     # Kalman filter noise parameters (initial defaults)
     kalman_transition_cov: float = 1e-5
     kalman_observation_cov: float = 1e-3
@@ -151,13 +155,34 @@ class MomentumConfig:
 
     lookback_days: int = 252      # 12-month lookback
     skip_days: int = 21           # Skip most recent month (1-month reversal)
-    long_pct: float = 0.20        # Long top quintile
-    short_pct: float = 0.20       # Short bottom quintile
-    # Sector-neutral construction
-    sector_neutral: bool = True
+    long_pct: float = 0.30        # Top 30% (was 20% — too narrow for 15 stocks)
+    short_pct: float = 0.20       # Bottom 20%
+    # Sector-neutral construction — DISABLED for small universe (<30 stocks)
+    sector_neutral: bool = False
     # Volatility scaling: inverse-vol weight positions
     vol_scale: bool = True
-    vol_target: float = 0.20      # Annualised volatility target
+    vol_target: float = 0.15      # Annualised volatility target (tighter for Barroso scaling)
+    # Rebalance cadence in trading days (21 = monthly)
+    rebalance_days: int = 21
+    # Rank change threshold to trigger rebalance (0 = always rebalance)
+    min_rank_change: float = 0.15
+
+
+@dataclass
+class MeanReversionConfig:
+    """Short-term mean reversion strategy parameters."""
+
+    lookback_days: int = 5        # 1-week lookback for reversal signal
+    entry_z: float = 1.0          # Enter when z-score exceeds this
+    exit_z: float = 0.3           # Exit when z-score reverts below this
+    stop_z: float = 3.0           # Hard stop-loss z-score
+    holding_days: int = 5         # Max holding period
+    vol_lookback: int = 20        # Lookback for volatility estimate
+    vol_target: float = 0.15      # Annualised vol target for sizing
+    # RSI-based filter
+    rsi_period: int = 5           # Short-term RSI
+    rsi_oversold: float = 30.0    # Buy when RSI below this
+    rsi_overbought: float = 70.0  # Sell when RSI above this
 
 
 @dataclass
@@ -166,13 +191,15 @@ class FactorModelConfig:
 
     lookback_days: int = 63       # ~3 months for factor estimation
     # Factor composite Z-score thresholds
-    entry_z: float = 0.75
-    exit_z: float = -0.25
-    # Factor weights (equal by default; override to time factors)
-    quality_weight: float = 0.25
+    entry_z: float = 0.50         # Relaxed from 0.75 to generate more signals
+    exit_z: float = -0.10         # Exit earlier for turnover
+    # Factor weights — overweight momentum per research
+    quality_weight: float = 0.20
     value_weight: float = 0.25
-    low_vol_weight: float = 0.25
-    momentum_weight: float = 0.25
+    low_vol_weight: float = 0.20
+    momentum_weight: float = 0.35
+    # Rebalance cadence
+    rebalance_days: int = 21      # Monthly
 
 
 @dataclass
@@ -182,6 +209,7 @@ class StrategyConfig:
     stat_arb: StatArbConfig = field(default_factory=StatArbConfig)
     momentum: MomentumConfig = field(default_factory=MomentumConfig)
     factor_model: FactorModelConfig = field(default_factory=FactorModelConfig)
+    mean_reversion: MeanReversionConfig = field(default_factory=MeanReversionConfig)
 
 
 # ---------------------------------------------------------------------------

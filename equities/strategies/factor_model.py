@@ -328,6 +328,13 @@ class FactorModelStrategy:
             lookback=cfg.lookback_days
         )
 
+        # --- Rebalance tracking (mirrors momentum strategy pattern) ---
+        self._bar_count: int = 0
+        self._last_rebalance_bar: int = 0
+        # Symbols held from the last rebalance date
+        self._current_longs: set = set()
+        self._current_shorts: set = set()
+
     # ------------------------------------------------------------------
     # Factor construction
     # ------------------------------------------------------------------
@@ -638,6 +645,13 @@ class FactorModelStrategy:
     ) -> List[Signal]:
         """Generate long/short signals from the composite factor score.
 
+        Rebalance gating
+        ----------------
+        New entry signals are only generated every ``config.rebalance_days``
+        bars (default 21 — approximately monthly).  Between rebalances, only
+        EXIT signals are emitted for positions whose composite z-score crosses
+        zero (i.e. the signal has flipped direction relative to entry).
+
         Parameters
         ----------
         price_data:
@@ -653,7 +667,10 @@ class FactorModelStrategy:
         Returns
         -------
         List[Signal]:
-            Long signals for composite z-score > entry_z, short for < -entry_z.
+            On rebalance bars: long signals for composite z > entry_z, short
+            for composite z < -entry_z, plus exit signals for flips.
+            Between rebalances: exit (``close``) signals only, for positions
+            whose composite z-score crosses zero.
             Signal strength equals the composite z-score normalised to [0, 1]
             (capped at 3σ → 1.0).
 
@@ -663,6 +680,9 @@ class FactorModelStrategy:
         - BEAR: overweights Quality and Low-Vol factors.
         - Wide value spread: overweights Value factor.
         """
+        # Advance bar counter
+        self._bar_count += 1
+
         # Crisis: no new signals
         if regime_state.is_crisis:
             logger.info("FactorModelStrategy: blocked — CRISIS regime.")
@@ -720,8 +740,12 @@ class FactorModelStrategy:
         # --- Composite score ---
         composite = self.composite_score(z_factors, weights=adj_weights)
 
-        # --- Generate signals ---
+        # --- Determine whether this is a rebalance bar ---
+        bars_since_rebalance = self._bar_count - self._last_rebalance_bar
+        is_rebalance = bars_since_rebalance >= self._cfg.rebalance_days
+
         entry_z = self._cfg.entry_z
+        exit_z = self._cfg.exit_z
         signals: List[Signal] = []
 
         for sym in composite.index:
@@ -732,62 +756,115 @@ class FactorModelStrategy:
             # Normalise strength: z-score / 3.0 capped at 1.0
             strength = float(np.clip(abs(score) / 3.0, 0.01, 1.0))
 
-            if score > entry_z:
-                factor_scores = {
+            # Helper to build factor_scores dict for metadata
+            def _factor_scores(sym=sym):
+                return {
                     col: float(z_factors.loc[sym, col])
-                    if sym in z_factors.index and col in z_factors.columns
+                    if sym in z_factors.index
+                    and col in z_factors.columns
                     and not pd.isna(z_factors.loc[sym, col])
                     else None
                     for col in z_factors.columns
                 }
-                sig = Signal(
-                    symbol=sym,
-                    direction="long",
-                    strength=strength,
-                    strategy=FactorModelStrategy.STRATEGY_NAME,
-                    metadata={
-                        "composite_score": score,
-                        "factor_scores": factor_scores,
-                        "regime": regime_state.regime.value,
-                        "weights_used": adj_weights,
-                    },
-                )
-                signals.append(sig)
-                self._log.log_signal(
-                    FactorModelStrategy.STRATEGY_NAME, sym, "BUY", strength,
-                    {"composite_score": score},
-                )
 
-            elif score < -entry_z:
-                factor_scores = {
-                    col: float(z_factors.loc[sym, col])
-                    if sym in z_factors.index and col in z_factors.columns
-                    and not pd.isna(z_factors.loc[sym, col])
-                    else None
-                    for col in z_factors.columns
-                }
-                sig = Signal(
-                    symbol=sym,
-                    direction="short",
-                    strength=strength,
-                    strategy=FactorModelStrategy.STRATEGY_NAME,
-                    metadata={
-                        "composite_score": score,
-                        "factor_scores": factor_scores,
-                        "regime": regime_state.regime.value,
-                        "weights_used": adj_weights,
-                    },
-                )
-                signals.append(sig)
-                self._log.log_signal(
-                    FactorModelStrategy.STRATEGY_NAME, sym, "SELL", strength,
-                    {"composite_score": score},
-                )
+            base_meta = {
+                "composite_score": score,
+                "regime": regime_state.regime.value,
+                "weights_used": adj_weights,
+                "rebalance_bar": is_rebalance,
+            }
 
+            if is_rebalance:
+                # ---- REBALANCE BAR: emit entry signals ----
+                if score > entry_z:
+                    sig = Signal(
+                        symbol=sym,
+                        direction="long",
+                        strength=strength,
+                        strategy=FactorModelStrategy.STRATEGY_NAME,
+                        metadata={**base_meta, "factor_scores": _factor_scores()},
+                    )
+                    signals.append(sig)
+                    self._current_longs.add(sym)
+                    self._current_shorts.discard(sym)
+                    self._log.log_signal(
+                        FactorModelStrategy.STRATEGY_NAME, sym, "BUY", strength,
+                        {"composite_score": score},
+                    )
+
+                elif score < -entry_z:
+                    sig = Signal(
+                        symbol=sym,
+                        direction="short",
+                        strength=strength,
+                        strategy=FactorModelStrategy.STRATEGY_NAME,
+                        metadata={**base_meta, "factor_scores": _factor_scores()},
+                    )
+                    signals.append(sig)
+                    self._current_shorts.add(sym)
+                    self._current_longs.discard(sym)
+                    self._log.log_signal(
+                        FactorModelStrategy.STRATEGY_NAME, sym, "SELL", strength,
+                        {"composite_score": score},
+                    )
+
+                else:
+                    # Score between thresholds on rebalance: remove from tracked sets
+                    self._current_longs.discard(sym)
+                    self._current_shorts.discard(sym)
+
+            else:
+                # ---- BETWEEN REBALANCES: exit-only signals ----
+                # Exit a long when composite z crosses below exit_z (≤ 0 by default)
+                if sym in self._current_longs and score <= exit_z:
+                    sig = Signal(
+                        symbol=sym,
+                        direction="close",
+                        strength=1.0,
+                        strategy=FactorModelStrategy.STRATEGY_NAME,
+                        metadata={
+                            **base_meta,
+                            "action": "exit_long_flip",
+                            "factor_scores": _factor_scores(),
+                        },
+                    )
+                    signals.append(sig)
+                    self._current_longs.discard(sym)
+                    self._log.log_signal(
+                        FactorModelStrategy.STRATEGY_NAME, sym, "EXIT_LONG", 1.0,
+                        {"composite_score": score, "reason": "z_crossed_exit"},
+                    )
+
+                # Exit a short when composite z crosses above -exit_z (≥ 0 by default)
+                elif sym in self._current_shorts and score >= -exit_z:
+                    sig = Signal(
+                        symbol=sym,
+                        direction="close",
+                        strength=1.0,
+                        strategy=FactorModelStrategy.STRATEGY_NAME,
+                        metadata={
+                            **base_meta,
+                            "action": "exit_short_flip",
+                            "factor_scores": _factor_scores(),
+                        },
+                    )
+                    signals.append(sig)
+                    self._current_shorts.discard(sym)
+                    self._log.log_signal(
+                        FactorModelStrategy.STRATEGY_NAME, sym, "EXIT_SHORT", 1.0,
+                        {"composite_score": score, "reason": "z_crossed_exit"},
+                    )
+
+        # Update rebalance tracker
+        if is_rebalance:
+            self._last_rebalance_bar = self._bar_count
+
+        mode = "REBALANCE" if is_rebalance else "INTRA"
         logger.info(
-            f"FactorModelStrategy.generate_signals: {len(signals)} signals "
+            f"FactorModelStrategy.generate_signals [{mode}]: {len(signals)} signals "
             f"from {len(raw_factors)} stocks "
-            f"(regime={regime_state.regime.value})."
+            f"(regime={regime_state.regime.value}, bar={self._bar_count}, "
+            f"since_rebalance={bars_since_rebalance})."
         )
         return signals
 

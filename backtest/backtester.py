@@ -66,6 +66,7 @@ from equities.signal_generator import SignalGenerator
 from equities.strategies.stat_arb import StatArbStrategy
 from equities.strategies.momentum import MomentumStrategy
 from equities.strategies.factor_model import FactorModelStrategy
+from equities.strategies.mean_reversion import MeanReversionStrategy
 from backtest.metrics import BacktestResult, PerformanceMetrics
 
 logger = logging.getLogger(__name__)
@@ -593,6 +594,7 @@ class Backtester:
             StatArbStrategy(config=self.config.strategy.stat_arb),
             MomentumStrategy(config=self.config.strategy.momentum),
             FactorModelStrategy(config=self.config.strategy.factor_model),
+            MeanReversionStrategy(config=self.config.strategy.mean_reversion),
         ]
 
         self.signal_generator = SignalGenerator(

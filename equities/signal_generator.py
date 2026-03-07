@@ -12,11 +12,11 @@ Regime-Dependent Strategy Allocations
 --------------------------------------
 ::
 
-    BULL:     stat_arb=10%, momentum=60%, factor=25%  (total 95% deployed)
-    BEAR:     stat_arb=45%, momentum=10%, factor=30%  (total 85% deployed)
-    SIDEWAYS: stat_arb=25%, momentum=35%, factor=25%  (total 85% deployed)
-    UNKNOWN:  stat_arb=20%, momentum=30%, factor=25%  (total 75% deployed)
-    CRISIS:   stat_arb=30%, momentum= 5%, factor=20%  (total 55% deployed)
+    BULL:     stat_arb=10%, momentum=40%, factor=20%, mean_rev=25%  (total 95% deployed)
+    BEAR:     stat_arb=30%, momentum=10%, factor=20%, mean_rev=30%  (total 90% deployed)
+    SIDEWAYS: stat_arb=20%, momentum=25%, factor=20%, mean_rev=25%  (total 90% deployed)
+    UNKNOWN:  stat_arb=15%, momentum=25%, factor=20%, mean_rev=25%  (total 85% deployed)
+    CRISIS:   stat_arb=25%, momentum= 5%, factor=15%, mean_rev=30%  (total 75% deployed)
 
 The remaining allocation stays in cash / is not allocated.
 
@@ -42,6 +42,7 @@ from core.logger import TradeLogger, get_trade_logger
 from core.regime_detector import Regime, RegimeState
 from equities.models import Signal
 from equities.strategies.factor_model import FactorModelStrategy
+from equities.strategies.mean_reversion import MeanReversionStrategy
 from equities.strategies.momentum import MomentumStrategy
 from equities.strategies.stat_arb import StatArbStrategy
 
@@ -55,25 +56,28 @@ logger = logging.getLogger(__name__)
 # Allocations by regime (sum < 1.0 intentionally — remaining stays in cash)
 _REGIME_ALLOCATIONS: Dict[str, Dict[str, float]] = {
     Regime.BULL.value: {
-        StatArbStrategy.STRATEGY_NAME:     0.10,
-        MomentumStrategy.STRATEGY_NAME:    0.60,
-        FactorModelStrategy.STRATEGY_NAME: 0.25,
+        "stat_arb":       0.10,
+        "momentum":       0.40,
+        "factor_model":   0.20,
+        "mean_reversion": 0.25,
     },
     Regime.BEAR.value: {
-        StatArbStrategy.STRATEGY_NAME:     0.45,
-        MomentumStrategy.STRATEGY_NAME:    0.10,
-        FactorModelStrategy.STRATEGY_NAME: 0.30,
+        "stat_arb":       0.30,
+        "momentum":       0.10,
+        "factor_model":   0.20,
+        "mean_reversion": 0.30,   # mean reversion thrives in bear
     },
     Regime.SIDEWAYS.value: {
-        StatArbStrategy.STRATEGY_NAME:     0.25,
-        MomentumStrategy.STRATEGY_NAME:    0.35,
-        FactorModelStrategy.STRATEGY_NAME: 0.25,
+        "stat_arb":       0.20,
+        "momentum":       0.25,
+        "factor_model":   0.20,
+        "mean_reversion": 0.25,
     },
     Regime.UNKNOWN.value: {
-        # Unknown regime: moderate equal-weight
-        StatArbStrategy.STRATEGY_NAME:     0.20,
-        MomentumStrategy.STRATEGY_NAME:    0.30,
-        FactorModelStrategy.STRATEGY_NAME: 0.25,
+        "stat_arb":       0.15,
+        "momentum":       0.25,
+        "factor_model":   0.20,
+        "mean_reversion": 0.25,
     },
 }
 
@@ -81,13 +85,14 @@ _REGIME_ALLOCATIONS: Dict[str, Dict[str, float]] = {
 # Previous version zeroed out momentum entirely, causing the system to sit
 # idle during bear markets and miss mean-reversion opportunities.
 _CRISIS_ALLOCATIONS: Dict[str, float] = {
-    StatArbStrategy.STRATEGY_NAME:     0.30,
-    MomentumStrategy.STRATEGY_NAME:    0.05,   # minimal but non-zero
-    FactorModelStrategy.STRATEGY_NAME: 0.20,
+    "stat_arb":       0.25,
+    "momentum":       0.05,
+    "factor_model":   0.15,
+    "mean_reversion": 0.30,   # short-term reversal is best in crisis
 }
 
 # Minimum weighted strength to keep a combined signal (avoids noise)
-_MIN_COMBINED_STRENGTH: float = 0.05
+_MIN_COMBINED_STRENGTH: float = 0.02
 
 # Cancellation threshold: if opposing signals are within this band, emit close
 _CANCELLATION_THRESHOLD: float = 0.15
@@ -95,7 +100,7 @@ _CANCELLATION_THRESHOLD: float = 0.15
 # Regime directional bias: in BULL, penalise short signals; in BEAR, penalise longs.
 # A multiplier of 0.25 means short signals keep only 25% of their strength in BULL.
 _REGIME_DIRECTION_BIAS: Dict[str, Dict[str, float]] = {
-    Regime.BULL.value:     {"long": 1.5, "short": 0.20},
+    Regime.BULL.value:     {"long": 1.5, "short": 0.40},  # reduced penalty; small universe needs short opportunities
     Regime.BEAR.value:     {"long": 0.5, "short": 1.2},
     Regime.SIDEWAYS.value: {"long": 1.1, "short": 0.7},
     Regime.UNKNOWN.value:  {"long": 1.0, "short": 0.6},
@@ -239,6 +244,8 @@ class SignalGenerator:
                     strat_signals = strategy.generate_signals(
                         price_data, fundamental_data, regime_state
                     )
+                elif isinstance(strategy, MeanReversionStrategy):
+                    strat_signals = strategy.generate_signals(price_data, regime_state)
                 else:
                     strat_signals = strategy.generate_signals(price_data, regime_state)
             except Exception as exc:

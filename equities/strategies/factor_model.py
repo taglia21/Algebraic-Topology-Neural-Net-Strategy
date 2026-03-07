@@ -52,6 +52,8 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional, Tuple
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -67,40 +69,103 @@ logger = logging.getLogger(__name__)
 # Fundamental Data Stub
 # ---------------------------------------------------------------------------
 
-class FundamentalDataStub:
-    """Synthetic fundamental data derived from price behaviour.
+class FundamentalDataProvider:
+    """Fundamental data provider using yfinance for real financial data.
 
-    ⚠️ STUB — for development and backtesting without real fundamental data.
-    Replace with a real implementation (e.g., SEC EDGAR reader, Alpaca
-    fundamentals API, or a Bloomberg/Refinitiv adapter) before live trading.
+    Fetches actual earnings yield (inverse P/E) and gross profitability
+    (gross profit / total assets) from yfinance.  Falls back to a
+    price-based heuristic for tickers that lack fundamental coverage.
 
-    The stub estimates:
-        - earnings_yield:  Based on the reciprocal of a rolling price-to-
-                           pseudo-earnings ratio.  Estimated via:
-                           earnings_yield ≈ 1 / (price / rolling_mean_price)
-                           This is a very rough proxy that captures cheap/
-                           expensive relative to own history.
-        - gross_profitability: Estimated from price stability — stocks with
-                           smoother price paths (lower realised vol) are
-                           assumed to have higher gross profitability.
-                           gross_profitability ≈ 1 / (1 + 60d_vol)
-    These are intentionally *stubbed* signals with limited predictive power.
+    Data is cached per-symbol to avoid redundant API calls during backtest.
     """
 
-    def __init__(self, lookback: int = 63) -> None:
+    def __init__(self, lookback: int = 63, cache_dir: str = "data/cache/fundamentals") -> None:
         """
         Parameters
         ----------
         lookback:
-            Rolling window for estimating fundamentals from price (days).
+            Rolling window for the price-based fallback estimator (days).
+        cache_dir:
+            Directory to cache fetched fundamental data.
         """
         self._lookback = lookback
+        self._cache_dir = Path(cache_dir)
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self._cache: Dict[str, Dict[str, float]] = {}
+        self._fetched: bool = False
+
+    def _fetch_fundamentals(self, symbol: str) -> Dict[str, float]:
+        """Fetch real fundamental data for a single symbol via yfinance.
+
+        Returns
+        -------
+        dict with keys: earnings_yield, gross_profitability.
+        Values are NaN if data unavailable.
+        """
+        # Check disk cache first
+        cache_file = self._cache_dir / f"{symbol}.json"
+        if cache_file.exists():
+            import json
+            try:
+                with open(cache_file) as fh:
+                    data = json.load(fh)
+                    # Cache is valid for 30 days
+                    import time
+                    if time.time() - data.get("_ts", 0) < 30 * 86400:
+                        return data
+            except Exception:
+                pass
+
+        result: Dict[str, float] = {
+            "earnings_yield": float("nan"),
+            "gross_profitability": float("nan"),
+        }
+
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(symbol)
+            info = ticker.info or {}
+
+            # Earnings yield = 1 / trailing P/E
+            trailing_pe = info.get("trailingPE")
+            if trailing_pe and isinstance(trailing_pe, (int, float)) and trailing_pe > 0:
+                result["earnings_yield"] = 1.0 / trailing_pe
+
+            # Forward earnings yield as supplement
+            forward_pe = info.get("forwardPE")
+            if np.isnan(result["earnings_yield"]) and forward_pe and isinstance(forward_pe, (int, float)) and forward_pe > 0:
+                result["earnings_yield"] = 1.0 / forward_pe
+
+            # Gross profitability = gross profit / total assets (Novy-Marx factor)
+            gross_profit = info.get("grossProfits")
+            total_assets = info.get("totalAssets")
+            if gross_profit and total_assets and total_assets > 0:
+                result["gross_profitability"] = gross_profit / total_assets
+            else:
+                # Alternative: profit margins as proxy
+                profit_margin = info.get("profitMargins")
+                if profit_margin and isinstance(profit_margin, (int, float)):
+                    result["gross_profitability"] = max(profit_margin, 0.0)
+
+            # Save to disk cache
+            import json, time
+            cache_data = {**result, "_ts": time.time()}
+            with open(cache_file, "w") as fh:
+                json.dump(cache_data, fh)
+
+        except Exception as exc:
+            logger.debug(f"yfinance fetch failed for {symbol}: {exc}")
+
+        return result
 
     def get_factor_data(
         self,
         price_data: pd.DataFrame,
     ) -> pd.DataFrame:
-        """Return a symbol-indexed DataFrame with estimated fundamental factors.
+        """Return a symbol-indexed DataFrame with fundamental factors.
+
+        First attempts real fundamental data via yfinance.  For any symbol
+        where real data is unavailable, falls back to price-based heuristics.
 
         Parameters
         ----------
@@ -111,15 +176,8 @@ class FundamentalDataStub:
         -------
         pd.DataFrame with index = symbol and columns:
             ``earnings_yield``, ``gross_profitability``.
-
-        Notes
-        -----
-        Both columns are estimated from price data.  They are *rough proxies*
-        intended to allow the factor model to run without real fundamentals.
-        The actual signal quality depends heavily on having real fundamental data.
         """
         results: Dict[str, Dict[str, float]] = {}
-        latest_prices = price_data.iloc[-1]
         returns = np.log(price_data / price_data.shift(1))
 
         for sym in price_data.columns:
@@ -132,32 +190,42 @@ class FundamentalDataStub:
             if len(sym_prices) < self._lookback:
                 continue
 
-            # ---- Earnings yield stub ----
-            # Proxy: normalise current price vs. rolling mean (rolling P/E proxy)
-            rolling_mean = sym_prices.rolling(
-                window=self._lookback, min_periods=self._lookback // 2
-            ).mean()
-            latest_price = float(sym_prices.iloc[-1])
-            latest_mean = float(rolling_mean.iloc[-1]) if not pd.isna(rolling_mean.iloc[-1]) else latest_price
-            # cheap relative to history → higher earnings_yield proxy
-            earnings_yield_proxy = latest_mean / max(latest_price, 0.01)
+            # Try real fundamentals first (cached)
+            if sym not in self._cache:
+                self._cache[sym] = self._fetch_fundamentals(sym)
 
-            # ---- Gross profitability stub ----
-            # Proxy: inverse of realised volatility (lower vol ≈ higher quality)
-            vol_60 = float(
-                sym_rets.rolling(60, min_periods=30).std().iloc[-1]
-                * np.sqrt(252)
-            ) if len(sym_rets) >= 30 else 0.20
-            gross_profit_proxy = 1.0 / max(1.0 + vol_60, 0.01)
+            fund = self._cache[sym]
+            ey = fund.get("earnings_yield", float("nan"))
+            gp = fund.get("gross_profitability", float("nan"))
+
+            # Fall back to price-based heuristics where real data is missing
+            if np.isnan(ey):
+                rolling_mean = sym_prices.rolling(
+                    window=self._lookback, min_periods=self._lookback // 2
+                ).mean()
+                latest_price = float(sym_prices.iloc[-1])
+                latest_mean = float(rolling_mean.iloc[-1]) if not pd.isna(rolling_mean.iloc[-1]) else latest_price
+                ey = latest_mean / max(latest_price, 0.01)
+
+            if np.isnan(gp):
+                vol_60 = float(
+                    sym_rets.rolling(60, min_periods=30).std().iloc[-1]
+                    * np.sqrt(252)
+                ) if len(sym_rets) >= 30 else 0.20
+                gp = 1.0 / max(1.0 + vol_60, 0.01)
 
             results[sym] = {
-                "earnings_yield": earnings_yield_proxy,
-                "gross_profitability": gross_profit_proxy,
+                "earnings_yield": ey,
+                "gross_profitability": gp,
             }
 
         df = pd.DataFrame.from_dict(results, orient="index")
         df.index.name = "symbol"
         return df
+
+
+# Keep the old name as an alias for backwards compatibility
+FundamentalDataStub = FundamentalDataProvider
 
 
 # ---------------------------------------------------------------------------

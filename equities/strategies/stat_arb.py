@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from itertools import combinations
 from typing import Dict, List, Optional, Tuple
 
@@ -345,7 +345,7 @@ class _PairPosition:
     pair_id: str
     side: str          # 'long_spread' or 'short_spread'
     entry_zscore: float
-    entry_time: datetime = field(default_factory=datetime.utcnow)
+    entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------

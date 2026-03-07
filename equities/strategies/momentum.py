@@ -106,11 +106,15 @@ def _rolling_ols_residual(
     x: pd.Series,
     window: int,
 ) -> pd.Series:
-    """Compute rolling OLS residuals of y on x.
+    """Compute rolling OLS residuals of y on x (vectorised).
 
-    For each rolling window of length ``window``, regresses y on x with an
-    intercept and returns the in-window residual of the last observation.
-    This gives the component of y returns orthogonal to x (market factor).
+    Uses the rolling covariance / variance formulation instead of looping
+    over each bar, reducing complexity from O(n²) to O(n).
+
+    For each rolling window of length ``window``, computes:
+        beta = cov(y, x) / var(x)
+        alpha = mean(y) - beta * mean(x)
+        residual = y - alpha - beta * x
 
     Parameters
     ----------
@@ -127,34 +131,29 @@ def _rolling_ols_residual(
         Residual returns of the same length as y.  The first
         ``window - 1`` values are NaN.
     """
-    residuals = pd.Series(index=y.index, dtype=float)
+    # Align and handle NaN
+    both = pd.concat([y.rename("y"), x.rename("x")], axis=1).dropna()
+    if len(both) < window:
+        return pd.Series(np.nan, index=y.index, dtype=float)
 
-    for i in range(window - 1, len(y)):
-        y_w = y.iloc[i - window + 1 : i + 1].values
-        x_w = x.iloc[i - window + 1 : i + 1].values
+    y_a = both["y"]
+    x_a = both["x"]
 
-        # Skip if insufficient data
-        valid = ~(np.isnan(y_w) | np.isnan(x_w))
-        if valid.sum() < window // 2:
-            continue
+    # Rolling statistics
+    roll_cov = y_a.rolling(window, min_periods=window).cov(x_a)
+    roll_var_x = x_a.rolling(window, min_periods=window).var()
+    roll_mean_y = y_a.rolling(window, min_periods=window).mean()
+    roll_mean_x = x_a.rolling(window, min_periods=window).mean()
 
-        y_valid = y_w[valid]
-        x_valid = x_w[valid]
+    # Avoid division by zero
+    roll_var_x = roll_var_x.replace(0.0, np.nan)
 
-        X_mat = np.column_stack([np.ones(len(x_valid)), x_valid])
-        try:
-            coeffs, _, _, _ = np.linalg.lstsq(X_mat, y_valid, rcond=None)
-        except np.linalg.LinAlgError:
-            continue
+    beta = roll_cov / roll_var_x
+    alpha = roll_mean_y - beta * roll_mean_x
+    residuals = y_a - alpha - beta * x_a
 
-        # Residual of the last in-window observation
-        y_last = y_w[-1]
-        x_last = x_w[-1]
-        if np.isnan(y_last) or np.isnan(x_last):
-            continue
-        residuals.iloc[i] = y_last - (coeffs[0] + coeffs[1] * x_last)
-
-    return residuals
+    # Reindex to the original y index
+    return residuals.reindex(y.index)
 
 
 # ---------------------------------------------------------------------------

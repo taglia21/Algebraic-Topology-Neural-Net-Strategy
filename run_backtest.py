@@ -1,151 +1,102 @@
 #!/usr/bin/env python3
 """
-Quick backtest runner — 15-stock diversified universe.
+run_backtest.py — Quick standalone backtest runner.
 
-15 stocks → C(15,2) = 105 pairs (vs 435 with 30 stocks) → ~4× faster.
-Covers all 11 GICS sectors for proper diversification testing.
+15-stock diversified universe covering all major GICS sectors.
+105 stat-arb pairs (C(15,2)) for manageable runtime.
+
+Usage:
+    python run_backtest.py                      # No ML (fast, ~6 min)
+    python run_backtest.py --ml                 # With ML meta-learner (~15 min)
+    python run_backtest.py --start 2020-01-01   # Custom date range
 """
 
-import sys
+import argparse
 import json
+import sys
 import time
 import traceback
 
 # 15-stock diversified universe (liquid mega-caps across sectors)
 UNIVERSE = [
-    # Tech
-    "AAPL", "MSFT", "NVDA",
-    # Healthcare
-    "JNJ", "UNH",
-    # Financials
-    "JPM", "GS",
-    # Consumer Discretionary
-    "AMZN", "TSLA",
-    # Energy
-    "XOM",
-    # Industrials
-    "CAT",
-    # Consumer Staples
-    "PG",
-    # Communication
-    "GOOGL",
-    # Materials
-    "LIN",
-    # Utilities
-    "NEE",
+    "AAPL", "MSFT", "NVDA",   # Tech
+    "JNJ", "UNH",              # Healthcare
+    "JPM", "GS",               # Financials
+    "AMZN", "TSLA",            # Consumer Discretionary
+    "XOM",                     # Energy
+    "CAT",                     # Industrials
+    "PG",                      # Consumer Staples
+    "GOOGL",                   # Communication
+    "LIN",                     # Materials
+    "NEE",                     # Utilities
 ]
 
-START = "2023-01-01"
-END   = "2025-12-31"
 
-def main():
-    from backtest.backtester import Backtester
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="ATNN Quant Powerhouse — Backtest Runner",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--start", default="2023-01-01", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end", default="2025-12-31", help="End date (YYYY-MM-DD)")
+    parser.add_argument("--ml", action="store_true", help="Enable ML meta-learner pipeline")
+    parser.add_argument("--capital", type=float, default=100_000.0, help="Initial capital")
+    args = parser.parse_args()
 
-    print(f"Universe: {len(UNIVERSE)} stocks → {len(UNIVERSE)*(len(UNIVERSE)-1)//2} stat-arb pairs")
-    print(f"Period:   {START} → {END}")
-    print(f"Stocks:   {', '.join(UNIVERSE)}")
+    from main import SystemOrchestrator
+
+    n_pairs = len(UNIVERSE) * (len(UNIVERSE) - 1) // 2
+    print(f"\nUniverse : {len(UNIVERSE)} stocks → {n_pairs} stat-arb pairs")
+    print(f"Period   : {args.start} → {args.end}")
+    print(f"Capital  : ${args.capital:,.0f}")
+    print(f"ML       : {'enabled' if args.ml else 'disabled'}")
+    print(f"Stocks   : {', '.join(UNIVERSE)}")
     print("-" * 70)
 
-    bt = Backtester(verbose=True)
+    orchestrator = SystemOrchestrator(mode="backtest")
     t0 = time.time()
 
     try:
-        result = bt.run(
+        result = orchestrator.run_backtest(
+            start=args.start,
+            end=args.end,
             symbols=UNIVERSE,
-            start_date=START,
-            end_date=END,
-            use_ml=True,
+            initial_capital=args.capital,
+            use_ml=args.ml,
         )
     except Exception as exc:
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print(f"BACKTEST FAILED: {exc}")
         traceback.print_exc()
         sys.exit(1)
 
     elapsed = time.time() - t0
-    print(f"\n{'='*70}")
-    print(f"BACKTEST COMPLETED in {elapsed:.1f}s")
-    print(f"{'='*70}")
-
-    # Print metrics
-    m = result.metrics
-    if hasattr(m, '__dict__'):
-        for k, v in m.__dict__.items():
-            if isinstance(v, float):
-                print(f"  {k:30s}: {v:>12.4f}")
-            elif isinstance(v, (int, str)):
-                print(f"  {k:30s}: {v}")
-    elif isinstance(m, dict):
-        for k, v in m.items():
-            if isinstance(v, float):
-                print(f"  {k:30s}: {v:>12.4f}")
-            elif isinstance(v, (int, str)):
-                print(f"  {k:30s}: {v}")
-    else:
-        print(f"  Metrics type: {type(m)}")
-        print(f"  {m}")
-
-    # Print trade summary
-    trades = result.trades if hasattr(result, 'trades') else []
-    print(f"\nTotal trades: {len(trades)}")
-    if trades:
-        # Show first 20 trades
-        for i, t in enumerate(trades[:20]):
-            if hasattr(t, '__dict__'):
-                print(f"  Trade {i+1}: {t.__dict__}")
-            elif isinstance(t, dict):
-                sym = t.get('symbol', '?')
-                direction = t.get('direction', '?')
-                pnl = t.get('pnl', t.get('realized_pnl', '?'))
-                print(f"  Trade {i+1}: {sym} {direction} | P&L: {pnl}")
-            else:
-                print(f"  Trade {i+1}: {t}")
-        if len(trades) > 20:
-            print(f"  ... and {len(trades)-20} more")
-
-    # Print signal summary
-    signals = result.signals if hasattr(result, 'signals') else []
-    print(f"\nTotal signals logged: {len(signals)}")
 
     # Print equity curve stats
-    equity = result.equity_curve if hasattr(result, 'equity_curve') else None
-    if equity is not None:
-        if isinstance(equity, dict):
-            values = list(equity.values())
-        elif hasattr(equity, 'values'):
-            values = equity.values.tolist() if hasattr(equity.values, 'tolist') else list(equity.values)
-        else:
-            values = list(equity) if equity is not None else []
-        if values:
-            print(f"\nEquity curve: {len(values)} points")
-            print(f"  Start: ${values[0]:,.2f}")
-            print(f"  End:   ${values[-1]:,.2f}")
-            print(f"  Min:   ${min(values):,.2f}")
-            print(f"  Max:   ${max(values):,.2f}")
-            total_return = (values[-1] / values[0] - 1) * 100
-            print(f"  Total Return: {total_return:+.2f}%")
+    equity = result.equity_curve
+    if equity is not None and len(equity) > 0:
+        values = equity.values.tolist() if hasattr(equity.values, "tolist") else list(equity.values)
+        total_return = (values[-1] / values[0] - 1) * 100
+        print(f"\nEquity : ${values[0]:,.0f} → ${values[-1]:,.0f} ({total_return:+.1f}%)")
+        print(f"Runtime: {elapsed:.1f}s")
 
-    # Save full results to JSON
+    # Save metrics to JSON
+    m = result.metrics
     output = {
         "elapsed_seconds": elapsed,
         "universe": UNIVERSE,
-        "start_date": START,
-        "end_date": END,
-        "total_trades": len(trades),
-        "total_signals": len(signals),
+        "start": args.start,
+        "end": args.end,
     }
-    if hasattr(m, '__dict__'):
-        for k, v in m.__dict__.items():
-            if isinstance(v, (int, float, str, bool)):
-                output[k] = v
-    elif isinstance(m, dict):
+    if isinstance(m, dict):
         for k, v in m.items():
             if isinstance(v, (int, float, str, bool)):
                 output[k] = v
 
-    with open("backtest_results.json", "w") as f:
+    out_path = "backtest_results.json"
+    with open(out_path, "w") as f:
         json.dump(output, f, indent=2, default=str)
-    print(f"\nFull results saved to backtest_results.json")
+    print(f"\nResults saved to {out_path}")
 
 
 if __name__ == "__main__":

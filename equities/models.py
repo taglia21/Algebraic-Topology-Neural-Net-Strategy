@@ -21,7 +21,7 @@ Pair          — Cointegrated pair used by the statistical arbitrage strategy.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 
@@ -60,7 +60,7 @@ class Signal:
     strength: float         # 0.0 to 1.0
     strategy: str
     metadata: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
         if self.direction not in ("long", "short", "close"):
@@ -122,7 +122,7 @@ class Order:
     status: str = "new"
     fill_price: Optional[float] = None
     fill_qty: int = 0
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     strategy: str = ""
     signal_strength: float = 1.0
 
@@ -182,7 +182,7 @@ class Fill:
     fill_price: float
     fill_qty: int
     slippage_bps: float = 0.0
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +341,7 @@ class Pair:
     ou_mu: float
     ou_sigma: float
     lookback_days: int = 504
-    last_updated: datetime = field(default_factory=datetime.utcnow)
+    last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def pair_id(self) -> str:

@@ -310,6 +310,10 @@ class Backtester:
             # ---- Update broker mark-to-market ----
             self.broker.update_prices(current_prices)
 
+            # ---- Set simulated bar datetime for accurate fill timestamps ----
+            if hasattr(self.broker, '_current_bar_dt'):
+                self.broker._current_bar_dt = bar_dt
+
             # ---- Fill pending orders with today's bar ----
             for sym, bar_series in self._iter_symbol_bars(bar_df):
                 self.broker.on_bar(bar_series, sym)
@@ -1075,18 +1079,30 @@ class Backtester:
     def _days_between(dt1: Any, dt2: Any) -> float:
         """Return calendar days between two datetime-like objects.
 
+        Handles pandas Timestamps, Python datetimes, and numpy datetime64.
+
         Parameters
         ----------
         dt1, dt2:
-            Datetime objects (or anything with a ``timestamp()`` method).
+            Datetime objects.
 
         Returns
         -------
         float
+            Calendar days between the two timestamps (always >= 0).
         """
         try:
-            if hasattr(dt1, "timestamp") and hasattr(dt2, "timestamp"):
-                return abs(dt2.timestamp() - dt1.timestamp()) / 86400.0
+            # Convert pandas Timestamps / numpy datetime64 to Python datetime
+            if hasattr(dt1, 'to_pydatetime'):
+                dt1 = dt1.to_pydatetime()
+            if hasattr(dt2, 'to_pydatetime'):
+                dt2 = dt2.to_pydatetime()
+            if hasattr(dt1, 'timestamp') and hasattr(dt2, 'timestamp'):
+                days = abs(dt2.timestamp() - dt1.timestamp()) / 86400.0
+                # Floor to 1 trading day minimum if entry != exit
+                if days > 0 and days < 1.0:
+                    return 1.0
+                return max(days, 0.0)
             return 0.0
         except Exception:
             return 0.0

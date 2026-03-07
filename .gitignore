@@ -40,3 +40,9 @@ Thumbs.db
 data/cache/
 *.parquet
 *.h5
+
+# Backtest result snapshots
+backtest_results*.json
+
+# pytest cache
+.pytest_cache/

@@ -27,7 +27,7 @@ The SAME :class:`SystemOrchestrator` runs in all modes.  Components differ:
     ---------  -------------------  ------------------
     backtest   DataManager (hist)   SimulatedBroker
     paper      DataManager (live)   SimulatedBroker
-    live       DataManager (live)   AlpacaBroker (TBD)
+    live       DataManager (live)   AlpacaBroker
 
 All signal generation, regime detection, risk management, and ML code
 is identical across modes — this is the core design guarantee.
@@ -153,21 +153,24 @@ class SystemOrchestrator:
     # ------------------------------------------------------------------
 
     def run_live(self) -> None:
-        """Run the live or paper trading loop.
+        """Run the live or paper trading loop with full production safety.
 
         Operates in a tight loop during US market hours, executing one
         trading cycle per iteration:
 
-            1. Fetch latest bars from the data provider.
-            2. Detect current regime.
-            3. Generate signals.
-            4. Apply risk checks.
-            5. Submit orders to the broker (live or simulated).
-            6. Sleep until next cycle.
+            1. Wait for market open (market hours awareness).
+            2. Fetch latest bars from the data provider.
+            3. Detect current regime.
+            4. Generate signals.
+            5. Kill switch / circuit breaker pre-trade check.
+            6. Apply risk checks.
+            7. Submit orders to the broker.
+            8. Reconcile positions against broker.
+            9. Sleep until next cycle.
 
-        For paper mode the broker is still a :class:`SimulatedBroker` so
-        there is no real money at risk.  Live mode (coming soon) will
-        route orders to Alpaca's live trading endpoint.
+        In paper mode the broker is a :class:`SimulatedBroker`.
+        In live mode the broker is :class:`AlpacaBroker`, routing real
+        orders to Alpaca.
         """
         from data.data_manager import DataManager
         from equities.execution import ExecutionManager, SimulatedBroker
@@ -177,6 +180,9 @@ class SystemOrchestrator:
         from equities.strategies.factor_model import FactorModelStrategy
         from core.regime_detector import RegimeDetector
         from core.risk_manager import RiskManager
+        from core.market_hours import MarketCalendar
+        from core.kill_switch import KillSwitch, CircuitBreakerConfig
+        from core.reconciliation import Reconciler
 
         print(f"\n[{self.mode.upper()} MODE] Starting trading loop ...")
 
@@ -184,12 +190,38 @@ class SystemOrchestrator:
         data_manager = DataManager(mode=self.mode)
         regime_detector = RegimeDetector()
         risk_manager = RiskManager(cfg.risk, self._log)
-        broker = SimulatedBroker(
-            initial_cash=cfg.system.initial_portfolio_value,
-            slippage_bps=cfg.backtest.slippage_bps,
-            commission_per_share=cfg.backtest.commission_per_share,
-            trade_logger=self._log,
+        market_cal = MarketCalendar()
+
+        # --- Select broker based on mode ---
+        if self.mode == "live" and cfg.alpaca.is_configured():
+            from equities.alpaca_broker import AlpacaBroker
+            broker = AlpacaBroker(paper=False)
+            logger.info("Using AlpacaBroker (LIVE trading).")
+        elif self.mode == "paper" and cfg.alpaca.is_configured():
+            from equities.alpaca_broker import AlpacaBroker
+            broker = AlpacaBroker(paper=True)
+            logger.info("Using AlpacaBroker (PAPER trading).")
+        else:
+            broker = SimulatedBroker(
+                initial_cash=cfg.system.initial_portfolio_value,
+                slippage_bps=cfg.backtest.slippage_bps,
+                commission_per_share=cfg.backtest.commission_per_share,
+                trade_logger=self._log,
+            )
+            logger.info("Using SimulatedBroker (no Alpaca credentials).")
+
+        # --- Kill switch + circuit breaker ---
+        kill_switch = KillSwitch(
+            config=CircuitBreakerConfig(
+                max_drawdown_pct=cfg.risk.max_drawdown_halt,
+                max_daily_loss_pct=cfg.risk.daily_loss_limit,
+            ),
+            initial_equity=cfg.system.initial_portfolio_value,
         )
+
+        # --- Reconciler ---
+        reconciler = Reconciler(broker=broker, mode="soft")
+
         signal_gen = SignalGenerator(
             strategies=[
                 StatArbStrategy(config=cfg.strategy.stat_arb),
@@ -209,9 +241,28 @@ class SystemOrchestrator:
 
         while True:
             cycle += 1
+
+            # --- Market hours gate ---
+            if not market_cal.is_market_open():
+                if cycle == 1:
+                    next_open = market_cal.next_open()
+                    print(
+                        f"  Market closed. Next open: "
+                        f"{next_open.strftime('%Y-%m-%d %H:%M ET')}",
+                        flush=True,
+                    )
+                time.sleep(60)
+                continue
+
             logger.info(f"Live cycle {cycle}")
 
             try:
+                # --- Kill switch check ---
+                if not kill_switch.is_trading_allowed():
+                    logger.warning(f"Trading blocked: {kill_switch.block_reason}")
+                    time.sleep(60)
+                    continue
+
                 # Fetch latest bars
                 bars = data_manager.get_latest_bars(symbols, limit=cfg.data.history_days)
                 if bars is None or len(bars) == 0:
@@ -261,7 +312,15 @@ class SystemOrchestrator:
 
                 # Latest prices
                 current_prices = price_data.iloc[-1].to_dict() if len(price_data) > 0 else {}
-                broker.update_prices(current_prices)
+                if hasattr(broker, 'update_prices'):
+                    broker.update_prices(current_prices)
+
+                # --- Pre-trade circuit breaker check ---
+                portfolio = broker.get_portfolio_state()
+                if not kill_switch.pre_order_check(portfolio):
+                    logger.warning(f"Circuit breaker tripped: {kill_switch.block_reason}")
+                    time.sleep(60)
+                    continue
 
                 # Generate signals
                 if len(price_data) >= 20:
@@ -273,13 +332,31 @@ class SystemOrchestrator:
                             f"{len(orders)} orders submitted."
                         )
 
-                # Print portfolio snapshot
+                # Refresh portfolio after trades
                 portfolio = broker.get_portfolio_state()
+
+                # --- Position reconciliation (every 10 cycles) ---
+                if cycle % 10 == 0:
+                    try:
+                        internal_positions = (
+                            broker.get_positions()
+                            if hasattr(broker, 'get_positions')
+                            else {}
+                        )
+                        recon_report = reconciler.reconcile(internal_positions)
+                        if recon_report.has_discrepancies:
+                            logger.warning(recon_report.summary())
+                    except Exception as exc:
+                        logger.warning(f"Reconciliation failed: {exc}")
+
+                # Print portfolio snapshot
+                mins_left = market_cal.minutes_until_close()
                 print(
                     f"  [cycle {cycle}] equity={portfolio.equity:,.2f} | "
                     f"cash={portfolio.cash:,.2f} | "
                     f"positions={len(portfolio.positions)} | "
-                    f"regime={regime_state.regime.value}",
+                    f"regime={regime_state.regime.value} | "
+                    f"close_in={mins_left:.0f}m",
                     flush=True,
                 )
 

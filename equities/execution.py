@@ -40,7 +40,7 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -228,6 +228,8 @@ class SimulatedBroker(Broker):
         self._realized_pnl: float = 0.0
         # Peak equity for drawdown tracking
         self._peak_equity: float = initial_cash
+        # Current simulated bar datetime (set by backtester each bar)
+        self._current_bar_dt: Optional[datetime] = None
 
         logger.info(
             f"SimulatedBroker initialised: "
@@ -488,6 +490,7 @@ class SimulatedBroker(Broker):
             fill_price=fill_price,
             fill_qty=fill_qty,
             slippage_bps=slippage_bps,
+            timestamp=self._current_bar_dt or datetime.now(timezone.utc),
         )
         self._fills.append(fill)
 
@@ -880,7 +883,8 @@ class ExecutionManager:
         Signal strength is floored at 0.5 to ensure meaningful position sizes
         for any signal that passes the pipeline filters.
 
-        Capped at ``max_position_value``.
+        Capped at ``max_position_value`` and bounded by gross exposure limit
+        (150% of equity) to prevent excessive leverage.
 
         Parameters
         ----------
@@ -896,17 +900,28 @@ class ExecutionManager:
         Number of shares (0 if below minimum lot size).
         """
         max_pct = get_config().risk.max_position_pct
+        equity = max(portfolio_state.equity, 1.0)
+
+        # --- Gross exposure cap (150% of equity) ---
+        # This prevents the system from becoming a de-facto leveraged fund.
+        _MAX_GROSS_EXPOSURE_PCT = 1.50
+        current_gross = portfolio_state.gross_exposure
+        remaining_capacity = max(equity * _MAX_GROSS_EXPOSURE_PCT - current_gross, 0.0)
+        if remaining_capacity <= 0:
+            logger.debug(
+                f"ExecutionManager: gross exposure at {current_gross / equity:.1%} "
+                f"of equity — no capacity for {signal.symbol}"
+            )
+            return 0
+
         # Floor signal strength at 0.5 — if a signal passed all filters and
-        # regime gates, it deserves a meaningful allocation.  Lower floor
-        # allows regime-scaled positions to be smaller in uncertain markets
-        # while still participating.
+        # regime gates, it deserves a meaningful allocation.
         adjusted_strength = max(signal.strength, 0.5)
-        target_notional = (
-            portfolio_state.equity
-            * max_pct
-            * adjusted_strength
-        )
+        target_notional = equity * max_pct * adjusted_strength
         target_notional = min(target_notional, self._max_position_value)
+
+        # Don't exceed remaining gross exposure capacity
+        target_notional = min(target_notional, remaining_capacity)
 
         qty = int(target_notional / max(price, 0.01))
         return max(qty, 0)

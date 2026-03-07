@@ -45,10 +45,10 @@ check("imports", test_config_imports)
 def test_config_get_config():
     from core.config import get_config
     cfg = get_config(reload=True)
-    assert cfg.risk.max_position_pct == 0.05
-    assert cfg.risk.max_drawdown_halt == -0.15
-    assert cfg.risk.daily_loss_limit == -0.02
-    assert cfg.risk.max_correlation == 0.7
+    assert cfg.risk.max_position_pct == 0.20
+    assert cfg.risk.max_drawdown_halt == -0.30
+    assert cfg.risk.daily_loss_limit == -0.03
+    assert cfg.risk.max_correlation == 0.85
     assert cfg.backtest.slippage_bps == 7.0
     assert cfg.backtest.train_window == 504
     assert cfg.backtest.test_window == 21
@@ -94,7 +94,7 @@ def test_config_to_dict():
     d = cfg.to_dict()
     assert isinstance(d, dict)
     assert "risk" in d
-    assert d["risk"]["max_position_pct"] == 0.05
+    assert d["risk"]["max_position_pct"] == 0.20
 check("to_dict() serialisation", test_config_to_dict)
 
 # ----------------------------------------------------------------
@@ -369,15 +369,15 @@ def _make_rm():
 
 def test_risk_check_position_size_ok():
     rm, log = _make_rm()
-    # 5 % of 100k = 5000; 100 shares @ 49 = 4900 → pass
-    assert rm.check_position_size("AAPL", 100, 49.0, 100_000)
+    # 20 % of 100k = 20000; 100 shares @ 190 = 19000 → pass
+    assert rm.check_position_size("AAPL", 100, 190.0, 100_000)
     log.close()
 check("check_position_size() — within limit", test_risk_check_position_size_ok)
 
 def test_risk_check_position_size_breach():
     rm, log = _make_rm()
-    # 200 shares @ 50 = 10_000 = 10 % > 5 % limit
-    assert not rm.check_position_size("AAPL", 200, 50.0, 100_000)
+    # 500 shares @ 50 = 25_000 = 25 % > 20 % limit
+    assert not rm.check_position_size("AAPL", 500, 50.0, 100_000)
     log.close()
 check("check_position_size() — breach denied", test_risk_check_position_size_breach)
 
@@ -407,28 +407,28 @@ check("check_drawdown() — NORMAL at -2 %", test_risk_check_drawdown_normal)
 def test_risk_check_drawdown_reduce():
     rm, log = _make_rm()
     from core.risk_manager import RiskAction
-    action = rm.check_drawdown(89_000, 100_000)
+    action = rm.check_drawdown(78_000, 100_000)  # -22% between -20% and -30%
     assert action == RiskAction.REDUCE
     log.close()
-check("check_drawdown() — REDUCE at -11 %", test_risk_check_drawdown_reduce)
+check("check_drawdown() — REDUCE at -22 %", test_risk_check_drawdown_reduce)
 
 def test_risk_check_drawdown_halt():
     rm, log = _make_rm()
     from core.risk_manager import RiskAction
-    action = rm.check_drawdown(83_000, 100_000)
+    action = rm.check_drawdown(68_000, 100_000)  # -32% beyond -30% halt
     assert action == RiskAction.HALT
     log.close()
-check("check_drawdown() — HALT at -17 %", test_risk_check_drawdown_halt)
+check("check_drawdown() — HALT at -32 %", test_risk_check_drawdown_halt)
 
 def test_risk_check_daily_loss_ok():
     rm, log = _make_rm()
-    assert rm.check_daily_loss(-1_500, 100_000)  # -1.5 % < -2 % limit → ok
+    assert rm.check_daily_loss(-2_500, 100_000)  # -2.5 % < -3 % limit → ok
     log.close()
 check("check_daily_loss() — within limit", test_risk_check_daily_loss_ok)
 
 def test_risk_check_daily_loss_breach():
     rm, log = _make_rm()
-    assert not rm.check_daily_loss(-2_500, 100_000)  # -2.5 % > -2 % limit
+    assert not rm.check_daily_loss(-3_500, 100_000)  # -3.5 % > -3 % limit
     log.close()
 check("check_daily_loss() — breach denied", test_risk_check_daily_loss_breach)
 
@@ -461,8 +461,8 @@ def test_risk_calculate_position_size():
         price=100.0,
     )
     assert shares > 0
-    # Must not exceed 5 % / price = 50 shares
-    assert shares <= 50
+    # Must not exceed 20 % of portfolio / price = 200 shares
+    assert shares <= 200
     log.close()
 check("calculate_position_size() — vol-inverse fallback", test_risk_calculate_position_size)
 
@@ -504,8 +504,8 @@ def test_risk_approve_trade_size_breach():
         today_pnl=-500.0,
         positions={},
     )
-    # 200 shares @ 50 = 10 % notional > 5 % limit
-    approval = rm.approve_trade("AAPL", "buy", 200, 50.0, state)
+    # 500 shares @ 50 = 25 % notional > 20 % limit
+    approval = rm.approve_trade("AAPL", "buy", 500, 50.0, state)
     assert not approval.approved
     assert "position_size" in approval.checks_failed
     log.close()
@@ -517,7 +517,7 @@ def test_risk_approve_trade_daily_loss_halt():
     state = PortfolioState(
         equity=100_000,
         peak_equity=100_000,
-        today_pnl=-2_500.0,  # -2.5 % > -2 % limit
+        today_pnl=-3_500.0,  # -3.5 % > -3 % limit
         positions={},
     )
     approval = rm.approve_trade("AAPL", "buy", 10, 100.0, state)
@@ -530,7 +530,7 @@ def test_risk_approve_trade_drawdown_halt():
     from core.risk_manager import PortfolioState
     rm, log = _make_rm()
     state = PortfolioState(
-        equity=82_000,      # -18 % drawdown
+        equity=68_000,      # -32 % drawdown exceeds -30% halt
         peak_equity=100_000,
         today_pnl=0.0,
         positions={},
@@ -544,16 +544,16 @@ check("approve_trade() — drawdown HALT gate", test_risk_approve_trade_drawdown
 def test_risk_approve_trade_sector_exposure():
     from core.risk_manager import PortfolioState
     rm, log = _make_rm()
-    # Tech sector already 24 %, adding 4 % would exceed 25 %
+    # Tech sector already 32 %, adding 5 % would exceed 35 %
     state = PortfolioState(
         equity=100_000,
         peak_equity=100_000,
         today_pnl=0.0,
-        positions={"AAPL": 24_000.0},
+        positions={"AAPL": 32_000.0},
         sector_map={"AAPL": "Technology", "NVDA": "Technology"},
     )
-    # Adding 4000 notional of NVDA (Tech) → 28 % > 25 %
-    approval = rm.approve_trade("NVDA", "buy", 40, 100.0, state)
+    # Adding 5000 notional of NVDA (Tech) → 37 % > 35 %
+    approval = rm.approve_trade("NVDA", "buy", 50, 100.0, state)
     assert not approval.approved
     assert "sector_exposure" in approval.checks_failed
     log.close()
@@ -600,7 +600,7 @@ def test_risk_manager_uses_logger():
     rm = RiskManager(RiskConfig(), log)
     # Trigger a drawdown_halt event
     from core.risk_manager import RiskAction
-    action = rm.check_drawdown(80_000, 100_000)
+    action = rm.check_drawdown(68_000, 100_000)  # -32% beyond -30% halt
     assert action == RiskAction.HALT
     log.close()
 

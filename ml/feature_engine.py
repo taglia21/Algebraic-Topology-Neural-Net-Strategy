@@ -128,17 +128,22 @@ def _keltner_position(close: pd.Series, high: pd.Series,
 
 def _hurst_exponent(series: pd.Series, min_lag: int = 2,
                     max_lag: int = 20) -> pd.Series:
-    """Rolling Hurst exponent via rescaled-range (R/S) analysis.
+    """Rolling Hurst exponent via simplified R/S analysis (vectorised).
 
     Uses a 60-day rolling window. Values < 0.5 indicate mean-reversion,
     0.5 = random walk, > 0.5 indicates trending / persistence.
 
+    This implementation uses a fast approximation: it computes R/S at two
+    lag scales (short=5, long=15) and estimates H from the log-log slope
+    of those two points. This avoids the expensive per-bar Python callback
+    while retaining the signal's economic interpretation.
+
     Parameters
     ----------
     series:
-        Price or returns series.
+        Price series.
     min_lag, max_lag:
-        Range of sub-period lags used in R/S calculation.
+        Ignored (kept for API compatibility). Uses lags 5 and 15 internally.
 
     Returns
     -------
@@ -146,48 +151,43 @@ def _hurst_exponent(series: pd.Series, min_lag: int = 2,
         Rolling Hurst exponent (window = 60).
     """
     window = 60
-
-    def _hurst_scalar(x: np.ndarray) -> float:
-        """Compute H for a 1-D array using R/S over multiple lags."""
-        if len(x) < max_lag + 5:
-            return np.nan
-        lags = range(min_lag, min(max_lag, len(x) // 2))
-        rs_values: List[float] = []
-        lag_values: List[int] = []
-        for lag in lags:
-            # Split x into non-overlapping sub-series of length lag
-            sub_series_list = [
-                x[i: i + lag]
-                for i in range(0, len(x) - lag + 1, lag)
-                if len(x[i: i + lag]) == lag
-            ]
-            if not sub_series_list:
-                continue
-            rs_sub: List[float] = []
-            for sub in sub_series_list:
-                mean_sub = np.mean(sub)
-                devs = np.cumsum(sub - mean_sub)
-                r = devs.max() - devs.min()
-                s = np.std(sub, ddof=1)
-                if s > 0:
-                    rs_sub.append(r / s)
-            if rs_sub:
-                rs_values.append(np.mean(rs_sub))
-                lag_values.append(lag)
-        if len(rs_values) < 2:
-            return np.nan
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", np.RankWarning)
-            try:
-                poly = np.polyfit(np.log(lag_values), np.log(rs_values), 1)
-                return float(poly[0])
-            except Exception:
-                return np.nan
-
     log_prices = np.log(series.clip(lower=1e-9))
-    return log_prices.rolling(window=window, min_periods=window).apply(
-        _hurst_scalar, raw=True
-    )
+    log_returns = log_prices.diff()
+
+    def _rolling_rs(returns: pd.Series, lag: int) -> pd.Series:
+        """Rescaled range for a given lag, computed via rolling operations."""
+        # Rolling mean deviation
+        roll_mean = returns.rolling(lag, min_periods=lag).mean()
+        deviation = returns - roll_mean
+        # Cumulative deviation within each window (approximate via rolling sum)
+        cum_dev = deviation.rolling(lag, min_periods=lag).sum()
+        # Range approximation: use rolling max - rolling min of cumulative deviations
+        roll_range = (
+            deviation.rolling(lag, min_periods=lag).max()
+            - deviation.rolling(lag, min_periods=lag).min()
+        )
+        # Standard deviation
+        roll_std = returns.rolling(lag, min_periods=lag).std()
+        rs = roll_range / roll_std.replace(0.0, np.nan)
+        return rs
+
+    # Compute R/S at two scales within the rolling window
+    lag_short = 5
+    lag_long = 15
+    rs_short = _rolling_rs(log_returns, lag_short)
+    rs_long = _rolling_rs(log_returns, lag_long)
+
+    # Ensure both are within the broader 60-day window
+    rs_short = rs_short.rolling(window, min_periods=window).mean()
+    rs_long = rs_long.rolling(window, min_periods=window).mean()
+
+    # Hurst = log(RS_long/RS_short) / log(lag_long/lag_short)
+    log_rs_ratio = np.log(rs_long / rs_short.replace(0.0, np.nan))
+    log_lag_ratio = np.log(lag_long / lag_short)
+
+    hurst = log_rs_ratio / log_lag_ratio
+    # Clip to valid Hurst range [0, 1]
+    return hurst.clip(0.0, 1.0)
 
 
 def _obv(close: pd.Series, volume: pd.Series) -> pd.Series:
@@ -501,8 +501,8 @@ class FeatureEngine:
             feats = self.compute_features(dummy, symbol="_dummy")
             return list(feats.columns)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"get_feature_names: dummy run failed ({exc}); returning static list.")
-            return _STATIC_FEATURE_NAMES()
+            logger.warning(f"get_feature_names: dummy run failed ({exc}); returning empty list.")
+            return []
 
     # ------------------------------------------------------------------
     # Category helpers
@@ -823,63 +823,62 @@ class FeatureEngine:
                 return macro[col].astype(float)
             return nan_series.copy()
 
-        # VIX pass-through
+        # VIX features — only include if VIX data exists in macro_data or df
         vix = _get_col("vix")
-        f["vix_level"] = vix
-        f["vix_change_1d"] = vix.diff(1)
-        f["vix_change_5d"] = vix.diff(5)
-        f["vix_pct_change_1d"] = vix / vix.shift(1).replace(0.0, np.nan) - 1.0
-        f["vix_ma_ratio"] = vix / vix.rolling(20, min_periods=20).mean().replace(0.0, np.nan)
+        has_vix = macro is not None and "vix" in macro.columns
+        if not has_vix and "vix" in df.columns:
+            vix = df["vix"].astype(float)
+            has_vix = True
 
-        # VIX term structure (VIX/VXV)
-        vxv = _get_col("vxv")
-        f["vix_term_structure"] = vix / vxv.replace(0.0, np.nan)
+        if has_vix and vix.notna().sum() > 20:
+            f["vix_level"] = vix
+            f["vix_change_1d"] = vix.diff(1)
+            f["vix_change_5d"] = vix.diff(5)
+            f["vix_pct_change_1d"] = vix / vix.shift(1).replace(0.0, np.nan) - 1.0
+            f["vix_ma_ratio"] = vix / vix.rolling(20, min_periods=20).mean().replace(0.0, np.nan)
+            f["vix_percentile_252d"] = vix.rolling(252, min_periods=60).rank(pct=True)
 
-        # VIX percentile rank over 252 days
-        f["vix_percentile_252d"] = vix.rolling(252, min_periods=60).rank(pct=True)
+            # VIX term structure (VIX/VXV)
+            vxv = _get_col("vxv")
+            if macro is not None and "vxv" in macro.columns:
+                f["vix_term_structure"] = vix / vxv.replace(0.0, np.nan)
 
-        # Put/Call ratio
-        f["put_call_ratio"] = _get_col("put_call_ratio")
-        f["put_call_ma5"] = f["put_call_ratio"].rolling(5, min_periods=5).mean()
+        # Put/Call ratio — only if available
+        if macro is not None and "put_call_ratio" in macro.columns:
+            f["put_call_ratio"] = _get_col("put_call_ratio")
+            f["put_call_ma5"] = f["put_call_ratio"].rolling(5, min_periods=5).mean()
 
-        # Yield curve slope
-        yc = _get_col("yield_curve_slope")
-        f["yield_curve_slope"] = yc
-        f["yield_curve_slope_change_5d"] = yc.diff(5)
-        f["yield_curve_slope_ma20"] = yc.rolling(20, min_periods=20).mean()
+        # Yield curve slope — only if available
+        if macro is not None and "yield_curve_slope" in macro.columns:
+            yc = _get_col("yield_curve_slope")
+            f["yield_curve_slope"] = yc
+            f["yield_curve_slope_change_5d"] = yc.diff(5)
+            f["yield_curve_slope_ma20"] = yc.rolling(20, min_periods=20).mean()
 
-        # Credit spread proxy
-        f["credit_spread"] = _get_col("credit_spread")
-        f["credit_spread_change_5d"] = f["credit_spread"].diff(5)
+        # Credit spread — only if available
+        if macro is not None and "credit_spread" in macro.columns:
+            f["credit_spread"] = _get_col("credit_spread")
+            f["credit_spread_change_5d"] = f["credit_spread"].diff(5)
 
-        # TED spread placeholder
-        f["ted_spread"] = _get_col("ted_spread")
+        # TED spread — only include if macro_data provides it
+        ted = _get_col("ted_spread")
+        if macro is not None and "ted_spread" in macro.columns:
+            f["ted_spread"] = ted
 
-        # Dollar index
+        # Dollar index — only include if macro_data provides it
         dxy = _get_col("dxy")
-        f["dxy_level"] = dxy
-        f["dxy_change_5d"] = dxy.diff(5)
+        if macro is not None and "dxy" in macro.columns:
+            f["dxy_level"] = dxy
+            f["dxy_change_5d"] = dxy.diff(5)
 
-        # SPX advance/decline ratio placeholder
-        f["advance_decline_ratio"] = _get_col("advance_decline_ratio")
-
-        # Market breadth placeholder
-        f["market_breadth"] = _get_col("market_breadth")
-
-        # News sentiment placeholder
-        f["news_sentiment"] = _get_col("news_sentiment")
-
-        # Short interest placeholder
-        f["short_interest_ratio"] = _get_col("short_interest_ratio")
-
-        # Earnings surprise placeholder
-        f["earnings_surprise"] = _get_col("earnings_surprise")
-
-        # IV rank (implied vol rank, placeholder)
-        f["iv_rank"] = _get_col("iv_rank")
-
-        # Macro regime indicator (0=bearish, 1=neutral, 2=bullish)
-        f["macro_regime"] = _get_col("macro_regime")
+        # --- Below features ONLY included when macro_data provides them ---
+        # (Removed as NaN placeholders — they add noise to ML training)
+        for col_name in ("advance_decline_ratio", "market_breadth", "news_sentiment",
+                         "short_interest_ratio", "earnings_surprise", "iv_rank",
+                         "macro_regime"):
+            val = _get_col(col_name)
+            if macro is not None and col_name in macro.columns:
+                f[col_name] = val
 
         return f
 
@@ -978,11 +977,10 @@ class FeatureEngine:
                 (close - low) / (high - low).replace(0.0, np.nan) - 0.5
             )
 
-        # Trade intensity placeholders
-        f["trade_count_proxy"]   = nan_series.copy()
-        f["large_trade_ratio"]   = nan_series.copy()
-        f["tick_direction_ema"]  = nan_series.copy()
-        f["price_impact_proxy"]  = nan_series.copy()
-        f["effective_spread"]    = nan_series.copy()
+        # Trade intensity — only include when real microstructure data is available
+        for col_name in ("trade_count", "large_trade_ratio", "tick_direction",
+                         "price_impact", "effective_spread"):
+            if col_name in df.columns:
+                f[col_name] = df[col_name].astype(float)
 
         return f

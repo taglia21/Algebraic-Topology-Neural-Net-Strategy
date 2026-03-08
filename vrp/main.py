@@ -34,6 +34,8 @@ from typing import Dict, List, Optional, Tuple
 from vrp.config import Config, get_config
 from vrp.strategy import VRPStrategy, TradeAction, SpreadPosition, SpreadLeg
 from vrp.risk import RiskManager
+from vrp.signals import SignalAggregator
+from vrp.analytics import RollingMetrics
 from vrp.utils import setup_logger
 
 logger = logging.getLogger(__name__)
@@ -314,6 +316,8 @@ async def run_live(config: Config) -> None:
     broker = IBKRBroker(config.ibkr)
     strategy = VRPStrategy(config)
     risk_mgr = RiskManager(config.risk)
+    signals = SignalAggregator()
+    rolling = RollingMetrics(window=63)
 
     # Load saved state
     saved_equity, saved_hwm = load_state(strategy)
@@ -391,6 +395,18 @@ async def run_live(config: Config) -> None:
                     logger.warning("Missing market data, retrying in 60s")
                     await asyncio.sleep(60)
                     continue
+
+                # Update signal layer (use SPX price as OHLC proxy for live)
+                daily_ret = 0.0  # will be calculated from equity changes
+                signal_state = signals.update(
+                    spx_open=spx_price,  # approx — real OHLC from IBKR if available
+                    spx_high=spx_price,
+                    spx_low=spx_price,
+                    spx_close=spx_price,
+                    vix=vix,
+                    as_of=date.today(),
+                    daily_portfolio_return=daily_ret,
+                )
 
                 # ---- Get account state ----
                 account = await broker.get_account_summary()
@@ -490,7 +506,7 @@ async def run_live(config: Config) -> None:
                                     strategy.positions.remove(new_pos)
 
                 # ---- Check for new entries ----
-                if strategy.should_open_new_trade(spx_price, vix, as_of=date.today()):
+                if strategy.should_open_new_trade(spx_price, vix, as_of=date.today(), signal_state=signal_state):
                     # Try to get real option chain for better strike selection
                     available_strikes = None
                     try:
@@ -515,6 +531,7 @@ async def run_live(config: Config) -> None:
                         as_of=date.today(),
                         risk_free_rate=config.backtest.risk_free_rate,
                         available_strikes=available_strikes,
+                        signal_state=signal_state,
                     )
 
                     if new_pos:

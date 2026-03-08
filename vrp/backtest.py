@@ -45,6 +45,12 @@ from vrp.utils import (
     bs_put_price, bs_greeks, setup_logger,
     next_monthly_expiry, dte, years_to_expiry,
 )
+from vrp.signals import SignalAggregator, SignalState
+from vrp.analytics import (
+    RollingMetrics, bootstrap_sharpe, bootstrap_max_drawdown,
+    bootstrap_win_rate, analyze_by_regime, run_full_analysis,
+    print_analysis,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +242,11 @@ class VRPBacktester:
         self.closed_trades: List[SpreadPosition] = []
         self.max_concurrent = 0
 
+        # Signal layer + analytics (new)
+        self.signals = SignalAggregator()
+        self.rolling = RollingMetrics(window=63)
+        self._signal_blocks = 0  # count how many days signals blocked entry
+
     def run(
         self,
         start: str = "2020-01-01",
@@ -286,10 +297,25 @@ class VRPBacktester:
             spx = row["spx_close"]
             vix = row["vix_close"]
             spx_200sma = row.get("spx_200sma", None)
+            spx_open = row.get("spx_open", spx)
+            spx_high = row.get("spx_high", spx)
+            spx_low = row.get("spx_low", spx)
             iv = vix / 100.0  # VIX as IV proxy
 
             if pd.isna(vix) or pd.isna(spx):
                 continue
+
+            # ----- Update signal layer -----
+            daily_ret = (self.equity / prev_equity - 1.0) if prev_equity > 0 else 0.0
+            signal_state = self.signals.update(
+                spx_open=float(spx_open),
+                spx_high=float(spx_high),
+                spx_low=float(spx_low),
+                spx_close=float(spx),
+                vix=float(vix),
+                as_of=today,
+                daily_portfolio_return=daily_ret,
+            )
 
             # ----- Mark positions to market -----
             for pos in self.strategy.open_positions:
@@ -328,6 +354,9 @@ class VRPBacktester:
                     self.total_commissions += comm
                     self.total_slippage += slip
                     self.closed_trades.append(pos)
+                    # Feed Kelly sizer + rolling tracker
+                    self.signals.record_trade_result(pos.close_pnl)
+                    self.rolling.add_trade(pos.close_pnl)
 
                 elif action == TradeAction.ROLL:
                     # Close current position
@@ -340,6 +369,8 @@ class VRPBacktester:
                     self.total_commissions += comm
                     self.total_slippage += slip
                     self.closed_trades.append(pos)
+                    self.signals.record_trade_result(pos.close_pnl)
+                    self.rolling.add_trade(pos.close_pnl)
 
                     # Open new position with further expiry
                     new_pos = self.strategy.construct_spread(
@@ -377,7 +408,11 @@ class VRPBacktester:
                 vix=vix,
                 spx_200sma=spx_200sma if not pd.isna(spx_200sma) else None,
                 as_of=today,
+                signal_state=signal_state,
             )
+
+            if not should_trade and can_trade and signal_state is not None and not signal_state.can_trade:
+                self._signal_blocks += 1
 
             if should_trade:
                 new_pos = self.strategy.construct_spread(
@@ -386,6 +421,7 @@ class VRPBacktester:
                     account_equity=self.equity,
                     as_of=today,
                     risk_free_rate=self.config.backtest.risk_free_rate,
+                    signal_state=signal_state,
                 )
                 if new_pos:
                     # Credit received goes to cash
@@ -409,8 +445,12 @@ class VRPBacktester:
             # Track daily P&L
             daily_pnl = self.equity - prev_equity
             self.daily_pnl.append(daily_pnl)
-            prev_equity = self.equity
 
+            # Update rolling metrics
+            daily_ret_actual = daily_pnl / prev_equity if prev_equity > 0 else 0.0
+            self.rolling.add_daily_return(daily_ret_actual)
+
+            prev_equity = self.equity
             self.equity_curve.append((today, self.equity))
 
             # Progress
@@ -432,6 +472,25 @@ class VRPBacktester:
 
         if verbose:
             print(metrics.summary())
+
+            # Run statistical analysis
+            trade_dicts = [
+                {
+                    "vix_at_entry": t.vix_at_entry,
+                    "close_pnl": t.close_pnl,
+                    "days_held": t.days_held,
+                }
+                for t in self.closed_trades
+            ]
+            analysis = run_full_analysis(
+                equity_curve=self.equity_curve,
+                trades=trade_dicts,
+                risk_free_rate=self.config.backtest.risk_free_rate,
+            )
+            print(print_analysis(analysis))
+            print(f"  Signal layer blocked {self._signal_blocks} potential entry days")
+            print(f"  Rolling metrics: {self.rolling.to_dict()}")
+            print()
 
         return metrics
 

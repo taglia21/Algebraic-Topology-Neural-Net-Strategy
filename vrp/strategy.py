@@ -34,6 +34,7 @@ from vrp.utils import (
     Greeks, bs_greeks, bs_put_price, implied_vol,
     dte, years_to_expiry, next_monthly_expiry,
 )
+from vrp.signals import SignalState
 
 logger = logging.getLogger(__name__)
 
@@ -522,15 +523,22 @@ class VRPStrategy:
         vix: float,
         spx_200sma: Optional[float] = None,
         as_of: Optional[date] = None,
+        signal_state: Optional[SignalState] = None,
     ) -> bool:
         """Determine if we should open a new spread today.
 
         Checks:
+        - Signal layer allows trading (VRP, term structure, gap risk, events)
         - VIX regime allows trading
         - Not at max concurrent positions
         - SPX above 200-day SMA (trend filter, if enabled)
         - Total risk budget not exceeded
         """
+        # Signal layer filter (if available)
+        if signal_state is not None and not signal_state.can_trade:
+            logger.info(f"No trade: signal blocked — {signal_state.reject_reason}")
+            return False
+
         # VIX regime filter
         regime = self.regime.classify(vix)
         if regime in (VIXRegime.TOO_LOW, VIXRegime.CRISIS):
@@ -567,6 +575,7 @@ class VRPStrategy:
         as_of: Optional[date] = None,
         risk_free_rate: float = 0.05,
         available_strikes: Optional[List[float]] = None,
+        signal_state: Optional[SignalState] = None,
     ) -> Optional[SpreadPosition]:
         """Construct a new spread trade.
 
@@ -639,7 +648,13 @@ class VRPStrategy:
         actual_width = short_leg.strike - long_leg.strike
         sizing_mult = self.regime.sizing_multiplier(vix)
         base_risk = actual_width * 100  # max loss per contract in dollars
-        risk_budget = account_equity * self.config.spread.risk_per_trade * sizing_mult
+
+        # Apply signal-layer sizing scalar (vol targeting, Kelly, gap risk)
+        signal_scalar = 1.0
+        if signal_state is not None:
+            signal_scalar = signal_state.sizing_scalar
+
+        risk_budget = account_equity * self.config.spread.risk_per_trade * sizing_mult * signal_scalar
 
         quantity = max(1, int(risk_budget / base_risk))
 

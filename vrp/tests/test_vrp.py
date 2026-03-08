@@ -93,10 +93,11 @@ class TestVIXRegime:
     def test_too_low(self):
         assert self.classifier.classify(10) == VIXRegime.TOO_LOW
         assert self.classifier.sizing_multiplier(10) == 0.0
+        assert self.classifier.classify(13) == VIXRegime.TOO_LOW  # below min_vix=14
 
     def test_low(self):
-        assert self.classifier.classify(13) == VIXRegime.LOW
-        assert 0 < self.classifier.sizing_multiplier(13) < 1
+        assert self.classifier.classify(14.5) == VIXRegime.LOW  # between min_vix=14 and standard_low=15
+        assert 0 < self.classifier.sizing_multiplier(14.5) < 1
 
     def test_standard(self):
         assert self.classifier.classify(17) == VIXRegime.STANDARD

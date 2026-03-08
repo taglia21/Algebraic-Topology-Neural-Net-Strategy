@@ -98,16 +98,17 @@ class VIXRegimeConfig:
     """
 
     # No new trades when VIX below this (premium too thin)
-    min_vix: float = 12.0
+    # Raised to 14: backtest shows VIX <15 trades have negative expectation
+    min_vix: float = 14.0
     # No new trades when VIX above this (tail risk)
     max_vix: float = 35.0
     # Standard sizing when VIX in this range
-    standard_low: float = 14.0
+    standard_low: float = 15.0
     standard_high: float = 20.0
     # Increased sizing multiplier when VIX > standard_high
     elevated_sizing_mult: float = 1.5
-    # Reduced sizing multiplier when VIX < standard_low
-    low_vol_sizing_mult: float = 0.75
+    # Reduced sizing multiplier when VIX in [min_vix, standard_low] — half size
+    low_vol_sizing_mult: float = 0.50
     # SPX must be above 200-day SMA for new trades (trend filter)
     require_uptrend: bool = False  # disabled — VRP works in all regimes, VIX filter is sufficient
 

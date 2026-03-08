@@ -1,0 +1,33 @@
+[Unit]
+Description=VRP Alpha Engine — Systematic SPX Options Trading
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/vrp-engine
+ExecStart=/usr/bin/python3 -m vrp.main --mode paper --log-level INFO
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+Environment=VRP_STATE_DIR=/root/vrp-engine/state
+
+# IBKR connection — set these for your gateway
+Environment=IBKR_HOST=127.0.0.1
+Environment=IBKR_PORT=4002
+Environment=IBKR_ACCOUNT=
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=1G
+
+# Watchdog — restart if unresponsive
+WatchdogSec=600
+
+[Install]
+WantedBy=multi-user.target

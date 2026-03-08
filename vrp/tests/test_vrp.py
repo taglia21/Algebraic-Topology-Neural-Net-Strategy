@@ -377,3 +377,109 @@ class TestStrategyIntegration:
             spx_price=5000, vix=18, spx_200sma=4800,
             as_of=date(2025, 1, 15),
         )
+
+
+# ---------------------------------------------------------------------------
+# State Persistence Tests
+# ---------------------------------------------------------------------------
+
+class TestStatePersistence:
+    """Test save/load state for crash recovery."""
+
+    def test_save_and_load_roundtrip(self, tmp_path):
+        """Positions should survive a save/load cycle."""
+        import json
+        from vrp.main import save_state, load_state, STATE_DIR, STATE_FILE
+        import vrp.main as main_mod
+
+        # Temporarily redirect state dir
+        orig_dir = main_mod.STATE_DIR
+        orig_file = main_mod.STATE_FILE
+        main_mod.STATE_DIR = tmp_path
+        main_mod.STATE_FILE = tmp_path / "vrp_state.json"
+
+        try:
+            config = get_config()
+            strategy = VRPStrategy(config)
+
+            # Open a position
+            pos = strategy.construct_spread(
+                spx_price=5000, vix=18, account_equity=10000,
+                as_of=date(2025, 1, 15),
+            )
+            assert pos is not None
+
+            # Save state
+            save_state(strategy, equity=10500.0, hwm=11000.0)
+
+            # Load into fresh strategy
+            strategy2 = VRPStrategy(config)
+            equity, hwm = load_state(strategy2)
+
+            assert equity == 10500.0
+            assert hwm == 11000.0
+            assert len(strategy2.positions) == 1
+            loaded = strategy2.positions[0]
+            assert loaded.id == pos.id
+            assert loaded.short_leg.strike == pos.short_leg.strike
+            assert loaded.long_leg.strike == pos.long_leg.strike
+            assert loaded.entry_credit == pos.entry_credit
+            assert loaded.status == "open"
+        finally:
+            main_mod.STATE_DIR = orig_dir
+            main_mod.STATE_FILE = orig_file
+
+    def test_load_missing_state(self, tmp_path):
+        """Loading from nonexistent file should return zeros."""
+        from vrp.main import load_state
+        import vrp.main as main_mod
+
+        orig_dir = main_mod.STATE_DIR
+        orig_file = main_mod.STATE_FILE
+        main_mod.STATE_DIR = tmp_path
+        main_mod.STATE_FILE = tmp_path / "vrp_state.json"
+
+        try:
+            config = get_config()
+            strategy = VRPStrategy(config)
+            equity, hwm = load_state(strategy)
+            assert equity == 0.0
+            assert hwm == 0.0
+            assert len(strategy.positions) == 0
+        finally:
+            main_mod.STATE_DIR = orig_dir
+            main_mod.STATE_FILE = orig_file
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Spread Width Tests
+# ---------------------------------------------------------------------------
+
+class TestDynamicWidth:
+    """Test that spread width adapts to account equity."""
+
+    def test_width_reduces_after_drawdown(self):
+        """With low equity, spread width should shrink."""
+        config = get_config()
+        strategy = VRPStrategy(config)
+
+        # Normal equity — should use default width (15)
+        pos1 = strategy.construct_spread(
+            spx_price=5000, vix=18, account_equity=10000,
+            as_of=date(2025, 1, 15),
+        )
+        assert pos1 is not None
+        width1 = pos1.short_leg.strike - pos1.long_leg.strike
+        assert width1 == 15  # default config width
+        strategy.close_position(pos1, "test", as_of=date(2025, 1, 20))
+
+        # Low equity — width should shrink
+        # max_affordable = 1200 * 0.80 / 100 = 9.6, capped to 10 < 15
+        pos2 = strategy.construct_spread(
+            spx_price=5000, vix=18, account_equity=1200,
+            as_of=date(2025, 2, 1),
+        )
+        assert pos2 is not None
+        width2 = pos2.short_leg.strike - pos2.long_leg.strike
+        assert width2 < width1  # should be narrower
+        assert width2 >= 10  # minimum floor

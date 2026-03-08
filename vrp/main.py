@@ -36,6 +36,7 @@ from vrp.strategy import VRPStrategy, TradeAction, SpreadPosition, SpreadLeg
 from vrp.risk import RiskManager
 from vrp.signals import SignalAggregator
 from vrp.analytics import RollingMetrics
+from vrp.notifications import TradeNotifier
 from vrp.utils import setup_logger
 
 logger = logging.getLogger(__name__)
@@ -291,15 +292,63 @@ async def reconcile_positions(
 # Live/Paper Trading Loop
 # ---------------------------------------------------------------------------
 
+async def seed_signal_layer(
+    broker,
+    signals: SignalAggregator,
+) -> None:
+    """Seed the signal layer with historical OHLC bars on startup.
+
+    The Yang-Zhang RV estimator needs 21 daily bars and the Parkinson
+    gap model needs 20+ to produce meaningful readings.  We fetch 90 days
+    so the EWMA vol targeting also has a warm ramp.
+    """
+    logger.info("Seeding signal layer with historical bars...")
+    bars = await broker.get_daily_bars(symbol="SPX", duration="90 D")
+    if not bars:
+        logger.warning("No historical bars returned — signal layer will warm up in live")
+        return
+
+    ohlc = [(b["open"], b["high"], b["low"], b["close"]) for b in bars]
+    signals.seed_history(ohlc)
+    logger.info(f"Signal layer seeded with {len(ohlc)} historical bars")
+
+
+async def _wait_for_fill(
+    broker,
+    order_id: str,
+    timeout_sec: int = 60,
+    poll_sec: int = 5,
+) -> Optional[Dict]:
+    """Poll IBKR for order fill within *timeout_sec*.
+
+    Returns the fill dict when filled, or None on timeout/cancel.
+    """
+    elapsed = 0
+    while elapsed < timeout_sec:
+        status = await broker.get_order_status(order_id)
+        if status is None:
+            return None
+        if status["status"] in ("Filled", "ApiCancelled", "Cancelled"):
+            return status
+        await asyncio.sleep(poll_sec)
+        elapsed += poll_sec
+
+    logger.warning(f"Order {order_id} not filled within {timeout_sec}s — cancelling")
+    await broker.cancel_order(order_id)
+    return None
+
+
 async def run_live(config: Config) -> None:
     """Run the live or paper trading loop.
 
     Production-grade loop with:
     - Market hours awareness
-    - IBKR reconnection
-    - State persistence
-    - Position reconciliation
-    - Order fill monitoring
+    - IBKR reconnection with exponential backoff
+    - Real daily OHLC bars for signal layer (Yang-Zhang, Parkinson)
+    - VIX3M term structure data
+    - Order fill monitoring with timeout and cancel
+    - State persistence and crash recovery
+    - Position reconciliation on startup
     - Graceful shutdown
     """
     from vrp.broker import IBKRBroker, SpreadOrder
@@ -318,6 +367,7 @@ async def run_live(config: Config) -> None:
     risk_mgr = RiskManager(config.risk)
     signals = SignalAggregator()
     rolling = RollingMetrics(window=63)
+    notifier = TradeNotifier()
 
     # Load saved state
     saved_equity, saved_hwm = load_state(strategy)
@@ -333,7 +383,6 @@ async def run_live(config: Config) -> None:
     if account:
         equity = account.equity
         if saved_hwm > 0:
-            # Use the higher of saved HWM and current equity
             risk_mgr._high_water_mark = max(saved_hwm, equity)
         else:
             risk_mgr._high_water_mark = equity
@@ -345,6 +394,9 @@ async def run_live(config: Config) -> None:
 
     # Reconcile positions with IBKR
     await reconcile_positions(broker, strategy)
+
+    # Seed signal layer with historical bars
+    await seed_signal_layer(broker, signals)
 
     # Save state after reconciliation
     save_state(strategy, equity, risk_mgr._high_water_mark)
@@ -361,6 +413,11 @@ async def run_live(config: Config) -> None:
     signal.signal(signal.SIGINT, handle_shutdown)
 
     cycle = 0
+    prev_equity = equity
+    last_ohlc_date: Optional[date] = None  # track when we last fetched daily bars
+    daily_bar: Optional[Dict] = None       # today's OHLC bar
+    consecutive_errors = 0                 # for exponential backoff on errors
+    pending_orders: Dict[str, Dict] = {}   # order_id -> {pos, action, placed_at}
 
     try:
         while not shutdown_requested:
@@ -369,7 +426,7 @@ async def run_live(config: Config) -> None:
             # ---- Market hours check ----
             if not is_market_hours():
                 now = _now_et()
-                if cycle == 1 or now.minute == 0:  # log once per hour
+                if cycle == 1 or now.minute == 0:
                     print(
                         f"  [{now.strftime('%H:%M ET')}] Market closed — "
                         f"next check in {seconds_until_market_open() // 3600:.0f}h"
@@ -387,24 +444,58 @@ async def run_live(config: Config) -> None:
                     continue
 
             try:
-                # ---- Get market data ----
+                today = date.today()
+
+                # ---- Fetch real daily OHLC once per day ----
+                if last_ohlc_date != today:
+                    bars = await broker.get_daily_bars(
+                        symbol="SPX", duration="5 D",
+                    )
+                    if bars:
+                        # Use the most recent completed bar (yesterday)
+                        # because today's bar isn't complete yet during market hours.
+                        # If we only have today's bar, use it as best available.
+                        daily_bar = bars[-1]  # most recent bar
+                        last_ohlc_date = today
+                        logger.info(
+                            f"Daily OHLC updated: O={daily_bar['open']:.0f} "
+                            f"H={daily_bar['high']:.0f} L={daily_bar['low']:.0f} "
+                            f"C={daily_bar['close']:.0f}"
+                        )
+                    else:
+                        logger.warning("Failed to fetch daily bars — using spot price")
+
+                # ---- Get live market data ----
                 spx_price = await broker.get_spx_price()
                 vix = await broker.get_vix()
+                vix3m = await broker.get_vix3m()  # term structure
 
                 if spx_price is None or vix is None:
                     logger.warning("Missing market data, retrying in 60s")
                     await asyncio.sleep(60)
                     continue
 
-                # Update signal layer (use SPX price as OHLC proxy for live)
-                daily_ret = 0.0  # will be calculated from equity changes
+                # ---- Update signal layer with real OHLC ----
+                # Use yesterday's completed bar for OHLC metrics.
+                # Overlay today's running high/low with the live price.
+                if daily_bar is not None:
+                    bar_open = daily_bar["open"]
+                    bar_high = max(daily_bar["high"], spx_price)
+                    bar_low = min(daily_bar["low"], spx_price)
+                    bar_close = spx_price  # use live price as running close
+                else:
+                    bar_open = bar_high = bar_low = bar_close = spx_price
+
+                daily_ret = (equity / prev_equity - 1.0) if prev_equity > 0 else 0.0
+
                 signal_state = signals.update(
-                    spx_open=spx_price,  # approx — real OHLC from IBKR if available
-                    spx_high=spx_price,
-                    spx_low=spx_price,
-                    spx_close=spx_price,
+                    spx_open=bar_open,
+                    spx_high=bar_high,
+                    spx_low=bar_low,
+                    spx_close=bar_close,
                     vix=vix,
-                    as_of=date.today(),
+                    as_of=today,
+                    vix3m=vix3m,
                     daily_portfolio_return=daily_ret,
                 )
 
@@ -421,7 +512,7 @@ async def run_live(config: Config) -> None:
                     equity=equity,
                     positions=strategy.open_positions,
                     portfolio_greeks=greeks,
-                    as_of=date.today(),
+                    as_of=today,
                 )
 
                 if not risk_state.is_trading_allowed:
@@ -430,14 +521,49 @@ async def run_live(config: Config) -> None:
                         f"  [cycle {cycle}] HALTED: {risk_state.halt_reason} | "
                         f"equity=${equity:,.0f}"
                     )
+                    if cycle == 1 or not getattr(run_live, '_halt_notified', False):
+                        notifier.notify_risk_alert(
+                            risk_state.halt_reason, equity, risk_state.drawdown,
+                        )
+                        run_live._halt_notified = True
                     save_state(strategy, equity, risk_mgr._high_water_mark)
                     await asyncio.sleep(CYCLE_SECONDS)
                     continue
+                else:
+                    run_live._halt_notified = False
+
+                # ---- Check pending order fills ----
+                filled_ids = []
+                for oid, oinfo in list(pending_orders.items()):
+                    status = await broker.get_order_status(oid)
+                    if status and status["status"] == "Filled":
+                        logger.info(
+                            f"Order {oid} filled @ ${status['avg_fill_price']:.2f}"
+                        )
+                        filled_ids.append(oid)
+                    elif status and status["status"] in ("Cancelled", "ApiCancelled"):
+                        logger.warning(f"Order {oid} was cancelled")
+                        # Remove the position if it was an entry
+                        pos = oinfo.get("pos")
+                        if pos and oinfo.get("action") == "open" and pos in strategy.positions:
+                            strategy.positions.remove(pos)
+                        filled_ids.append(oid)
+                    elif (time.time() - oinfo.get("placed_at", 0)) > 120:
+                        # Order has been pending > 2 min — cancel
+                        logger.warning(f"Order {oid} stale (>2min) — cancelling")
+                        await broker.cancel_order(oid)
+                        pos = oinfo.get("pos")
+                        if pos and oinfo.get("action") == "open" and pos in strategy.positions:
+                            strategy.positions.remove(pos)
+                        filled_ids.append(oid)
+
+                for oid in filled_ids:
+                    pending_orders.pop(oid, None)
 
                 # ---- Mark positions to market and evaluate exits ----
                 iv = vix / 100.0
                 actions = strategy.evaluate_positions(
-                    spx_price, vix, iv, as_of=date.today(),
+                    spx_price, vix, iv, as_of=today,
                     risk_free_rate=config.backtest.risk_free_rate,
                 )
 
@@ -447,9 +573,7 @@ async def run_live(config: Config) -> None:
                         TradeAction.CLOSE_STOP,
                         TradeAction.CLOSE_EXPIRY,
                     ):
-                        # Calculate limit price for closing
-                        # current_value is cost to close per contract in dollars
-                        close_limit = pos.current_value / 100.0  # convert to per-share for IBKR
+                        close_limit = pos.current_value / 100.0
 
                         order_id = await broker.close_spread(
                             short_strike=pos.short_leg.strike,
@@ -459,15 +583,23 @@ async def run_live(config: Config) -> None:
                             limit_price=close_limit if close_limit > 0.05 else None,
                         )
                         if order_id:
-                            strategy.close_position(pos, action.value, as_of=date.today())
+                            strategy.close_position(pos, action.value, as_of=today)
                             log_trade(pos, f"close_{action.value}")
+                            signals.record_trade_result(pos.close_pnl)
+                            rolling.add_trade(pos.close_pnl)
+                            pending_orders[order_id] = {
+                                "pos": pos, "action": "close",
+                                "placed_at": time.time(),
+                            }
                             logger.info(
                                 f"Closed {pos.id}: {action.value} | "
                                 f"P&L ${pos.close_pnl:+,.0f} | order {order_id}"
                             )
+                            notifier.notify_trade_close(
+                                pos.id, action.value, pos.close_pnl, pos.days_held,
+                            )
 
                     elif action == TradeAction.ROLL:
-                        # Close existing
                         close_limit = pos.current_value / 100.0
                         order_id = await broker.close_spread(
                             short_strike=pos.short_leg.strike,
@@ -477,19 +609,19 @@ async def run_live(config: Config) -> None:
                             limit_price=close_limit if close_limit > 0.05 else None,
                         )
                         if order_id:
-                            strategy.close_position(pos, "roll", as_of=date.today())
+                            strategy.close_position(pos, "roll", as_of=today)
                             log_trade(pos, "roll_close")
+                            signals.record_trade_result(pos.close_pnl)
+                            rolling.add_trade(pos.close_pnl)
 
-                            # Open new position with further expiry
                             new_pos = strategy.construct_spread(
                                 spx_price=spx_price,
                                 vix=vix,
                                 account_equity=equity,
-                                as_of=date.today(),
+                                as_of=today,
                                 risk_free_rate=config.backtest.risk_free_rate,
                             )
                             if new_pos:
-                                # Place entry order for roll
                                 entry_order = SpreadOrder(
                                     short_strike=new_pos.short_leg.strike,
                                     long_strike=new_pos.long_leg.strike,
@@ -500,18 +632,22 @@ async def run_live(config: Config) -> None:
                                 entry_id = await broker.place_spread(entry_order)
                                 if entry_id:
                                     log_trade(new_pos, "roll_open")
+                                    pending_orders[entry_id] = {
+                                        "pos": new_pos, "action": "open",
+                                        "placed_at": time.time(),
+                                    }
                                     logger.info(f"Roll: closed {pos.id} → opened {new_pos.id}")
                                 else:
-                                    # Roll open failed — remove the position
                                     strategy.positions.remove(new_pos)
 
                 # ---- Check for new entries ----
-                if strategy.should_open_new_trade(spx_price, vix, as_of=date.today(), signal_state=signal_state):
-                    # Try to get real option chain for better strike selection
+                if strategy.should_open_new_trade(
+                    spx_price, vix, as_of=today, signal_state=signal_state,
+                ):
                     available_strikes = None
                     try:
                         from vrp.utils import next_monthly_expiry
-                        target_expiry = next_monthly_expiry(date.today())
+                        target_expiry = next_monthly_expiry(today)
                         chain = await broker.get_option_chain(
                             target_expiry,
                             strike_range=(spx_price * 0.85, spx_price * 0.99),
@@ -528,14 +664,13 @@ async def run_live(config: Config) -> None:
                         spx_price=spx_price,
                         vix=vix,
                         account_equity=equity,
-                        as_of=date.today(),
+                        as_of=today,
                         risk_free_rate=config.backtest.risk_free_rate,
                         available_strikes=available_strikes,
                         signal_state=signal_state,
                     )
 
                     if new_pos:
-                        # Check risk approval
                         allowed, reason = risk_mgr.can_open_trade(
                             risk_state,
                             proposed_risk=new_pos.total_max_risk,
@@ -544,8 +679,6 @@ async def run_live(config: Config) -> None:
                         )
 
                         if allowed:
-                            # entry_credit is in dollars (e.g. $180)
-                            # IBKR limit price is per-share (e.g. $1.80)
                             entry_order = SpreadOrder(
                                 short_strike=new_pos.short_leg.strike,
                                 long_strike=new_pos.long_leg.strike,
@@ -556,6 +689,10 @@ async def run_live(config: Config) -> None:
                             order_id = await broker.place_spread(entry_order)
                             if order_id:
                                 log_trade(new_pos, "open")
+                                pending_orders[order_id] = {
+                                    "pos": new_pos, "action": "open",
+                                    "placed_at": time.time(),
+                                }
                                 logger.info(
                                     f"Opened {new_pos.id}: "
                                     f"sell {new_pos.short_leg.strike}P / "
@@ -564,6 +701,16 @@ async def run_live(config: Config) -> None:
                                     f"${new_pos.entry_credit:.0f} credit | "
                                     f"order {order_id}"
                                 )
+                                notifier.notify_trade_open(
+                                    new_pos.id,
+                                    new_pos.short_leg.strike,
+                                    new_pos.long_leg.strike,
+                                    new_pos.short_leg.expiry.isoformat(),
+                                    new_pos.quantity,
+                                    new_pos.entry_credit,
+                                    new_pos.total_max_risk,
+                                    spx_price, vix,
+                                )
                             else:
                                 logger.warning(f"Order placement failed for {new_pos.id}")
                                 strategy.positions.remove(new_pos)
@@ -571,14 +718,17 @@ async def run_live(config: Config) -> None:
                             logger.info(f"Trade rejected by risk: {reason}")
                             strategy.positions.remove(new_pos)
 
-                # ---- Save state after every cycle ----
+                # ---- Save state and update equity tracking ----
                 save_state(strategy, equity, risk_mgr._high_water_mark)
+                prev_equity = equity
+                consecutive_errors = 0  # reset on successful cycle
 
                 # ---- Print status ----
                 now = _now_et()
                 n_open = len(strategy.open_positions)
                 unrealized = sum(p.current_pnl for p in strategy.open_positions)
                 total_risk = sum(p.total_max_risk for p in strategy.open_positions)
+                ts_str = f"TS={signal_state.vix_vix3m_ratio:.2f}" if vix3m else "TS=n/a"
                 print(
                     f"  [{now.strftime('%H:%M')}] "
                     f"equity=${equity:>10,.0f} | "
@@ -586,16 +736,22 @@ async def run_live(config: Config) -> None:
                     f"risk=${total_risk:>8,.0f} | "
                     f"unreal=${unrealized:>+8,.0f} | "
                     f"DD={risk_state.drawdown:>+6.1%} | "
-                    f"SPX={spx_price:.0f} VIX={vix:.1f}"
+                    f"SPX={spx_price:.0f} VIX={vix:.1f} {ts_str} | "
+                    f"sig={signal_state.sizing_scalar:.2f}"
                 )
 
             except Exception as e:
+                consecutive_errors += 1
                 logger.error(f"Cycle {cycle} error: {e}", exc_info=True)
-                # Save state even on error
                 try:
                     save_state(strategy, equity, risk_mgr._high_water_mark)
-                except:
+                except Exception:
                     pass
+                # Exponential backoff on repeated errors (cap at 5 min)
+                backoff = min(CYCLE_SECONDS * (2 ** min(consecutive_errors - 1, 4)), 300)
+                logger.info(f"Backing off {backoff}s after {consecutive_errors} consecutive errors")
+                await asyncio.sleep(backoff)
+                continue  # skip the normal sleep
 
             await asyncio.sleep(CYCLE_SECONDS)
 
@@ -606,11 +762,11 @@ async def run_live(config: Config) -> None:
         try:
             save_state(strategy, equity, risk_mgr._high_water_mark)
             print(f"\nState saved to {STATE_FILE}")
-        except:
+        except Exception:
             pass
         try:
             await broker.disconnect()
-        except:
+        except Exception:
             pass
         print("Disconnected. Goodbye.")
 

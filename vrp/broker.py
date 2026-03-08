@@ -530,6 +530,140 @@ class IBKRBroker:
 
         return result
 
+    async def get_daily_bars(
+        self,
+        symbol: str = "SPX",
+        exchange: str = "CBOE",
+        duration: str = "30 D",
+        bar_size: str = "1 day",
+    ) -> List[Dict]:
+        """Fetch historical daily OHLC bars from IBKR.
+
+        Parameters
+        ----------
+        symbol : Index or stock symbol
+        exchange : Exchange code
+        duration : How far back (e.g. '30 D', '60 D')
+        bar_size : Bar granularity ('1 day')
+
+        Returns
+        -------
+        List of dicts with keys: date, open, high, low, close, volume
+        """
+        if not self.is_connected:
+            return []
+
+        try:
+            try:
+                from ib_async import Index
+            except ImportError:
+                from ib_insync import Index
+
+            contract = Index(symbol, exchange)
+            self._ib.qualifyContracts(contract)
+
+            bars = self._ib.reqHistoricalData(
+                contract,
+                endDateTime="",
+                durationStr=duration,
+                barSizeSetting=bar_size,
+                whatToShow="TRADES",
+                useRTH=True,
+                formatDate=1,
+            )
+
+            if not bars:
+                logger.warning(f"No historical bars returned for {symbol}")
+                return []
+
+            result = []
+            for bar in bars:
+                result.append({
+                    "date": bar.date if hasattr(bar, "date") else str(bar),
+                    "open": float(bar.open),
+                    "high": float(bar.high),
+                    "low": float(bar.low),
+                    "close": float(bar.close),
+                    "volume": int(bar.volume) if bar.volume else 0,
+                })
+
+            logger.info(f"Retrieved {len(result)} daily bars for {symbol}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to get daily bars for {symbol}: {e}")
+            return []
+
+    async def get_vix3m(self) -> Optional[float]:
+        """Get current VIX3M (3-month VIX) level for term structure analysis."""
+        if not self.is_connected:
+            return None
+
+        try:
+            try:
+                from ib_async import Index
+            except ImportError:
+                from ib_insync import Index
+
+            # VIX3M = CBOE 3-Month Volatility Index
+            contract = Index("VIX3M", "CBOE")
+            self._ib.qualifyContracts(contract)
+
+            ticker = self._ib.reqMktData(contract, "", False, False)
+            await asyncio.sleep(2)
+
+            vix3m = ticker.last or ticker.close
+            self._ib.cancelMktData(contract)
+
+            return float(vix3m) if vix3m else None
+
+        except Exception as e:
+            logger.warning(f"Failed to get VIX3M: {e}")
+            return None
+
+    async def get_order_status(self, order_id: str) -> Optional[Dict]:
+        """Check the fill status of an order.
+
+        Returns
+        -------
+        Dict with keys: status, filled, remaining, avg_fill_price
+        """
+        if not self.is_connected:
+            return None
+
+        try:
+            trades = self._ib.trades()
+            for trade in trades:
+                if str(trade.order.orderId) == order_id:
+                    return {
+                        "status": trade.orderStatus.status,
+                        "filled": trade.orderStatus.filled,
+                        "remaining": trade.orderStatus.remaining,
+                        "avg_fill_price": trade.orderStatus.avgFillPrice,
+                    }
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get order status for {order_id}: {e}")
+            return None
+
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel an open order."""
+        if not self.is_connected:
+            return False
+
+        try:
+            trades = self._ib.trades()
+            for trade in trades:
+                if str(trade.order.orderId) == order_id:
+                    self._ib.cancelOrder(trade.order)
+                    logger.info(f"Cancelled order {order_id}")
+                    return True
+            logger.warning(f"Order {order_id} not found for cancellation")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to cancel order {order_id}: {e}")
+            return False
+
 
 # ---------------------------------------------------------------------------
 # Simulated Broker (for testing without IBKR connection)

@@ -86,6 +86,13 @@ class SpreadConfig:
     max_concurrent_positions: int = 2
     # Maximum total risk as fraction of account
     max_total_risk_pct: float = 1.00  # Allow up to 100%
+    # XSP (mini-SPX) support: 1/10th size contracts for small accounts.
+    # XSP multiplier is $100 vs SPX $100 per point — same multiplier,
+    # but XSP trades in ~1/10th the strike range ($540 vs $5400).
+    # Set to True to auto-detect based on account size, or force with env var.
+    use_xsp: bool = False
+    # Account threshold below which we auto-switch to XSP
+    xsp_equity_threshold: float = 10_000.0
 
 
 @dataclass

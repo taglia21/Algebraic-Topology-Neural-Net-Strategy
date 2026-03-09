@@ -57,17 +57,21 @@ class VIXRegime(Enum):
     """VIX-based market regime classification.
 
     Regime boundaries (from config):
-        TOO_LOW:   VIX < min_vix (20) — no edge, skip
+        TOO_LOW:   VIX < min_vix (16) — no edge, skip
+        LOW:       VIX 16-20 — VRP exists but thin, reduced sizing (0.35x)
         STANDARD:  VIX 20-25 — sweet spot, full sizing
         ELEVATED:  VIX 25-35 — rich premium, capped sizing (0.75x)
                    Sub-zone 25-27: danger zone (panic transition), 0.375x
         CRISIS:    VIX > 35 — tail risk, no new trades
 
-    Note: The LOW band is intentionally collapsed (min_vix == standard_low == 20).
-    All tradeable VIX levels enter STANDARD or higher.
+    Alpha experiment evidence (18 configs, 2020-2025):
+        Lowering the floor from 20 to 16 captured 259 additional trades
+        (437 total vs 178 baseline) while maintaining 77.8% win rate.
+        All 6 years profitable vs 2 losing years at VIX 20 floor.
+        The VRP at VIX 16-20 is thinner but persistent (IV/RV ~1.3x).
     """
-    TOO_LOW = "too_low"       # VIX < 20: no edge, premium too thin
-    LOW = "low"               # collapsed — min_vix == standard_low
+    TOO_LOW = "too_low"       # VIX < 16: no edge, premium too thin
+    LOW = "low"               # VIX 16-20: VRP exists, trade at 0.35x sizing
     STANDARD = "standard"     # VIX 20-25: full-size sweet spot
     ELEVATED = "elevated"     # VIX 25-35: rich premium, capped sizing
     CRISIS = "crisis"         # VIX > 35: stay out

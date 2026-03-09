@@ -93,13 +93,13 @@ class TestVIXRegime:
     def test_too_low(self):
         assert self.classifier.classify(10) == VIXRegime.TOO_LOW
         assert self.classifier.sizing_multiplier(10) == 0.0
-        assert self.classifier.classify(19) == VIXRegime.TOO_LOW  # below min_vix=20
+        assert self.classifier.classify(15) == VIXRegime.TOO_LOW  # below min_vix=16
 
     def test_low(self):
-        # With min_vix=20 and standard_low=20, the LOW band is empty.
-        # VIX 20 lands directly in STANDARD. This is by design:
-        # the VIX 20 floor means everything at or above 20 trades.
-        pass
+        # With min_vix=16, the LOW band is VIX 16-20.
+        # Trades at reduced sizing (0.35x).
+        assert self.classifier.classify(18) == VIXRegime.LOW
+        assert self.classifier.sizing_multiplier(18) == self.config.vix.low_vol_sizing_mult
 
     def test_standard(self):
         assert self.classifier.classify(22) == VIXRegime.STANDARD
@@ -189,16 +189,24 @@ class TestPositionManager:
         )
 
     def test_profit_target(self):
-        """50% profit should trigger close."""
-        pos = self._make_position(entry_credit=800, current_value=350)
-        # PnL = (800 - 350) / 800 = 56% > 50%
+        """45% profit should trigger close when DTE > tight_profit_dte."""
+        # Use expiry far enough out that DTE > tight_profit_dte (21)
+        pos = self._make_position(
+            entry_credit=800, current_value=350,
+            expiry=date.today() + timedelta(days=30),
+        )
+        # PnL = (800 - 350) / 800 = 56% > 45% profit target
         action = self.manager.evaluate(pos, spx_price=5050, vix=16)
         assert action == TradeAction.CLOSE_PROFIT
 
     def test_hold_below_target(self):
         """Below profit target should hold."""
-        pos = self._make_position(entry_credit=800, current_value=500)
-        # PnL = (800 - 500) / 800 = 37.5% < 50%
+        # Use expiry far enough out that DTE > tight_profit_dte (21)
+        pos = self._make_position(
+            entry_credit=800, current_value=500,
+            expiry=date.today() + timedelta(days=30),
+        )
+        # PnL = (800 - 500) / 800 = 37.5% < 45% profit target
         action = self.manager.evaluate(pos, spx_price=5050, vix=16)
         assert action == TradeAction.HOLD
 
@@ -321,7 +329,7 @@ class TestStrategyIntegration:
         config = get_config()
         strategy = VRPStrategy(config)
 
-        # Should want to trade at VIX 22 (above min_vix=20)
+        # Should want to trade at VIX 22 (above min_vix=16, in STANDARD band)
         assert strategy.should_open_new_trade(
             spx_price=5000, vix=22, spx_200sma=4800
         )
@@ -356,14 +364,14 @@ class TestStrategyIntegration:
         )
 
     def test_no_trade_in_low_vol(self):
-        """Should not open trades when VIX < 20 (min_vix floor)."""
+        """Should not open trades when VIX < 16 (min_vix floor)."""
         config = get_config()
         strategy = VRPStrategy(config)
         assert not strategy.should_open_new_trade(
             spx_price=5500, vix=10, spx_200sma=5000
         )
         assert not strategy.should_open_new_trade(
-            spx_price=5500, vix=19, spx_200sma=5000
+            spx_price=5500, vix=15, spx_200sma=5000
         )
 
     def test_respects_max_positions(self):
@@ -372,7 +380,7 @@ class TestStrategyIntegration:
         config.spread.max_concurrent_positions = 1
         strategy = VRPStrategy(config)
 
-        # Open first position (VIX=22, above min_vix=20)
+        # Open first position (VIX=22, above min_vix=16, in STANDARD band)
         pos1 = strategy.construct_spread(
             spx_price=5000, vix=22, account_equity=10000,
             as_of=date(2025, 1, 10),
@@ -470,7 +478,7 @@ class TestDynamicWidth:
         config = get_config()
         strategy = VRPStrategy(config)
 
-        # Normal equity — should use default width (15) at VIX 22 (above min_vix=20)
+        # Normal equity — should use default width (15) at VIX 22 (STANDARD band)
         pos1 = strategy.construct_spread(
             spx_price=5000, vix=22, account_equity=10000,
             as_of=date(2025, 1, 15),

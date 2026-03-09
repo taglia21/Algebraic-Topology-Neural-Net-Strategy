@@ -319,7 +319,7 @@ class RegimePerformance:
 
 def analyze_by_regime(
     trades: List[dict],
-    regime_thresholds: Tuple[float, float, float, float] = (12, 14, 20, 35),
+    regime_thresholds: Tuple[float, float, float, float] = (20, 20, 25, 35),
 ) -> Dict[str, RegimePerformance]:
     """Analyze trade performance by VIX regime at entry.
 
@@ -327,6 +327,8 @@ def analyze_by_regime(
     ----------
     trades : List of trade dicts with 'vix_at_entry', 'close_pnl', 'days_held'
     regime_thresholds : (too_low, low_standard, standard_elevated, elevated_crisis)
+        Default mirrors active config: min_vix=20, standard_low=20,
+        standard_high=25, max_vix=35.
 
     Returns
     -------

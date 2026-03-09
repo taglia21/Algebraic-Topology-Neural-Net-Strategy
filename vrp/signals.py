@@ -700,8 +700,10 @@ class SignalAggregator:
                 state.sizing_scalar *= 0.75
 
             # Kelly fraction (replaces fixed risk_per_trade)
+            # Normalize against the actual risk_per_trade (0.25) so Kelly
+            # output is a scalar multiplier around 1.0.
             if self.kelly.total_trades >= self.kelly.min_trades:
-                state.sizing_scalar *= self.kelly.kelly_fraction / 0.50  # normalize vs default 50%
+                state.sizing_scalar *= self.kelly.kelly_fraction / 0.25
 
             # Floor
             state.sizing_scalar = max(0.25, min(2.0, state.sizing_scalar))

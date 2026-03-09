@@ -43,8 +43,8 @@ PARAM_GRID = {
     "short_delta_target": [-0.10, -0.12, -0.15, -0.18],
     "spread_width": [10, 15, 20],
     "profit_target_pct": [0.40, 0.50, 0.60],
-    "stop_loss_multiple": [2.5, 3.0, 3.5],
-    "min_vix": [13.0, 14.0, 15.0],
+    "stop_loss_multiple": [1.5, 2.0, 2.5],
+    "min_vix": [18.0, 20.0, 22.0],
 }
 
 

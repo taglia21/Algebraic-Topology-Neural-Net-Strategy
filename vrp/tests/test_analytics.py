@@ -167,17 +167,21 @@ class TestRegimeAnalysis:
             {"vix_at_entry": 25, "close_pnl": 300, "days_held": 10},
             {"vix_at_entry": 40, "close_pnl": -500, "days_held": 5},
         ]
+        # Default thresholds (20,20,25,35): VIX<20→TOO_LOW, 20-25→STANDARD,
+        # 25-35→ELEVATED, >35→CRISIS.  LOW band collapsed (min_vix==standard_low).
         results = analyze_by_regime(trades)
-        assert results["TOO_LOW"].n_trades == 1
-        assert results["STANDARD"].n_trades == 2
-        assert results["ELEVATED"].n_trades == 1
-        assert results["CRISIS"].n_trades == 1
+        assert results["TOO_LOW"].n_trades == 3   # VIX 10, 15, 17 all < 20
+        assert results["STANDARD"].n_trades == 1   # VIX 25 (20 <= 25 <= 25)
+        assert results["ELEVATED"].n_trades == 0   # nothing in 25-35 exclusive
+        assert results["CRISIS"].n_trades == 1     # VIX 40 > 35
 
     def test_empty_regime(self):
         trades = [{"vix_at_entry": 17, "close_pnl": 100, "days_held": 20}]
+        # VIX 17 < 20 → TOO_LOW under current thresholds
         results = analyze_by_regime(trades)
         assert results["CRISIS"].n_trades == 0
-        assert results["STANDARD"].n_trades == 1
+        assert results["TOO_LOW"].n_trades == 1
+        assert results["STANDARD"].n_trades == 0
 
 
 # ---------------------------------------------------------------------------

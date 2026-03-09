@@ -245,9 +245,10 @@ class VRPBacktester:
         # Signal layer + analytics (new)
         self.signals = SignalAggregator()
         self.rolling = RollingMetrics(window=63)
-        self._signal_blocks = 0  # count how many days signals blocked entry
-        self._halt_days = 0      # counter for drawdown halt cooling period
-        self._HALT_COOLDOWN = 10  # trading days to wait before resuming after DD halt
+        self._signal_blocks = 0    # count how many days signals blocked entry
+        self._halt_days = 0        # counter for drawdown halt cooling period
+        self._HALT_COOLDOWN = 10   # trading days to wait before resuming after DD halt
+        self._signal_log: List[dict] = []  # per-trade signal state snapshot
 
     def run(
         self,
@@ -424,10 +425,15 @@ class VRPBacktester:
                 self._signal_blocks += 1
 
             if should_trade:
+                # Size off CASH, not equity (which includes unrealized PnL).
+                # Using equity inflates sizing during mark-to-market gains
+                # and understates it during drawdowns — classic retail mistake.
+                # Cash is a conservative, realized-only measure.
+                sizing_equity = min(self.cash, self.equity)
                 new_pos = self.strategy.construct_spread(
                     spx_price=spx,
                     vix=vix,
-                    account_equity=self.equity,
+                    account_equity=sizing_equity,
                     as_of=today,
                     risk_free_rate=self.config.backtest.risk_free_rate,
                     signal_state=signal_state,
@@ -441,6 +447,16 @@ class VRPBacktester:
                     self.cash -= entry_comm + entry_slip
                     self.total_commissions += entry_comm
                     self.total_slippage += entry_slip
+                    # Log signal state at entry for post-hoc analysis
+                    self._signal_log.append({
+                        "id": new_pos.id,
+                        "date": str(today),
+                        "vrp_spread": signal_state.vrp_spread if signal_state else 0,
+                        "gap_risk": signal_state.gap_risk_ratio if signal_state else 1.0,
+                        "ewma_vol": signal_state.ewma_vol if signal_state else 0,
+                        "sizing_scalar": signal_state.sizing_scalar if signal_state else 1.0,
+                        "event": signal_state.next_event if signal_state else "",
+                    })
 
             # ----- Update equity -----
             # Equity = cash + unrealized P&L on open positions
@@ -648,6 +664,9 @@ class VRPBacktester:
                 for t in self.closed_trades
             ],
         }
+
+        # Include signal log for analysis
+        results["signal_log"] = self._signal_log
 
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, "w") as f:

@@ -54,11 +54,22 @@ class TradeAction(Enum):
 
 
 class VIXRegime(Enum):
-    """VIX-based market regime classification."""
-    TOO_LOW = "too_low"       # VIX < 16: premium too thin
-    LOW = "low"               # VIX 16-16: reduced sizing (narrow band)
-    STANDARD = "standard"     # VIX 16-22: normal operations (sweet spot)
-    ELEVATED = "elevated"     # VIX 22-35: rich premium, size up modestly
+    """VIX-based market regime classification.
+
+    Regime boundaries (from config):
+        TOO_LOW:   VIX < min_vix (20) — no edge, skip
+        STANDARD:  VIX 20-25 — sweet spot, full sizing
+        ELEVATED:  VIX 25-35 — rich premium, capped sizing (0.75x)
+                   Sub-zone 25-27: danger zone (panic transition), 0.375x
+        CRISIS:    VIX > 35 — tail risk, no new trades
+
+    Note: The LOW band is intentionally collapsed (min_vix == standard_low == 20).
+    All tradeable VIX levels enter STANDARD or higher.
+    """
+    TOO_LOW = "too_low"       # VIX < 20: no edge, premium too thin
+    LOW = "low"               # collapsed — min_vix == standard_low
+    STANDARD = "standard"     # VIX 20-25: full-size sweet spot
+    ELEVATED = "elevated"     # VIX 25-35: rich premium, capped sizing
     CRISIS = "crisis"         # VIX > 35: stay out
 
 
@@ -138,16 +149,15 @@ class SpreadPosition:
 class VIXRegimeClassifier:
     """Classify current VIX level into a trading regime.
 
-    This replaces the previous HMM regime detector with a simple,
-    transparent, parameter-sparse approach. VIX levels are directly
-    observable (no latent state estimation) and the thresholds are
-    economically motivated:
+    Simple, transparent, parameter-sparse approach. VIX levels are directly
+    observable and thresholds are empirically calibrated from 5-year
+    per-VIX-point P&L audit:
 
-    - Below 12: historically, selling premium in sub-12 VIX environments
-      produces negative risk-adjusted returns (gamma > theta)
-    - 14-20: the "sweet spot" where VRP is consistently positive
-    - 20-35: elevated premium offers better entry but wider spreads needed
-    - Above 35: regime break risk (2008, 2020 March) makes entry dangerous
+    - Below 20: zero or negative per-trade edge (VIX 14-18: $10, VIX 19-20: -$18)
+    - 20-25: sweet spot ($76-97/trade avg), full sizing
+    - 25-27: danger zone (-$128/trade), panic-transition regime, 0.375x sizing
+    - 27-35: best returns ($77-213/trade), 0.75x sizing
+    - Above 35: regime break risk (2008, 2020, 2025 tariff crash)
     """
 
     def __init__(self, config: VIXRegimeConfig) -> None:
@@ -325,14 +335,18 @@ class StrikeSelector:
             return None
 
         # Dynamic spread width based on account size and VIX
-        width = self.cfg.spread_width  # 25 pts default
+        width = self.cfg.spread_width  # 15 pts default
         # Adjust width to what the account can actually afford
         if hasattr(self, '_account_equity') and self._account_equity > 0:
             # Reserve 20% of equity as buffer — can't risk everything on one spread
             max_affordable = int(self._account_equity * 0.80 / 100)
             width = min(width, max(10, max_affordable))  # floor at 10 points
-        # In elevated VIX (>25), widen for richer premium — but only if affordable
-        if vix > 25:
+        # VIX 25-27 danger zone: NARROW spread to reduce max loss.
+        # Audit showed -$128/trade here — limit damage by using minimum width.
+        if 25 <= vix < 27:
+            width = 10  # absolute minimum, caps risk at $1,000/contract
+        elif vix >= 27:
+            # VIX 27+: widen for richer premium — but only if affordable
             target_width = width + 10  # try 10 pts wider
             if hasattr(self, '_account_equity') and self._account_equity > 0:
                 max_affordable = int(self._account_equity * 0.80 / 100)

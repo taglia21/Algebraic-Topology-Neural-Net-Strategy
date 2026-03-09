@@ -277,6 +277,9 @@ class SystemOrchestrator:
                             _broker_eq_now = float(getattr(_acct_now, 'equity', _broker_eq_now))
                         except Exception:
                             pass
+                    # Reset broker SOD equity for daily P&L tracking
+                    if hasattr(broker, 'reset_daily'):
+                        broker.reset_daily()
                     kill_switch.reset_daily(_broker_eq_now)
                     logger.info(f"Daily reset: SOD equity=${_broker_eq_now:,.2f}")
                     _last_trading_date = _today

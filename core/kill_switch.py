@@ -72,7 +72,7 @@ class CircuitBreakerConfig:
     max_consecutive_losses: int = 5
     max_open_positions: int = 30
     max_orders_per_minute: int = 20
-    cooldown_minutes: float = 30.0
+    cooldown_minutes: float = 9999.0  # no same-day auto-resume; reset_daily() releases
 
 
 class KillSwitch:

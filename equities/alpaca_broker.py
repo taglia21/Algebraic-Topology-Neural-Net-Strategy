@@ -122,6 +122,8 @@ class AlpacaBroker(Broker):
         try:
             acct = self._client.get_account()
             self._peak_equity = float(acct.equity)
+            # Start-of-day equity for daily P&L tracking
+            self._sod_equity: float = float(acct.equity)
             logger.info(
                 f"AlpacaBroker connected: account={acct.id}, "
                 f"equity=${float(acct.equity):,.2f}, "
@@ -354,6 +356,24 @@ class AlpacaBroker(Broker):
                     f"{exc}. Retrying in {wait:.1f}s ..."
                 )
                 time.sleep(wait)
+
+    @property
+    def sod_equity(self) -> float:
+        """Start-of-day equity snapshot (for daily P&L computation)."""
+        return self._sod_equity
+
+    def reset_daily(self) -> None:
+        """Reset start-of-day equity for daily P&L tracking.
+
+        Called once at each market open.  Updates ``_sod_equity`` so the
+        ExecutionManager's daily-loss check uses today's opening equity.
+        """
+        try:
+            acct = self._client.get_account()
+            self._sod_equity = float(acct.equity)
+        except Exception as exc:
+            logger.warning(f"AlpacaBroker.reset_daily: failed to fetch equity: {exc}")
+        logger.info(f"AlpacaBroker: reset_daily — sod_equity=${self._sod_equity:,.2f}")
 
     @property
     def fill_history(self) -> List[Fill]:

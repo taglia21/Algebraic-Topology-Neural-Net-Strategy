@@ -796,7 +796,7 @@ class ExecutionManager:
         risk_manager: RiskManager,
         trade_logger: Optional[TradeLogger] = None,
         order_type: str = "market",
-        max_position_value: float = 50_000.0,
+        max_position_value: float = 5_000.0,
     ) -> None:
         self._broker = broker
         self._risk_manager = risk_manager
@@ -837,6 +837,17 @@ class ExecutionManager:
         portfolio_state = self._broker.get_portfolio_state()
         submitted: List[Order] = []
 
+        # ── Position cap gate ──
+        _MAX_TOTAL_POSITIONS = 25
+        _current_pos_count = len(portfolio_state.positions)
+        if _current_pos_count >= _MAX_TOTAL_POSITIONS:
+            signals = [s for s in signals if s.direction == "close"]
+            if not signals:
+                logger.info(
+                    f"ExecutionManager: position cap ({_current_pos_count}/{_MAX_TOTAL_POSITIONS}) — only close signals"
+                )
+                return submitted
+
         for signal in signals:
             symbol = signal.symbol
             price = current_prices.get(symbol)
@@ -853,10 +864,35 @@ class ExecutionManager:
                 submitted.extend(close_orders)
                 continue
 
+            # ── Min signal strength gate ──
+            # Find the best raw (pre-scale) strength from metadata.
+            # In merged signals, keys are prefixed: e.g. mean_reversion__pre_scale_strength
+            _raw_str = signal.metadata.get("pre_scale_strength", None)
+            if _raw_str is None:
+                # Look for prefixed keys from merged signals
+                _pre_scales = [
+                    v for k, v in signal.metadata.items()
+                    if k.endswith("__pre_scale_strength") and isinstance(v, (int, float))
+                ]
+                _raw_str = max(_pre_scales) if _pre_scales else signal.strength
+            _MIN_RAW_STRENGTH = 0.20
+            if abs(float(_raw_str)) < _MIN_RAW_STRENGTH:
+                logger.info(
+                    f"ExecutionManager: {symbol} raw strength {float(_raw_str):.3f} < {_MIN_RAW_STRENGTH} — skip"
+                )
+                continue
+
+            # ── Short-selling gate ──
+            if signal.direction == "short" and abs(signal.strength) < 0.50:
+                logger.info(
+                    f"ExecutionManager: blocking short {symbol} — strength {signal.strength:.3f} < 0.50"
+                )
+                continue
+
             # Size the order
             qty = self._compute_order_qty(signal, price, portfolio_state)
             if qty <= 0:
-                logger.debug(
+                logger.info(
                     f"ExecutionManager: signal for {symbol!r} sized to 0 shares; skipping."
                 )
                 continue
@@ -884,7 +920,6 @@ class ExecutionManager:
                     sym: pos.market_value
                     for sym, pos in portfolio_state.positions.items()
                 },
-                sod_equity=sod_equity if sod_equity and sod_equity > 0 else portfolio_state.equity,
             )
 
             approval = self._risk_manager.approve_trade(
@@ -1052,11 +1087,11 @@ class ExecutionManager:
         equity = max(portfolio_state.equity, 1.0)
 
         # --- Gross exposure cap (150% of equity) ---
-        _MAX_GROSS_EXPOSURE_PCT = 1.50
+        _MAX_GROSS_EXPOSURE_PCT = 0.95
         current_gross = portfolio_state.gross_exposure
         remaining_capacity = max(equity * _MAX_GROSS_EXPOSURE_PCT - current_gross, 0.0)
         if remaining_capacity <= 0:
-            logger.debug(
+            logger.info(
                 f"ExecutionManager: gross exposure at {current_gross / equity:.1%} "
                 f"of equity — no capacity for {signal.symbol}"
             )
@@ -1090,6 +1125,20 @@ class ExecutionManager:
 
         # Don't exceed remaining gross exposure capacity
         target_notional = min(target_notional, remaining_capacity)
+
+        # Deduct existing position value to prevent over-sizing.
+        # If we already hold $4,800 of GOOGL and target is $5,000,
+        # we should only buy $200 more, not another $5,000.
+        existing_pos = portfolio_state.positions.get(signal.symbol)
+        if existing_pos is not None:
+            existing_mv = abs(existing_pos.market_value)
+            target_notional -= existing_mv
+            if target_notional <= 0:
+                logger.debug(
+                    f"ExecutionManager: {signal.symbol} already at target "
+                    f"(held=${existing_mv:,.0f}, target=${self._max_position_value:,.0f}) — skip"
+                )
+                return 0
 
         qty = int(target_notional / max(price, 0.01))
         return max(qty, 0)

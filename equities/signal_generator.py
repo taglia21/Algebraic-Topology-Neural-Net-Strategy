@@ -13,14 +13,12 @@ Regime-Dependent Strategy Allocations
 ::
 
     BULL:     stat_arb= 5%, momentum=50%, factor=30%, mean_rev=13%  (total 98% deployed)
-    BEAR:     stat_arb=25%, momentum=15%, factor=25%, mean_rev=30%  (total 95% deployed)
-    SIDEWAYS: stat_arb=25%, momentum=30%, factor=25%, mean_rev=18%  (total 98% deployed)
-    UNKNOWN:  stat_arb=20%, momentum=30%, factor=25%, mean_rev=20%  (total 95% deployed)
-    CRISIS:   stat_arb=25%, momentum= 5%, factor=15%, mean_rev=35%  (total 80% deployed)
+    BEAR:     stat_arb=45%, momentum=10%, factor=30%  (total 85% deployed)
+    SIDEWAYS: stat_arb=25%, momentum=35%, factor=25%  (total 85% deployed)
+    UNKNOWN:  stat_arb=20%, momentum=30%, factor=25%  (total 75% deployed)
+    CRISIS:   stat_arb=30%, momentum= 5%, factor=20%  (total 55% deployed)
 
-Maximum capital deployment is critical — the old 75-90% allocations left
-the system sitting in 10-25% cash, which is the single largest drag on
-returns vs SPY.
+The remaining allocation stays in cash / is not allocated.
 
 Conflict Resolution
 -------------------
@@ -44,9 +42,9 @@ from core.logger import TradeLogger, get_trade_logger
 from core.regime_detector import Regime, RegimeState
 from equities.models import Signal
 from equities.strategies.factor_model import FactorModelStrategy
-from equities.strategies.mean_reversion import MeanReversionStrategy
 from equities.strategies.momentum import MomentumStrategy
 from equities.strategies.stat_arb import StatArbStrategy
+from equities.strategies.mean_reversion import MeanReversionStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -55,58 +53,58 @@ logger = logging.getLogger(__name__)
 # Regime → Strategy allocation tables
 # ---------------------------------------------------------------------------
 
-# Allocations by regime — deploy 95-100% of capital in all regimes.
-# Holding excessive cash is the #1 drag on returns vs SPY.
+# Allocations by regime (sum < 1.0 intentionally — remaining stays in cash)
 _REGIME_ALLOCATIONS: Dict[str, Dict[str, float]] = {
     Regime.BULL.value: {
-        "stat_arb":       0.05,
-        "momentum":       0.50,
-        "factor_model":   0.30,
-        "mean_reversion": 0.13,
-    },  # total 98% — heavy momentum + factor = long-biased
+        StatArbStrategy.STRATEGY_NAME:          0.05,
+        MomentumStrategy.STRATEGY_NAME:         0.50,
+        FactorModelStrategy.STRATEGY_NAME:      0.30,
+        MeanReversionStrategy.STRATEGY_NAME:    0.13,
+    },
     Regime.BEAR.value: {
-        "stat_arb":       0.25,
-        "momentum":       0.15,
-        "factor_model":   0.25,
-        "mean_reversion": 0.30,
-    },  # total 95%
+        StatArbStrategy.STRATEGY_NAME:          0.25,
+        MomentumStrategy.STRATEGY_NAME:         0.15,
+        FactorModelStrategy.STRATEGY_NAME:      0.25,
+        MeanReversionStrategy.STRATEGY_NAME:    0.30,
+    },
     Regime.SIDEWAYS.value: {
-        "stat_arb":       0.25,
-        "momentum":       0.30,
-        "factor_model":   0.25,
-        "mean_reversion": 0.18,
-    },  # total 98%
+        StatArbStrategy.STRATEGY_NAME:          0.25,
+        MomentumStrategy.STRATEGY_NAME:         0.30,
+        FactorModelStrategy.STRATEGY_NAME:      0.25,
+        MeanReversionStrategy.STRATEGY_NAME:    0.18,
+    },
     Regime.UNKNOWN.value: {
-        "stat_arb":       0.20,
-        "momentum":       0.30,
-        "factor_model":   0.25,
-        "mean_reversion": 0.20,
-    },  # total 95%
+        # Unknown regime: moderate equal-weight
+        StatArbStrategy.STRATEGY_NAME:          0.20,
+        MomentumStrategy.STRATEGY_NAME:         0.30,
+        FactorModelStrategy.STRATEGY_NAME:      0.25,
+        MeanReversionStrategy.STRATEGY_NAME:    0.20,
+    },
 }
 
-# Crisis override — still deploy 80% of capital.  Crisis is a regime, not a
-# reason to sit in cash.  Mean reversion and stat-arb thrive in high-vol.
+# Crisis override — reduced exposure but still trading.
+# Previous version zeroed out momentum entirely, causing the system to sit
+# idle during bear markets and miss mean-reversion opportunities.
 _CRISIS_ALLOCATIONS: Dict[str, float] = {
-    "stat_arb":       0.25,
-    "momentum":       0.05,
-    "factor_model":   0.15,
-    "mean_reversion": 0.35,
-}  # total 80%
+    StatArbStrategy.STRATEGY_NAME:          0.25,
+    MomentumStrategy.STRATEGY_NAME:         0.05,   # minimal but non-zero
+    FactorModelStrategy.STRATEGY_NAME:      0.15,
+    MeanReversionStrategy.STRATEGY_NAME:    0.35,
+}
 
 # Minimum weighted strength to keep a combined signal (avoids noise)
-_MIN_COMBINED_STRENGTH: float = 0.02
+_MIN_COMBINED_STRENGTH: float = 0.05
 
 # Cancellation threshold: if opposing signals are within this band, emit close
 _CANCELLATION_THRESHOLD: float = 0.15
 
-# Directional bias: softer penalties so capital actually deploys.
-# Previous 0.40 short penalty in BULL killed stat-arb pair shorts entirely.
+# Regime directional bias: in BULL, penalise short signals; in BEAR, penalise longs.
+# A multiplier of 0.25 means short signals keep only 25% of their strength in BULL.
 _REGIME_DIRECTION_BIAS: Dict[str, Dict[str, float]] = {
-    Regime.BULL.value:     {"long": 1.3, "short": 0.60},
-    Regime.BEAR.value:     {"long": 0.6, "short": 1.2},
-    Regime.SIDEWAYS.value: {"long": 1.1, "short": 0.80},
-    Regime.UNKNOWN.value:  {"long": 1.0, "short": 0.70},
-    "CRISIS":              {"long": 0.3, "short": 1.4},  # Crisis (VIX>=35): suppress longs, favor shorts
+    Regime.BULL.value:     {"long": 1.5, "short": 0.20},
+    Regime.BEAR.value:     {"long": 0.5, "short": 1.2},
+    Regime.SIDEWAYS.value: {"long": 1.1, "short": 0.7},
+    Regime.UNKNOWN.value:  {"long": 1.0, "short": 0.6},
 }
 
 
@@ -209,6 +207,7 @@ class SignalGenerator:
         price_data: pd.DataFrame,
         regime_state: RegimeState,
         fundamental_data: Optional[pd.DataFrame] = None,
+        volume_data: Optional[pd.DataFrame] = None,
     ) -> List[Signal]:
         """Run all strategies and return a unified, deduplicated signal list.
 
@@ -241,6 +240,16 @@ class SignalGenerator:
                 )
                 continue
 
+            # -- Auto-init stat_arb pairs on first cycle --
+            if isinstance(strategy, StatArbStrategy) and not getattr(strategy, "_pairs", []):
+                try:
+                    logger.info("StatArbStrategy: auto-initializing pairs via find_pairs()...")
+                    strategy.find_pairs(price_data)
+                    n_pairs = len(getattr(strategy, "_pairs", []))
+                    logger.info(f"StatArbStrategy: initialized {n_pairs} cointegrated pairs.")
+                except Exception as exc:
+                    logger.warning(f"StatArbStrategy: find_pairs() failed: {exc}")
+
             try:
                 # Support strategies that accept fundamental_data
                 if isinstance(strategy, FactorModelStrategy):
@@ -248,7 +257,7 @@ class SignalGenerator:
                         price_data, fundamental_data, regime_state
                     )
                 elif isinstance(strategy, MeanReversionStrategy):
-                    strat_signals = strategy.generate_signals(price_data, regime_state)
+                    strat_signals = strategy.generate_signals(price_data, regime_state, volume_data=volume_data)
                 else:
                     strat_signals = strategy.generate_signals(price_data, regime_state)
             except Exception as exc:
@@ -263,15 +272,12 @@ class SignalGenerator:
             scaled: List[Signal] = []
             for sig in strat_signals:
                 new_strength = float(sig.strength * alloc)
-                # Drop signals scaled to effectively zero (no floor — allow true cancellation)
-                if new_strength < 0.001:
-                    continue  # Skip this signal entirely rather than keeping a ghost
                 # Create a copy with scaled strength
                 scaled.append(
                     Signal(
                         symbol=sig.symbol,
                         direction=sig.direction,
-                        strength=min(new_strength, 1.0),
+                        strength=max(new_strength, 0.001),
                         strategy=sig.strategy,
                         metadata={
                             **sig.metadata,
@@ -289,8 +295,7 @@ class SignalGenerator:
             )
 
         # Apply regime directional bias before combination
-        # Use CRISIS bias when VIX is extreme, regardless of HMM regime
-        regime_key = "CRISIS" if regime_state.is_crisis else regime_state.regime.value
+        regime_key = regime_state.regime.value
         bias = _REGIME_DIRECTION_BIAS.get(regime_key, _REGIME_DIRECTION_BIAS[Regime.UNKNOWN.value])
         biased_signals: List[Signal] = []
         for sig in raw_signals:

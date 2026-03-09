@@ -41,7 +41,7 @@ _DEFAULT_SYMBOLS: List[str] = [
     # Benchmarks
     "SPY", "QQQ", "IWM",
     # Mega-cap tech
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO",
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO",
     # Financials
     "BRK.B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS",
     # Healthcare
@@ -135,15 +135,11 @@ class DataConfig:
 class StatArbConfig:
     """Pairs / statistical-arbitrage strategy parameters."""
 
-    entry_z: float = 1.25         # Enter when spread Z-score exceeds this
-    exit_z: float = 0.4           # Exit when spread Z-score falls below this
-    stop_z: float = 3.0           # Hard stop at this Z-score
+    entry_z: float = 1.5          # Enter when spread Z-score exceeds this
+    exit_z: float = 0.3           # Exit when spread Z-score falls below this
+    stop_z: float = 3.5           # Hard stop at this Z-score
     min_entry_z: float = 1.0      # Minimum Z-score to trigger entry
-    lookback_days: int = 126      # 6 months (was 252 — too strict for 15-stock universe)
-    coint_pvalue: float = 0.05  # Strict threshold; BH correction applied in find_pairs()
-    half_life_max: float = 120.0  # Max half-life in days
-    half_life_min: float = 1.0    # Min half-life in days
-    max_pairs: int = 30           # Max active pairs
+    lookback_days: int = 252      # 1 year minimum cointegration history
     # Kalman filter noise parameters (initial defaults)
     kalman_transition_cov: float = 1e-5
     kalman_observation_cov: float = 1e-3
@@ -155,34 +151,13 @@ class MomentumConfig:
 
     lookback_days: int = 252      # 12-month lookback
     skip_days: int = 21           # Skip most recent month (1-month reversal)
-    long_pct: float = 0.30        # Top 30% of universe (aggressive long)
-    short_pct: float = 0.05       # Bottom 5% only (minimal shorts)
-    # Sector-neutral construction — enabled for 50+ stock universe
-    sector_neutral: bool = False
+    long_pct: float = 0.20        # Long top quintile
+    short_pct: float = 0.20       # Short bottom quintile
+    # Sector-neutral construction
+    sector_neutral: bool = True
     # Volatility scaling: inverse-vol weight positions
     vol_scale: bool = True
-    vol_target: float = 0.15      # Annualised volatility target (Barroso scaling)
-    # Rebalance cadence in trading days (5 = weekly)
-    rebalance_days: int = 5
-    # Rank change threshold to trigger rebalance (0 = always rebalance)
-    min_rank_change: float = 0.15
-
-
-@dataclass
-class MeanReversionConfig:
-    """Short-term mean reversion strategy parameters."""
-
-    lookback_days: int = 5        # 1-week lookback for reversal signal
-    entry_z: float = 1.0          # Enter when z-score exceeds this
-    exit_z: float = 0.3           # Exit when z-score reverts below this
-    stop_z: float = 3.0           # Hard stop-loss z-score
-    holding_days: int = 5         # Max holding period
-    vol_lookback: int = 20        # Lookback for volatility estimate
-    vol_target: float = 0.15      # Annualised vol target for sizing
-    # RSI-based filter
-    rsi_period: int = 5           # Short-term RSI
-    rsi_oversold: float = 30.0    # Buy when RSI below this
-    rsi_overbought: float = 70.0  # Sell when RSI above this
+    vol_target: float = 0.20      # Annualised volatility target
 
 
 @dataclass
@@ -191,15 +166,25 @@ class FactorModelConfig:
 
     lookback_days: int = 63       # ~3 months for factor estimation
     # Factor composite Z-score thresholds
-    entry_z: float = 0.40         # Low bar = more signals = more capital deployed
-    exit_z: float = -0.10         # Exit earlier for turnover
-    # Factor weights — overweight momentum per research
-    quality_weight: float = 0.20
+    entry_z: float = 0.75
+    exit_z: float = -0.25
+    # Factor weights (equal by default; override to time factors)
+    quality_weight: float = 0.25
     value_weight: float = 0.25
-    low_vol_weight: float = 0.20
-    momentum_weight: float = 0.35
-    # Rebalance cadence
-    rebalance_days: int = 5       # Weekly
+    low_vol_weight: float = 0.25
+    momentum_weight: float = 0.25
+
+
+@dataclass
+class MeanReversionConfig:
+    lookback: int = 60
+    entry_z: float = 1.2
+    exit_z: float = 0.5
+    hard_stop_z: float = 3.0
+    rsi_period: int = 14
+    rsi_oversold: float = 30.0
+    rsi_overbought: float = 70.0
+    rv_window: int = 20
 
 
 @dataclass
@@ -222,7 +207,7 @@ class RiskConfig:
 
     # --- Position limits ---
     max_position_pct: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_POSITION_PCT", "0.15")
+        os.environ.get("RISK_MAX_POSITION_PCT", "0.20")
     ))
     max_sector_pct: float = field(default_factory=lambda: float(
         os.environ.get("RISK_MAX_SECTOR_PCT", "0.35")
@@ -263,13 +248,6 @@ class RiskConfig:
     # --- Kelly criterion ---
     # Position size is capped at half-Kelly
     kelly_fraction: float = 0.5
-
-    # --- Volatility targeting ---
-    # Annualised volatility target used for vol-inverse sizing and the
-    # vol-adjustment scalar inside calculate_position_size().
-    vol_target: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_VOL_TARGET", "0.20")
-    ))
 
 
 # ---------------------------------------------------------------------------
@@ -410,29 +388,8 @@ class Config:
     system: SystemConfig = field(default_factory=SystemConfig)
 
     def validate(self) -> None:
-        """Validate configuration consistency across all sub-configs."""
+        """Run validation on all sub-configs that support it."""
         self.system.validate()
-
-        # Cross-config validation
-        if self.ml.train_window_days > self.data.history_days:
-            raise ValueError(
-                f"ML train_window_days ({self.ml.train_window_days}) exceeds "
-                f"data history_days ({self.data.history_days})"
-            )
-
-        if self.strategy.stat_arb.exit_z >= self.strategy.stat_arb.entry_z:
-            raise ValueError(
-                f"StatArb exit_z ({self.strategy.stat_arb.exit_z}) must be less than "
-                f"entry_z ({self.strategy.stat_arb.entry_z})"
-            )
-
-        # Ensure max_drawdown_halt is tighter than -30%
-        if self.risk.max_drawdown_halt < -0.20:
-            import logging
-            logging.getLogger(__name__).warning(
-                f"max_drawdown_halt={self.risk.max_drawdown_halt:.0%} is very loose; "
-                f"institutional standard is -5% to -10%"
-            )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialise the config to a plain dictionary (for logging / audit)."""

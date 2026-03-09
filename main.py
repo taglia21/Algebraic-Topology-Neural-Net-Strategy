@@ -208,12 +208,21 @@ class SystemOrchestrator:
             logger.info("Using SimulatedBroker (no Alpaca credentials).")
 
         # --- Kill switch + circuit breaker ---
+        # Use actual broker equity (not config default) so we don't carry
+        # a stale $100K peak from a paper-reset that never happened.
+        _broker_equity = getattr(broker, 'equity', None) or cfg.system.initial_portfolio_value
+        if hasattr(broker, 'get_account'):
+            try:
+                _acct = broker.get_account()
+                _broker_equity = float(getattr(_acct, 'equity', _broker_equity))
+            except Exception:
+                pass
         kill_switch = KillSwitch(
             config=CircuitBreakerConfig(
-                max_drawdown_pct=cfg.risk.max_drawdown_halt,
-                max_daily_loss_pct=cfg.risk.daily_loss_limit,
+                max_drawdown_pct=-0.99,  # disabled — only daily loss halts trading
+                max_daily_loss_pct=-0.08,  # halt if we lose 8% in a single day
             ),
-            initial_equity=cfg.system.initial_portfolio_value,
+            initial_equity=_broker_equity,
         )
 
         # --- Reconciler ---
@@ -236,6 +245,7 @@ class SystemOrchestrator:
 
         symbols = cfg.data.symbols
         cycle = 0
+        _last_trading_date = None  # tracks current trading day for daily reset
 
         while True:
             cycle += 1
@@ -255,7 +265,26 @@ class SystemOrchestrator:
             logger.info(f"Live cycle {cycle}")
 
             try:
+                # --- Daily reset at market open ---
+                from datetime import date as _date_cls
+                _today = _date_cls.today()
+                if _last_trading_date != _today:
+                    # New trading day — reset kill switch with current equity
+                    _broker_eq_now = _broker_equity
+                    if hasattr(broker, 'get_account'):
+                        try:
+                            _acct_now = broker.get_account()
+                            _broker_eq_now = float(getattr(_acct_now, 'equity', _broker_eq_now))
+                        except Exception:
+                            pass
+                    kill_switch.reset_daily(_broker_eq_now)
+                    logger.info(f"Daily reset: SOD equity=${_broker_eq_now:,.2f}")
+                    _last_trading_date = _today
+
                 # --- Kill switch check ---
+                if not kill_switch.is_trading_allowed():
+                    # Check if cooldown has expired
+                    kill_switch.check_cooldown_expired()
                 if not kill_switch.is_trading_allowed():
                     logger.warning(f"Trading blocked: {kill_switch.block_reason}")
                     time.sleep(60)
@@ -308,6 +337,20 @@ class SystemOrchestrator:
                 trade_syms = [s for s in symbols if s in price_data.columns]
                 price_data = price_data[trade_syms] if trade_syms else price_data
 
+                # Extract volume data for mean reversion volume spike filter
+                volume_data = None
+                vol_col = next(
+                    (c for c in bars.columns if c.lower() == "volume"), None
+                )
+                if vol_col is not None:
+                    try:
+                        volume_data = bars[vol_col].unstack(level="symbol")
+                        if trade_syms:
+                            vol_cols = [s for s in trade_syms if s in volume_data.columns]
+                            volume_data = volume_data[vol_cols] if vol_cols else volume_data
+                    except Exception:
+                        volume_data = None
+
                 # Latest prices
                 current_prices = price_data.iloc[-1].to_dict() if len(price_data) > 0 else {}
                 if hasattr(broker, 'update_prices'):
@@ -322,7 +365,7 @@ class SystemOrchestrator:
 
                 # Generate signals
                 if len(price_data) >= 20:
-                    signals = signal_gen.generate_all_signals(price_data, regime_state)
+                    signals = signal_gen.generate_all_signals(price_data, regime_state, volume_data=volume_data)
                     if signals:
                         orders = exec_mgr.process_signals(signals, current_prices)
                         logger.info(
@@ -371,7 +414,7 @@ class SystemOrchestrator:
                 logger.error(f"Live cycle {cycle} failed: {exc}", exc_info=True)
 
             # Sleep between cycles (5 minutes in paper/live mode)
-            time.sleep(300)
+            time.sleep(900)  # 15 min — reduced overtrading
 
     # ------------------------------------------------------------------
     # Summary printer

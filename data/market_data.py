@@ -223,6 +223,7 @@ class AlpacaDataProvider(DataProvider):
     ) -> None:
         try:
             from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.enums import DataFeed
             from alpaca.data.requests import (
                 StockBarsRequest,
                 StockLatestBarRequest,
@@ -247,6 +248,7 @@ class AlpacaDataProvider(DataProvider):
         self._StockBarsRequest = StockBarsRequest
         self._StockLatestBarRequest = StockLatestBarRequest
         self._StockLatestQuoteRequest = StockLatestQuoteRequest
+        self._DataFeed = DataFeed
         self._TimeFrame = TimeFrame
         self._TimeFrameUnit = TimeFrameUnit
 
@@ -385,6 +387,7 @@ class AlpacaDataProvider(DataProvider):
                 timeframe=tf,
                 start=start,
                 end=end,
+                feed=self._DataFeed.IEX,
             )
             client = self._get_client()
             bars = client.get_stock_bars(request)

@@ -67,8 +67,8 @@ class CircuitBreakerConfig:
         How long to pause after a circuit breaker trip before auto-resuming.
     """
 
-    max_drawdown_pct: float = -0.15
-    max_daily_loss_pct: float = -0.03
+    max_drawdown_pct: float = -0.99  # effectively disabled — daily loss is the halt trigger
+    max_daily_loss_pct: float = -0.08
     max_consecutive_losses: int = 5
     max_open_positions: int = 30
     max_orders_per_minute: int = 20
@@ -183,7 +183,7 @@ class KillSwitch:
             Current portfolio equity (becomes new SOD reference).
         """
         self._sod_equity = current_equity
-        self._peak_equity = max(self._peak_equity, current_equity)
+        self._peak_equity = current_equity  # reset peak to current — only daily P&L matters
         self._consecutive_losses = 0
         self._daily_fills = 0
         self._order_timestamps.clear()

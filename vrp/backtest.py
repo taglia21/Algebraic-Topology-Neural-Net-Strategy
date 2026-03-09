@@ -246,6 +246,8 @@ class VRPBacktester:
         self.signals = SignalAggregator()
         self.rolling = RollingMetrics(window=63)
         self._signal_blocks = 0  # count how many days signals blocked entry
+        self._halt_days = 0      # counter for drawdown halt cooling period
+        self._HALT_COOLDOWN = 10  # trading days to wait before resuming after DD halt
 
     def run(
         self,
@@ -329,8 +331,10 @@ class VRPBacktester:
             self.max_concurrent = max(self.max_concurrent, n_open)
 
             # ----- Evaluate exits -----
+            # Pass spx_low for intraday short-strike breach detection
             actions = self.strategy.evaluate_positions(
-                spx, vix, iv, today, self.config.backtest.risk_free_rate
+                spx, vix, iv, today, self.config.backtest.risk_free_rate,
+                spx_low=float(spx_low),
             )
 
             for pos, action in actions:
@@ -398,10 +402,15 @@ class VRPBacktester:
             drawdown = (self.equity - self.high_water_mark) / self.high_water_mark
             if drawdown < self.config.risk.max_drawdown_halt:
                 can_trade = False
-                # Reset HWM to current equity so we can eventually resume
-                # This simulates a "cooling off" period — next day can trade again
-                # from the new equity level (real desks reset PnL tracking)
-                self.high_water_mark = self.equity
+                self._halt_days += 1
+                # After cooling period, reset HWM to current equity so the
+                # strategy can resume at reduced size. This prevents permanent
+                # shutdown while still enforcing a meaningful penalty.
+                if self._halt_days >= self._HALT_COOLDOWN:
+                    self.high_water_mark = self.equity
+                    self._halt_days = 0
+            else:
+                self._halt_days = 0
 
             should_trade = can_trade and self.strategy.should_open_new_trade(
                 spx_price=spx,

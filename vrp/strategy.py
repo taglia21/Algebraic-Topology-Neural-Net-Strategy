@@ -55,10 +55,10 @@ class TradeAction(Enum):
 
 class VIXRegime(Enum):
     """VIX-based market regime classification."""
-    TOO_LOW = "too_low"       # VIX < 12: premium too thin
-    LOW = "low"               # VIX 12-14: reduced sizing
-    STANDARD = "standard"     # VIX 14-20: normal operations
-    ELEVATED = "elevated"     # VIX 20-35: rich premium, size up
+    TOO_LOW = "too_low"       # VIX < 16: premium too thin
+    LOW = "low"               # VIX 16-16: reduced sizing (narrow band)
+    STANDARD = "standard"     # VIX 16-22: normal operations (sweet spot)
+    ELEVATED = "elevated"     # VIX 22-35: rich premium, size up modestly
     CRISIS = "crisis"         # VIX > 35: stay out
 
 
@@ -179,6 +179,11 @@ class VIXRegimeClassifier:
         elif regime == VIXRegime.STANDARD:
             return 1.0
         elif regime == VIXRegime.ELEVATED:
+            # VIX 25-27 transition zone: halve the elevated multiplier.
+            # Audit showed -$128/trade in this band (panic transition).
+            # VIX 27+ gets full elevated multiplier.
+            if vix < 27.0:
+                return self.cfg.elevated_sizing_mult * 0.50
             return self.cfg.elevated_sizing_mult
         return 1.0
 
@@ -401,15 +406,17 @@ class PositionManager:
         spx_price: float,
         vix: float,
         as_of: Optional[date] = None,
+        spx_low: Optional[float] = None,
     ) -> TradeAction:
         """Evaluate an open position and recommend an action.
 
         Parameters
         ----------
         position : The open spread position
-        spx_price : Current SPX price
+        spx_price : Current SPX close price
         vix : Current VIX level
         as_of : Current date
+        spx_low : Intraday low — triggers immediate exit if below short strike
 
         Returns
         -------
@@ -417,6 +424,17 @@ class PositionManager:
         """
         today = as_of or date.today()
         remaining_dte = (position.short_leg.expiry - today).days
+
+        # 0. Intraday short-strike breach: if SPX low breached our short
+        # strike at any point during the day, exit immediately. This catches
+        # flash crashes and sharp selloffs before the end-of-day stop loss
+        # triggers. Institutional desks call this a "touch" stop.
+        if spx_low is not None and spx_low < position.short_leg.strike:
+            logger.info(
+                f"Short strike breach: SPX low {spx_low:.0f} < "
+                f"short strike {position.short_leg.strike:.0f}"
+            )
+            return TradeAction.CLOSE_STOP
 
         # 1. Time stop: force close near expiry
         if remaining_dte <= self.cfg.close_before_expiry_days:
@@ -704,6 +722,7 @@ class VRPStrategy:
         iv: Optional[float] = None,
         as_of: Optional[date] = None,
         risk_free_rate: float = 0.05,
+        spx_low: Optional[float] = None,
     ) -> List[Tuple[SpreadPosition, TradeAction]]:
         """Evaluate all open positions and return recommended actions.
 
@@ -713,6 +732,8 @@ class VRPStrategy:
         vix : Current VIX level
         iv : Implied volatility for pricing (defaults to VIX/100)
         as_of : Current date
+        risk_free_rate : Risk-free rate for BS pricing
+        spx_low : Intraday SPX low for short-strike breach detection
 
         Returns
         -------
@@ -731,8 +752,10 @@ class VRPStrategy:
                 position, spx_price, iv, as_of, risk_free_rate
             )
 
-            # Evaluate
-            action = self.manager.evaluate(position, spx_price, vix, as_of)
+            # Evaluate — pass spx_low for intraday breach detection
+            action = self.manager.evaluate(
+                position, spx_price, vix, as_of, spx_low=spx_low
+            )
 
             if action != TradeAction.HOLD:
                 actions.append((position, action))

@@ -562,9 +562,12 @@ async def run_live(config: Config) -> None:
 
                 # ---- Mark positions to market and evaluate exits ----
                 iv = vix / 100.0
+                # Pass bar_low for intraday short-strike breach detection.
+                # In live trading this is the running intraday low from IBKR.
                 actions = strategy.evaluate_positions(
                     spx_price, vix, iv, as_of=today,
                     risk_free_rate=config.backtest.risk_free_rate,
+                    spx_low=bar_low,
                 )
 
                 for pos, action in actions:

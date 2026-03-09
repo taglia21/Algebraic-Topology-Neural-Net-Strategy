@@ -23,10 +23,6 @@ Pipeline
    - Volatility-scaled: position strength inversely proportional to 60-day vol.
    - REDUCED allocation (50%) in BEAR regime.
    - ZERO signals in CRISIS regime.
-   - Monthly rebalancing (every ``config.rebalance_days`` bars).
-   - CLOSE signals emitted for positions that fall out of top/bottom ranks.
-   - Stop-loss: CLOSE if stock drops >15% from entry between rebalances.
-   - Strategy-level vol scaling (Barroso & Santa-Clara 2015).
 
 References
 ----------
@@ -39,7 +35,7 @@ References
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -172,10 +168,6 @@ class MomentumStrategy:
     SPY), then goes long the top decile and short the bottom decile in a
     sector-neutral, volatility-scaled fashion.
 
-    Monthly rebalancing with CLOSE signals for positions that exit the
-    top/bottom rank bands.  Between rebalances, stop-loss CLOSE signals are
-    emitted for any long that drops >15% from its entry price.
-
     Parameters
     ----------
     config:
@@ -194,9 +186,6 @@ class MomentumStrategy:
 
     STRATEGY_NAME: str = "momentum"
 
-    # Stop-loss threshold: close long if price drops this far from entry
-    _STOP_LOSS_PCT: float = 0.15
-
     def __init__(
         self,
         config: Optional[MomentumConfig] = None,
@@ -210,21 +199,6 @@ class MomentumStrategy:
             **_DEFAULT_SECTOR_MAP,
             **(sector_map or {}),
         }
-
-        # ---- Rebalance / position tracking state ----
-        # Number of times generate_signals() has been called
-        self._bar_count: int = 0
-        # Bar index of the last rebalance (0 = never rebalanced)
-        self._last_rebalance_bar: int = 0
-        # Date-based rebalance tracking: replaces bar-counter alignment
-        # so that restarts don't cause an immediate spurious rebalance and
-        # rebalance cadence is calendar-driven rather than bar-count-driven.
-        self._last_rebalance_date = None
-        # Currently held positions: symbol → direction ("long" | "short")
-        self._current_longs: Set[str] = set()
-        self._current_shorts: Set[str] = set()
-        # Entry prices for stop-loss tracking: symbol → entry close price
-        self._entry_prices: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Returns and volatility computation
@@ -273,7 +247,6 @@ class MomentumStrategy:
         price_data: pd.DataFrame,
         lookback: int = 252,
         skip: int = 21,
-        bar_dt=None,
     ) -> pd.DataFrame:
         """Rank all stocks by residual 12-1 month momentum.
 
@@ -291,11 +264,6 @@ class MomentumStrategy:
         skip:
             Number of most-recent trading days to skip (default 21 ≈ 1 month)
             to avoid short-term reversal.
-        bar_dt:
-            Optional current bar datetime.  When provided, price_data is
-            truncated to rows up to and including this date to prevent
-            look-ahead bias (the caller may pass a full history slice but
-            this guard ensures no future bars leak into the computation).
 
         Returns
         -------
@@ -307,17 +275,6 @@ class MomentumStrategy:
             - ``realized_vol``:    60-day annualised realised volatility
             - ``sector``:          GICS sector string
         """
-        # Defensive: truncate price_data to current bar to prevent look-ahead bias.
-        # Caller must pass bar_dt equal to the current point-in-time date.
-        if bar_dt is not None and hasattr(price_data.index, 'max'):
-            try:
-                price_data = price_data.loc[:bar_dt]
-            except Exception as _trunc_err:
-                logger.warning(
-                    f"MomentumStrategy.rank_stocks: could not truncate to bar_dt "
-                    f"{bar_dt}: {_trunc_err}"
-                )
-
         if len(price_data) < lookback + 10:
             logger.warning(
                 f"MomentumStrategy.rank_stocks: insufficient history "
@@ -425,9 +382,8 @@ class MomentumStrategy:
         self,
         price_data: pd.DataFrame,
         regime_state: RegimeState,
-        bar_dt=None,
     ) -> List[Signal]:
-        """Generate long/short momentum signals with monthly rebalancing.
+        """Generate long/short momentum signals.
 
         Parameters
         ----------
@@ -435,575 +391,64 @@ class MomentumStrategy:
             Wide-format close price DataFrame.
         regime_state:
             Current market regime.
-        bar_dt:
-            Optional current bar datetime.  When provided, rebalance timing
-            is determined by calendar days elapsed since the last rebalance
-            rather than by a raw bar counter, which prevents spurious
-            immediate rebalances after restarts and aligns rebalances to
-            calendar intervals.  Also forwarded to ``rank_stocks`` to guard
-            against look-ahead bias.
 
         Returns
         -------
         List[Signal]:
-            On rebalance bars: CLOSE signals for positions leaving the
-            rank band, then new LONG/SHORT entries for the updated portfolio.
-            Between rebalances: CLOSE signals only for stop-loss triggers
-            (long position down >15% from entry).
+            Long signals for top-ranked stocks, short signals for
+            bottom-ranked stocks.  Signal strength is scaled by percentile
+            rank and inversely by 60-day realised volatility.
 
         Notes
         -----
-        - ZERO signals emitted in CRISIS regime (all positions also closed).
+        - ZERO signals emitted in CRISIS regime.
         - Allocation halved (signal strength × 0.5) in BEAR regime.
         - Sector-neutral construction: select top/bottom per sector when
           the universe is large enough (≥ 10 non-benchmark stocks).  With
           fewer stocks, falls back to universe-wide absolute momentum so
           that small backtests still produce signals.
-        - Strategy-level vol scaling: overall exposure is scaled by
-          ``vol_target / trailing_60d_momentum_vol`` to protect against
-          momentum crashes (Barroso & Santa-Clara 2015).
         """
-        self._bar_count += 1
-        signals: List[Signal] = []
-
-        # -----------------------------------------------------------------
-        # CRISIS: close everything and emit no new entries
-        # -----------------------------------------------------------------
+        # Crisis regime: no signals
         if regime_state.is_crisis:
             logger.info("MomentumStrategy: blocked — CRISIS regime.")
-            close_sigs = self._emit_close_all(reason="crisis_regime")
-            # Reset state
-            self._current_longs.clear()
-            self._current_shorts.clear()
-            self._entry_prices.clear()
-            return close_sigs
+            return []
 
         # Bear regime: reduced allocation
         bear_scalar = 0.5 if regime_state.regime == Regime.BEAR else 1.0
-
-        # -----------------------------------------------------------------
-        # Rebalance timing: calendar-date-based (preferred) or bar-counter
-        # fallback when bar_dt is not provided.
-        # Date-based tracking prevents spurious immediate rebalances after
-        # restarts and aligns the cadence to calendar intervals.
-        # -----------------------------------------------------------------
-        rebalance_days = max(1, self._cfg.rebalance_days)
-
-        if bar_dt is not None:
-            # Calendar-based rebalance check
-            current_date = bar_dt.date() if hasattr(bar_dt, 'date') else bar_dt
-            if self._last_rebalance_date is None:
-                # First bar — force a rebalance so we enter positions once
-                # we have sufficient history (rank_stocks guards via its own
-                # lookback check; an empty rankings list is handled below).
-                days_since = rebalance_days
-            else:
-                days_since = (current_date - self._last_rebalance_date).days
-            is_rebalance_bar = days_since >= rebalance_days
-            if is_rebalance_bar:
-                self._last_rebalance_date = current_date
-        else:
-            # Fallback: bar-counter-based rebalance (legacy behaviour)
-            is_rebalance_bar = (self._bar_count % rebalance_days == 0)
-
-        if not is_rebalance_bar:
-            stop_signals = self._check_stop_losses(price_data)
-            if stop_signals:
-                logger.info(
-                    f"MomentumStrategy: {len(stop_signals)} stop-loss CLOSE signals "
-                    f"(bar {self._bar_count})."
-                )
-            return stop_signals
-
-        # -----------------------------------------------------------------
-        # Rebalance bar: rank → compare to holdings → emit CLOSE + new entries
-        # -----------------------------------------------------------------
-        self._last_rebalance_bar = self._bar_count
 
         rankings = self.rank_stocks(
             price_data,
             lookback=self._cfg.lookback_days,
             skip=self._cfg.skip_days,
-            bar_dt=bar_dt,
         )
         if rankings.empty:
             logger.warning("MomentumStrategy.generate_signals: rankings are empty.")
             return []
 
+        signals: List[Signal] = []
+
+        # Small-universe fallback: if fewer than 10 ranked stocks, the
+        # sector-neutral path requires ≥ 4 stocks per sector and will
+        # always produce zero signals.  Switch to universe-wide ranking.
         n_ranked = len(rankings)
         use_sector_neutral = self._cfg.sector_neutral and n_ranked >= 10
 
         if use_sector_neutral:
-            new_longs, new_shorts = self._select_sector_neutral(rankings)
+            signals = self._sector_neutral_signals(rankings, bear_scalar)
         else:
             if self._cfg.sector_neutral and n_ranked < 10:
                 logger.info(
                     f"MomentumStrategy: only {n_ranked} ranked stocks — "
                     "falling back from sector-neutral to universe-wide momentum."
                 )
-            new_longs, new_shorts = self._select_universe_wide(rankings)
-
-        # -----------------------------------------------------------------
-        # Strategy-level vol scalar (Barroso & Santa-Clara)
-        # Scales overall exposure by inverse trailing momentum strategy vol.
-        # -----------------------------------------------------------------
-        strategy_scalar = self._compute_strategy_scalar(price_data, rankings)
-
-        # -----------------------------------------------------------------
-        # CLOSE signals for positions leaving the rank band
-        # -----------------------------------------------------------------
-        exiting_longs = self._current_longs - new_longs
-        exiting_shorts = self._current_shorts - new_shorts
-
-        for sym in exiting_longs:
-            signals.append(Signal(
-                symbol=sym,
-                direction="close",
-                strength=1.0,
-                strategy=MomentumStrategy.STRATEGY_NAME,
-                metadata={"reason": "rank_exit_long", "bar": self._bar_count},
-            ))
-            self._log.log_signal(
-                MomentumStrategy.STRATEGY_NAME, sym, "CLOSE", 1.0,
-                {"reason": "rank_exit_long"},
-            )
-
-        for sym in exiting_shorts:
-            signals.append(Signal(
-                symbol=sym,
-                direction="close",
-                strength=1.0,
-                strategy=MomentumStrategy.STRATEGY_NAME,
-                metadata={"reason": "rank_exit_short", "bar": self._bar_count},
-            ))
-            self._log.log_signal(
-                MomentumStrategy.STRATEGY_NAME, sym, "CLOSE", 1.0,
-                {"reason": "rank_exit_short"},
-            )
-
-        # Remove exiting positions from tracking
-        self._current_longs -= exiting_longs
-        self._current_shorts -= exiting_shorts
-        for sym in exiting_longs | exiting_shorts:
-            self._entry_prices.pop(sym, None)
-
-        # -----------------------------------------------------------------
-        # New LONG/SHORT entry signals
-        # -----------------------------------------------------------------
-        entering_longs = new_longs - self._current_longs
-        entering_shorts = new_shorts - self._current_shorts
-
-        latest_prices = self._get_latest_prices(price_data)
-
-        for sym in entering_longs:
-            if sym not in rankings.index:
-                continue
-            row = rankings.loc[sym]
-            strength = self._percentile_strength(
-                float(row["rank"]), float(row["realized_vol"]),
-                bear_scalar * strategy_scalar, long_side=True,
-            )
-            signals.append(Signal(
-                symbol=sym,
-                direction="long",
-                strength=strength,
-                strategy=MomentumStrategy.STRATEGY_NAME,
-                metadata={
-                    "momentum_score": float(row["score"]),
-                    "residual_momentum": float(row["residual_momentum"]),
-                    "rank": float(row["rank"]),
-                    "realized_vol": float(row["realized_vol"]),
-                    "sector": row["sector"],
-                    "sector_neutral": use_sector_neutral,
-                    "strategy_scalar": strategy_scalar,
-                    "bar": self._bar_count,
-                },
-            ))
-            self._log.log_signal(
-                MomentumStrategy.STRATEGY_NAME, sym, "BUY", strength,
-                {"rank": float(row["rank"]), "sector": row["sector"]},
-            )
-            # Record entry price for stop-loss tracking
-            if sym in latest_prices:
-                self._entry_prices[sym] = latest_prices[sym]
-
-        for sym in entering_shorts:
-            if sym not in rankings.index:
-                continue
-            row = rankings.loc[sym]
-            strength = self._percentile_strength(
-                float(row["rank"]), float(row["realized_vol"]),
-                bear_scalar * strategy_scalar, long_side=False,
-            )
-            signals.append(Signal(
-                symbol=sym,
-                direction="short",
-                strength=strength,
-                strategy=MomentumStrategy.STRATEGY_NAME,
-                metadata={
-                    "momentum_score": float(row["score"]),
-                    "residual_momentum": float(row["residual_momentum"]),
-                    "rank": float(row["rank"]),
-                    "realized_vol": float(row["realized_vol"]),
-                    "sector": row["sector"],
-                    "sector_neutral": use_sector_neutral,
-                    "strategy_scalar": strategy_scalar,
-                    "bar": self._bar_count,
-                },
-            ))
-            self._log.log_signal(
-                MomentumStrategy.STRATEGY_NAME, sym, "SELL", strength,
-                {"rank": float(row["rank"]), "sector": row["sector"]},
-            )
-            if sym in latest_prices:
-                self._entry_prices[sym] = latest_prices[sym]
-
-        # Update position tracking
-        self._current_longs = new_longs
-        self._current_shorts = new_shorts
+            signals = self._universe_wide_signals(rankings, bear_scalar)
 
         logger.info(
-            f"MomentumStrategy.generate_signals: rebalance bar {self._bar_count} — "
-            f"emitted {len(signals)} signals "
-            f"(regime={regime_state.regime.value}, bear_scalar={bear_scalar:.2f}, "
-            f"strategy_scalar={strategy_scalar:.2f}, "
-            f"n_stocks={n_ranked}, sector_neutral={use_sector_neutral}, "
-            f"longs={len(new_longs)}, shorts={len(new_shorts)}, "
-            f"closes_long={len(exiting_longs)}, closes_short={len(exiting_shorts)})."
+            f"MomentumStrategy.generate_signals: emitted {len(signals)} signals "
+            f"(regime={regime_state.regime.value}, bear_scalar={bear_scalar}, "
+            f"n_stocks={n_ranked}, sector_neutral={use_sector_neutral})."
         )
         return signals
-
-    # ------------------------------------------------------------------
-    # Position selection helpers
-    # ------------------------------------------------------------------
-
-    def _select_universe_wide(
-        self,
-        rankings: pd.DataFrame,
-    ) -> tuple[Set[str], Set[str]]:
-        """Select top/bottom ranked stocks across the full universe.
-
-        Returns
-        -------
-        (longs, shorts) — sets of symbol strings.
-        """
-        n = len(rankings)
-        top_n = max(1, int(n * self._cfg.long_pct))
-        bot_n = max(1, int(n * self._cfg.short_pct))
-
-        sorted_df = rankings.sort_values("residual_momentum", ascending=False)
-        longs = set(str(s) for s in sorted_df.head(top_n).index)
-        shorts = set(str(s) for s in sorted_df.tail(bot_n).index)
-        return longs, shorts
-
-    def _select_sector_neutral(
-        self,
-        rankings: pd.DataFrame,
-    ) -> tuple[Set[str], Set[str]]:
-        """Select top/bottom stocks sector-by-sector.
-
-        Returns
-        -------
-        (longs, shorts) — sets of symbol strings.
-        """
-        longs: Set[str] = set()
-        shorts: Set[str] = set()
-        sectors = rankings["sector"].unique()
-
-        for sector in sectors:
-            if sector in ("ETF", "Unknown"):
-                continue
-            sector_df = rankings[rankings["sector"] == sector].copy()
-            if len(sector_df) < 4:
-                continue
-
-            n = len(sector_df)
-            top_pct = self._cfg.long_pct if n >= 10 else 0.2
-            bot_pct = self._cfg.short_pct if n >= 10 else 0.2
-
-            top_n = max(1, int(n * top_pct))
-            bot_n = max(1, int(n * bot_pct))
-
-            sector_df = sector_df.sort_values("residual_momentum", ascending=False)
-            longs.update(str(s) for s in sector_df.head(top_n).index)
-            shorts.update(str(s) for s in sector_df.tail(bot_n).index)
-
-        return longs, shorts
-
-    # ------------------------------------------------------------------
-    # Stop-loss checking
-    # ------------------------------------------------------------------
-
-    def _check_stop_losses(self, price_data: pd.DataFrame) -> List[Signal]:
-        """Emit CLOSE signals for positions that have hit their stop-loss.
-
-        Both long and short positions are checked:
-          - **Long stop**: current price has dropped more than
-            ``_STOP_LOSS_PCT`` below the entry price.
-          - **Short stop**: current price has risen more than
-            ``_STOP_LOSS_PCT`` above the entry price.
-
-        Returns
-        -------
-        List of CLOSE signals.
-        """
-        all_positions = self._current_longs | self._current_shorts
-        if not all_positions or not self._entry_prices:
-            return []
-
-        latest_prices = self._get_latest_prices(price_data)
-        signals: List[Signal] = []
-
-        triggered_longs: Set[str] = set()
-        triggered_shorts: Set[str] = set()
-
-        # --- Check long positions: stop triggers when price falls too far ---
-        for sym in list(self._current_longs):
-            entry = self._entry_prices.get(sym)
-            current = latest_prices.get(sym)
-            if entry is None or current is None or entry <= 0:
-                continue
-            pnl_pct = (current - entry) / entry  # negative = loss
-            if pnl_pct <= -self._STOP_LOSS_PCT:
-                signals.append(Signal(
-                    symbol=sym,
-                    direction="close",
-                    strength=1.0,
-                    strategy=MomentumStrategy.STRATEGY_NAME,
-                    metadata={
-                        "reason": "stop_loss_long",
-                        "pnl_pct": round(pnl_pct, 4),
-                        "entry_price": entry,
-                        "current_price": current,
-                        "bar": self._bar_count,
-                    },
-                ))
-                self._log.log_signal(
-                    MomentumStrategy.STRATEGY_NAME, sym, "CLOSE", 1.0,
-                    {"reason": "stop_loss_long", "pnl_pct": round(pnl_pct, 4)},
-                )
-                triggered_longs.add(sym)
-
-        # --- Check short positions: stop triggers when price rises too far ---
-        for sym in list(self._current_shorts):
-            entry = self._entry_prices.get(sym)
-            current = latest_prices.get(sym)
-            if entry is None or current is None or entry <= 0:
-                continue
-            # For a short, profit = (entry - current) / entry.
-            # A negative value means the price has risen (adverse move).
-            pnl_pct = (entry - current) / entry
-            if pnl_pct <= -self._STOP_LOSS_PCT:
-                signals.append(Signal(
-                    symbol=sym,
-                    direction="close",
-                    strength=1.0,
-                    strategy=MomentumStrategy.STRATEGY_NAME,
-                    metadata={
-                        "reason": "stop_loss_short",
-                        "pnl_pct": round(pnl_pct, 4),
-                        "entry_price": entry,
-                        "current_price": current,
-                        "bar": self._bar_count,
-                    },
-                ))
-                self._log.log_signal(
-                    MomentumStrategy.STRATEGY_NAME, sym, "CLOSE", 1.0,
-                    {"reason": "stop_loss_short", "pnl_pct": round(pnl_pct, 4)},
-                )
-                triggered_shorts.add(sym)
-
-        # Remove stopped-out positions from tracking
-        self._current_longs -= triggered_longs
-        self._current_shorts -= triggered_shorts
-        for sym in triggered_longs | triggered_shorts:
-            self._entry_prices.pop(sym, None)
-
-        return signals
-
-    def _emit_close_all(self, reason: str = "crisis_regime") -> List[Signal]:
-        """Emit CLOSE signals for every tracked position.
-
-        Returns
-        -------
-        List[Signal]
-        """
-        signals: List[Signal] = []
-        for sym in self._current_longs | self._current_shorts:
-            signals.append(Signal(
-                symbol=sym,
-                direction="close",
-                strength=1.0,
-                strategy=MomentumStrategy.STRATEGY_NAME,
-                metadata={"reason": reason, "bar": self._bar_count},
-            ))
-            self._log.log_signal(
-                MomentumStrategy.STRATEGY_NAME, sym, "CLOSE", 1.0,
-                {"reason": reason},
-            )
-        return signals
-
-    # ------------------------------------------------------------------
-    # Strategy-level vol scalar (Barroso & Santa-Clara)
-    # ------------------------------------------------------------------
-
-    def _compute_strategy_scalar(
-        self,
-        price_data: pd.DataFrame,
-        rankings: pd.DataFrame,
-    ) -> float:
-        """Compute strategy-level exposure scalar from trailing momentum vol.
-
-        Scales the strategy down when momentum returns have been volatile
-        (i.e., momentum crash risk is elevated).
-
-        ``strategy_scalar = vol_target / max(trailing_60d_mom_vol, 0.05)``
-
-        Parameters
-        ----------
-        price_data:
-            Close price DataFrame.
-        rankings:
-            Current momentum rankings (used to identify long/short portfolio).
-
-        Returns
-        -------
-        float in [0.25, 2.0].
-        """
-        vol_target = self._cfg.vol_target
-
-        try:
-            returns = self._compute_returns(price_data)
-
-            # Build a simple equal-weight long-minus-short portfolio return
-            # using the top/bottom ranked stocks to estimate momentum factor vol.
-            n = len(rankings)
-            if n < 4:
-                return 1.0
-
-            sorted_df = rankings.sort_values("residual_momentum", ascending=False)
-            top_n = max(1, int(n * self._cfg.long_pct))
-            bot_n = max(1, int(n * self._cfg.short_pct))
-
-            long_syms = [str(s) for s in sorted_df.head(top_n).index if str(s) in returns.columns]
-            short_syms = [str(s) for s in sorted_df.tail(bot_n).index if str(s) in returns.columns]
-
-            if not long_syms or not short_syms:
-                return 1.0
-
-            long_ret = returns[long_syms].mean(axis=1)
-            short_ret = returns[short_syms].mean(axis=1)
-            mom_factor_ret = long_ret - short_ret
-
-            # 60-day trailing vol of the momentum factor
-            if len(mom_factor_ret.dropna()) < 30:
-                return 1.0
-
-            trailing_vol = float(
-                mom_factor_ret.dropna().rolling(60, min_periods=30).std().iloc[-1]
-                * np.sqrt(252)
-            )
-            if np.isnan(trailing_vol) or trailing_vol <= 0:
-                return 1.0
-
-            scalar = vol_target / max(trailing_vol, 0.05)
-            # Cap to avoid extreme leverage or near-zero allocation
-            return float(np.clip(scalar, 0.25, 2.0))
-
-        except Exception as exc:
-            logger.warning(f"MomentumStrategy._compute_strategy_scalar failed: {exc}")
-            return 1.0
-
-    # ------------------------------------------------------------------
-    # Signal strength
-    # ------------------------------------------------------------------
-
-    def _percentile_strength(
-        self,
-        rank: float,
-        realized_vol: float,
-        combined_scalar: float,
-        long_side: bool = True,
-    ) -> float:
-        """Compute differentiated signal strength based on percentile distance.
-
-        Uses the distance from the median (0.5) to create a well-spread
-        strength distribution rather than compressing everything near 1.0.
-
-        Tier mapping (long side):
-            rank ≥ 0.90  → base 0.90  (top decile)
-            rank ≥ 0.80  → base 0.75  (top quintile)
-            rank ≥ 0.70  → base 0.60
-            rank ≥ 0.60  → base 0.45
-            rank ≥ 0.50  → base 0.30  (above median)
-        Short side mirrors (1 - rank):
-            1-rank ≥ 0.90 → base 0.90  (bottom decile)
-            etc.
-
-        Parameters
-        ----------
-        rank:
-            Cross-sectional percentile rank in [0, 1] (1 = best momentum).
-        realized_vol:
-            60-day annualised realised volatility.
-        combined_scalar:
-            Composite multiplier = bear_scalar * strategy_scalar.
-        long_side:
-            True for long legs, False for short legs.
-
-        Returns
-        -------
-        Strength in [0.01, 1.0].
-        """
-        # For shorts, mirror the rank
-        effective_rank = rank if long_side else (1.0 - rank)
-
-        # Tiered base strength for clear differentiation
-        if effective_rank >= 0.90:
-            base = 0.90
-        elif effective_rank >= 0.80:
-            base = 0.75
-        elif effective_rank >= 0.70:
-            base = 0.60
-        elif effective_rank >= 0.60:
-            base = 0.45
-        else:
-            base = 0.30
-
-        # Inverse-vol scaling: stocks with lower vol get higher weight
-        vol_target = self._cfg.vol_target
-        vol_scale = vol_target / max(realized_vol, 0.01)
-        vol_scale = float(np.clip(vol_scale, 0.2, 3.0))
-
-        raw = base * vol_scale * combined_scalar
-        return float(np.clip(raw, 0.01, 1.0))
-
-    # ------------------------------------------------------------------
-    # Utility helpers
-    # ------------------------------------------------------------------
-
-    def _get_latest_prices(self, price_data: pd.DataFrame) -> Dict[str, float]:
-        """Return the most recent close price for each symbol.
-
-        Parameters
-        ----------
-        price_data:
-            Wide-format close price DataFrame.
-
-        Returns
-        -------
-        Dict[str, float] of symbol → latest price.
-        """
-        latest: Dict[str, float] = {}
-        for sym in price_data.columns:
-            col = price_data[sym].dropna()
-            if len(col) > 0:
-                latest[sym] = float(col.iloc[-1])
-        return latest
-
-    # ------------------------------------------------------------------
-    # Deprecated helpers kept for backward compatibility
-    # ------------------------------------------------------------------
 
     def _sector_neutral_signals(
         self,
@@ -1011,10 +456,6 @@ class MomentumStrategy:
         regime_scalar: float,
     ) -> List[Signal]:
         """Construct signals sector-by-sector (top/bottom within each sector).
-
-        .. deprecated::
-            Internal use only.  ``generate_signals`` now manages CLOSE logic
-            separately.  This method is retained for backward compatibility.
 
         Parameters
         ----------
@@ -1035,9 +476,54 @@ class MomentumStrategy:
                 continue
             sector_df = rankings[rankings["sector"] == sector].copy()
             if len(sector_df) < 4:
+                # Small sector: use universe-wide rank for these stocks.
+                # Emit BUY if top 20% of universe, SELL if bottom 20%.
+                for sym, row in sector_df.iterrows():
+                    univ_rank = float(row["rank"])
+                    if univ_rank >= 0.80:
+                        strength = self._vol_scaled_strength(
+                            univ_rank, float(row["realized_vol"]), regime_scalar
+                        )
+                        signals.append(Signal(
+                            symbol=str(sym),
+                            direction="long",
+                            strength=strength,
+                            strategy=MomentumStrategy.STRATEGY_NAME,
+                            metadata={
+                                "rank": univ_rank,
+                                "sector": row["sector"],
+                                "sector_neutral": False,
+                                "small_sector_fallback": True,
+                            },
+                        ))
+                        self._log.log_signal(
+                            MomentumStrategy.STRATEGY_NAME, str(sym), "BUY", strength,
+                            {"rank": univ_rank, "sector": row["sector"], "fallback": True},
+                        )
+                    elif univ_rank <= 0.20:
+                        strength = self._vol_scaled_strength(
+                            1.0 - univ_rank, float(row["realized_vol"]), regime_scalar
+                        )
+                        signals.append(Signal(
+                            symbol=str(sym),
+                            direction="short",
+                            strength=strength,
+                            strategy=MomentumStrategy.STRATEGY_NAME,
+                            metadata={
+                                "rank": univ_rank,
+                                "sector": row["sector"],
+                                "sector_neutral": False,
+                                "small_sector_fallback": True,
+                            },
+                        ))
+                        self._log.log_signal(
+                            MomentumStrategy.STRATEGY_NAME, str(sym), "SELL", strength,
+                            {"rank": univ_rank, "sector": row["sector"], "fallback": True},
+                        )
                 continue
 
             n = len(sector_df)
+            # Use decile for large sector, quintile for small
             top_pct = self._cfg.long_pct if n >= 10 else 0.2
             bot_pct = self._cfg.short_pct if n >= 10 else 0.2
 
@@ -1050,9 +536,8 @@ class MomentumStrategy:
             bottom_stocks = sector_df.tail(bot_n)
 
             for sym, row in top_stocks.iterrows():
-                strength = self._percentile_strength(
-                    float(row["rank"]), float(row["realized_vol"]),
-                    regime_scalar, long_side=True,
+                strength = self._vol_scaled_strength(
+                    float(row["rank"]), float(row["realized_vol"]), regime_scalar
                 )
                 sig = Signal(
                     symbol=str(sym),
@@ -1075,9 +560,8 @@ class MomentumStrategy:
                 )
 
             for sym, row in bottom_stocks.iterrows():
-                strength = self._percentile_strength(
-                    float(row["rank"]), float(row["realized_vol"]),
-                    regime_scalar, long_side=False,
+                strength = self._vol_scaled_strength(
+                    1.0 - float(row["rank"]), float(row["realized_vol"]), regime_scalar
                 )
                 sig = Signal(
                     symbol=str(sym),
@@ -1108,10 +592,6 @@ class MomentumStrategy:
     ) -> List[Signal]:
         """Construct long/short signals across the entire universe.
 
-        .. deprecated::
-            Internal use only.  ``generate_signals`` now manages CLOSE logic
-            separately.  This method is retained for backward compatibility.
-
         Parameters
         ----------
         rankings:
@@ -1133,9 +613,8 @@ class MomentumStrategy:
         bottom_stocks = sorted_df.tail(bot_n)
 
         for sym, row in top_stocks.iterrows():
-            strength = self._percentile_strength(
-                float(row["rank"]), float(row["realized_vol"]),
-                regime_scalar, long_side=True,
+            strength = self._vol_scaled_strength(
+                float(row["rank"]), float(row["realized_vol"]), regime_scalar
             )
             signals.append(Signal(
                 symbol=str(sym),
@@ -1151,9 +630,8 @@ class MomentumStrategy:
             ))
 
         for sym, row in bottom_stocks.iterrows():
-            strength = self._percentile_strength(
-                float(row["rank"]), float(row["realized_vol"]),
-                regime_scalar, long_side=False,
+            strength = self._vol_scaled_strength(
+                1.0 - float(row["rank"]), float(row["realized_vol"]), regime_scalar
             )
             signals.append(Signal(
                 symbol=str(sym),
@@ -1178,9 +656,8 @@ class MomentumStrategy:
     ) -> float:
         """Compute volatility-scaled signal strength.
 
-        .. deprecated::
-            Replaced by :meth:`_percentile_strength`.  Retained for
-            backward compatibility with any external callers.
+        Strength is proportional to percentile rank and inversely proportional
+        to realised volatility (normalised to a 15% vol target).
 
         Parameters
         ----------
@@ -1195,6 +672,10 @@ class MomentumStrategy:
         -------
         Strength in [0.01, 1.0].
         """
-        return self._percentile_strength(
-            rank_score, realized_vol, regime_scalar, long_side=True
-        )
+        vol_target = self._cfg.vol_target
+        # Inverse-vol scaling: stocks with lower vol get higher weight
+        vol_scale = vol_target / max(realized_vol, 0.01)
+        vol_scale = np.clip(vol_scale, 0.2, 3.0)  # cap vol scaling
+
+        raw = rank_score * vol_scale * regime_scalar
+        return float(np.clip(raw, 0.01, 1.0))

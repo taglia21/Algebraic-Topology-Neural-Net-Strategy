@@ -95,6 +95,7 @@ class MeanReversionStrategy:
             self._cfg = MeanReversionConfig()
         self._open_positions: Set[str] = set()
         self._bar_count: int = 0
+        self._log = get_trade_logger()
 
     # ------------------------------------------------------------------
     # RSI computation
@@ -250,6 +251,10 @@ class MeanReversionStrategy:
                             "action": "mean_reversion_exit",
                         },
                     ))
+                    self._log.log_signal(
+                        self.STRATEGY_NAME, sym, "CLOSE", 1.0,
+                        {"z": round(z, 4), "action": "mean_reversion_exit"},
+                    )
                     self._open_positions.discard(sym)
                     exits += 1
                     continue
@@ -269,6 +274,10 @@ class MeanReversionStrategy:
                             "action": "hard_stop",
                         },
                     ))
+                    self._log.log_signal(
+                        self.STRATEGY_NAME, sym, "CLOSE", 1.0,
+                        {"z": round(z, 4), "action": "hard_stop"},
+                    )
                     self._open_positions.discard(sym)
                     exits += 1
                     continue
@@ -284,10 +293,11 @@ class MeanReversionStrategy:
                 if not volume_ok.get(sym, True):
                     continue  # skip low-volume
 
+                _strength = max(strength, 0.1)
                 signals.append(Signal(
                     symbol=sym,
                     direction="long",
-                    strength=max(strength, 0.1),  # floor at 0.1
+                    strength=_strength,
                     strategy=self.STRATEGY_NAME,
                     metadata={
                         "z": round(z, 4),
@@ -296,6 +306,10 @@ class MeanReversionStrategy:
                         "regime": regime_state.regime.value,
                     },
                 ))
+                self._log.log_signal(
+                    self.STRATEGY_NAME, sym, "BUY", _strength,
+                    {"z": round(z, 4), "rsi": round(rsi, 2), "rv": round(rv, 4)},
+                )
                 self._open_positions.add(sym)
                 entries += 1
 
@@ -304,10 +318,11 @@ class MeanReversionStrategy:
                 if not volume_ok.get(sym, True):
                     continue
 
+                _strength = max(strength, 0.1)
                 signals.append(Signal(
                     symbol=sym,
                     direction="short",
-                    strength=max(strength, 0.1),  # floor at 0.1
+                    strength=_strength,
                     strategy=self.STRATEGY_NAME,
                     metadata={
                         "z": round(z, 4),
@@ -316,6 +331,10 @@ class MeanReversionStrategy:
                         "regime": regime_state.regime.value,
                     },
                 ))
+                self._log.log_signal(
+                    self.STRATEGY_NAME, sym, "SELL", _strength,
+                    {"z": round(z, 4), "rsi": round(rsi, 2), "rv": round(rv, 4)},
+                )
                 self._open_positions.add(sym)
                 entries += 1
 

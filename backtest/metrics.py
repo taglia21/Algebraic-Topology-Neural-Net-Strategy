@@ -58,6 +58,7 @@ from scipy import stats
 _TRADING_DAYS_PER_YEAR: int = 252
 _DEFAULT_RISK_FREE_RATE: float = 0.05   # 5% annual, used for Sharpe/Sortino
 _ROLLING_SHARPE_WINDOW: int = 63        # ~1 quarter
+_ROLLING_SHARPE_WINDOW_252: int = 252   # 1 year
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +777,7 @@ class PerformanceMetrics:
 def _empty_metrics() -> dict:
     """Return a metrics dict with all NaN values (used on empty data)."""
     keys = [
-        "total_return", "annual_return", "sharpe_ratio", "sortino_ratio",
+        "total_return", "annual_return", "cagr", "sharpe_ratio", "sortino_ratio",
         "max_drawdown", "max_drawdown_duration", "calmar_ratio",
         "win_rate", "profit_factor", "avg_win", "avg_loss",
         "avg_win_loss_ratio", "total_trades", "avg_holding_period",
@@ -785,3 +786,191 @@ def _empty_metrics() -> dict:
         "information_ratio", "tracking_error",
     ]
     return {k: float("nan") for k in keys}
+
+
+# ---------------------------------------------------------------------------
+# BacktestMetrics — enhanced wrapper for the v2 backtest engine
+# ---------------------------------------------------------------------------
+
+class BacktestMetrics:
+    """Enhanced metrics suite for the v2 backtest engine.
+
+    Wraps :class:`PerformanceMetrics` and adds CAGR, monthly returns,
+    rolling drawdown, 252-day rolling Sharpe, and options-specific metrics.
+    """
+
+    @staticmethod
+    def compute_all(
+        equity_curve: pd.Series,
+        trades: List[dict],
+        initial_capital: float = 444.0,
+        benchmark: Optional[pd.Series] = None,
+    ) -> dict:
+        """Compute all metrics including enhancements.
+
+        Parameters
+        ----------
+        equity_curve : pd.Series
+            Portfolio equity indexed by date.
+        trades : list[dict]
+            Trade records with pnl, holding_days, etc.
+        initial_capital : float
+            Starting capital.
+        benchmark : pd.Series, optional
+            Benchmark equity curve for relative metrics.
+
+        Returns
+        -------
+        dict
+            Full metrics dictionary.
+        """
+        # Start with existing metrics
+        base = PerformanceMetrics.calculate_all(equity_curve, trades, benchmark)
+
+        if equity_curve is None or len(equity_curve) < 2:
+            base["cagr"] = float("nan")
+            return base
+
+        equity_curve = equity_curve.sort_index().dropna()
+        returns = equity_curve.pct_change().dropna()
+
+        # CAGR
+        initial = float(equity_curve.iloc[0])
+        final = float(equity_curve.iloc[-1])
+        n_days = len(returns)
+        years = n_days / _TRADING_DAYS_PER_YEAR
+        if initial > 0 and years > 0 and final > 0:
+            base["cagr"] = (final / initial) ** (1.0 / years) - 1.0
+        else:
+            base["cagr"] = float("nan")
+
+        # Monthly returns table
+        base["monthly_returns"] = BacktestMetrics._monthly_returns(equity_curve)
+
+        # Options-specific metrics
+        options_trades = [t for t in trades if t.get("asset_type") == "OPTION"]
+        if options_trades:
+            base.update(BacktestMetrics._options_metrics(options_trades))
+
+        return base
+
+    @staticmethod
+    def _monthly_returns(equity_curve: pd.Series) -> pd.DataFrame:
+        """Compute monthly returns table (rows=years, columns=months).
+
+        Returns
+        -------
+        pd.DataFrame
+            Monthly returns indexed by year, columns 1-12.
+        """
+        if equity_curve is None or len(equity_curve) < 2:
+            return pd.DataFrame()
+
+        # Resample to month-end
+        monthly = equity_curve.resample("ME").last()
+        monthly_ret = monthly.pct_change().dropna()
+
+        if len(monthly_ret) == 0:
+            return pd.DataFrame()
+
+        table = pd.DataFrame(index=sorted(monthly_ret.index.year.unique()))
+        table.index.name = "year"
+        for month in range(1, 13):
+            col_data = {}
+            for idx, val in monthly_ret.items():
+                if idx.month == month:
+                    col_data[idx.year] = val
+            table[month] = pd.Series(col_data)
+
+        return table
+
+    @staticmethod
+    def rolling_drawdown(equity_curve: pd.Series) -> pd.Series:
+        """Compute the running drawdown series (underwater curve).
+
+        Returns
+        -------
+        pd.Series
+            Drawdown fractions (negative) at each date.
+        """
+        if equity_curve is None or len(equity_curve) < 2:
+            return pd.Series(dtype=float)
+        running_max = equity_curve.cummax()
+        dd = (equity_curve - running_max) / running_max.replace(0, np.nan)
+        return dd
+
+    @staticmethod
+    def rolling_sharpe_252(returns: pd.Series) -> pd.Series:
+        """252-day rolling Sharpe ratio."""
+        return PerformanceMetrics.calculate_rolling_sharpe(
+            returns, window=_ROLLING_SHARPE_WINDOW_252,
+        )
+
+    @staticmethod
+    def _options_metrics(options_trades: List[dict]) -> dict:
+        """Compute options-specific trade metrics.
+
+        Parameters
+        ----------
+        options_trades : list[dict]
+            Trades with asset_type == 'OPTION'. Expected extra keys:
+            strategy_type (vertical, condor, single), theta_pnl, delta_pnl,
+            vega_pnl, gamma_pnl.
+
+        Returns
+        -------
+        dict with options-specific metrics.
+        """
+        result: dict = {}
+        if not options_trades:
+            return result
+
+        pnls = [float(t.get("pnl", 0)) for t in options_trades]
+        winning = [p for p in pnls if p > 0]
+
+        result["options_total_trades"] = len(options_trades)
+        result["options_win_rate"] = len(winning) / len(pnls) if pnls else float("nan")
+
+        # Average theta decay captured
+        theta_pnls = [float(t.get("theta_pnl", 0)) for t in options_trades if t.get("theta_pnl") is not None]
+        result["options_avg_theta_captured"] = float(np.mean(theta_pnls)) if theta_pnls else float("nan")
+
+        # Win rate by strategy type
+        strat_groups: Dict[str, List[float]] = {}
+        for t in options_trades:
+            st = str(t.get("strategy_type", "unknown")).lower()
+            strat_groups.setdefault(st, []).append(float(t.get("pnl", 0)))
+
+        for st, st_pnls in strat_groups.items():
+            wins = [p for p in st_pnls if p > 0]
+            result[f"options_win_rate_{st}"] = len(wins) / len(st_pnls) if st_pnls else float("nan")
+            result[f"options_count_{st}"] = len(st_pnls)
+
+        # Greeks P&L attribution
+        for greek in ("delta_pnl", "vega_pnl", "gamma_pnl", "theta_pnl"):
+            vals = [float(t.get(greek, 0)) for t in options_trades if t.get(greek) is not None]
+            if vals:
+                result[f"options_total_{greek}"] = sum(vals)
+                result[f"options_avg_{greek}"] = float(np.mean(vals))
+
+        return result
+
+    @staticmethod
+    def format_summary(metrics: dict) -> str:
+        """Return a nicely formatted text summary of metrics."""
+        return PerformanceMetrics.generate_report(
+            metrics,
+            pd.Series(dtype=float),  # placeholder
+        )
+
+    @staticmethod
+    def to_dataframe(metrics: dict) -> pd.DataFrame:
+        """Convert metrics dict to a single-row DataFrame.
+
+        Excludes nested objects like monthly_returns.
+        """
+        flat = {
+            k: v for k, v in metrics.items()
+            if not isinstance(v, (pd.DataFrame, pd.Series, list, dict))
+        }
+        return pd.DataFrame([flat])

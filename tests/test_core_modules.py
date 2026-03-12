@@ -8,7 +8,7 @@ import sys
 import traceback
 
 # Make sure we run from the project root
-project_root = "/home/user/workspace/Algebraic-Topology-Neural-Net-Strategy"
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(project_root)
 sys.path.insert(0, project_root)
 
@@ -37,7 +37,7 @@ print("\n[1] core/config.py")
 
 def test_config_imports():
     from core.config import (
-        get_config, Config, AlpacaConfig, DataConfig, RiskConfig,
+        get_config, Config, IBKRConfig, DataConfig, RiskConfig,
         MLConfig, BacktestConfig, SystemConfig, StrategyConfig,
     )
 check("imports", test_config_imports)
@@ -45,7 +45,7 @@ check("imports", test_config_imports)
 def test_config_get_config():
     from core.config import get_config
     cfg = get_config(reload=True)
-    assert cfg.risk.max_position_pct == 0.15
+    assert cfg.risk.max_position_pct == 0.20
     assert cfg.risk.max_drawdown_halt == -0.30
     assert cfg.risk.daily_loss_limit == -0.03
     assert cfg.risk.max_correlation == 0.85
@@ -94,7 +94,7 @@ def test_config_to_dict():
     d = cfg.to_dict()
     assert isinstance(d, dict)
     assert "risk" in d
-    assert d["risk"]["max_position_pct"] == 0.15
+    assert d["risk"]["max_position_pct"] == 0.20
 check("to_dict() serialisation", test_config_to_dict)
 
 # ----------------------------------------------------------------

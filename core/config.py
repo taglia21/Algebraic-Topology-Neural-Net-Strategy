@@ -12,14 +12,15 @@ Usage
     from core.config import get_config, SystemConfig
 
     cfg = get_config()
-    print(cfg.risk.max_position_pct)  # 0.05
-    print(cfg.alpaca.base_url)        # https://paper-api.alpaca.markets
+    print(cfg.risk.max_position_pct)  # 0.20
+    print(cfg.ibkr.host)              # 127.0.0.1
 
 Environment Variables
 ---------------------
-    ALPACA_API_KEY        — Alpaca API key (also accepts APCA_API_KEY_ID)
-    ALPACA_API_SECRET     — Alpaca secret key (also accepts APCA_API_SECRET_KEY)
-    ALPACA_BASE_URL       — Alpaca base URL (default: paper trading endpoint)
+    IBKR_HOST             — TWS/Gateway host  (default: 127.0.0.1)
+    IBKR_PORT             — TWS/Gateway port  (default: 7497 = paper)
+    IBKR_CLIENT_ID        — Unique client ID   (default: 1)
+    IBKR_ACCOUNT          — IBKR account ID    (default: empty)
     SYSTEM_MODE           — backtest | paper | live  (default: paper)
     LOG_LEVEL             — DEBUG | INFO | WARNING | ERROR  (default: INFO)
     TIMEZONE              — IANA timezone string  (default: America/New_York)
@@ -64,41 +65,35 @@ _DEFAULT_TIMEFRAMES: List[str] = ["1Day", "1Hour", "15Min"]
 
 
 # ---------------------------------------------------------------------------
-# Alpaca
+# IBKR (Interactive Brokers)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class AlpacaConfig:
-    """Alpaca brokerage / market-data configuration.
+class IBKRConfig:
+    """Interactive Brokers TWS / Gateway configuration.
 
-    Keys are loaded from the environment. Both the legacy APCA_* naming
-    convention and the newer ALPACA_* naming convention are supported; the
-    ALPACA_* names take precedence.
+    Connects via ib_async to a running TWS or IB Gateway instance.
     """
 
-    api_key: str = field(default_factory=lambda: (
-        os.environ.get("ALPACA_API_KEY")
-        or os.environ.get("APCA_API_KEY_ID")
-        or ""
+    host: str = field(default_factory=lambda: (
+        os.environ.get("IBKR_HOST", "127.0.0.1")
     ))
-    secret_key: str = field(default_factory=lambda: (
-        os.environ.get("ALPACA_API_SECRET")
-        or os.environ.get("APCA_API_SECRET_KEY")
-        or ""
+    port: int = field(default_factory=lambda: int(
+        os.environ.get("IBKR_PORT", "7497")  # 7497=paper, 7496=live
     ))
-    base_url: str = field(default_factory=lambda: (
-        os.environ.get("ALPACA_BASE_URL")
-        or os.environ.get("APCA_API_BASE_URL")
-        or "https://paper-api.alpaca.markets"
+    client_id: int = field(default_factory=lambda: int(
+        os.environ.get("IBKR_CLIENT_ID", "1")
     ))
-    data_url: str = "https://data.alpaca.markets"
-    paper: bool = field(default_factory=lambda: (
-        os.environ.get("ALPACA_PAPER", "true").lower() not in ("false", "0", "no")
+    account: str = field(default_factory=lambda: (
+        os.environ.get("IBKR_ACCOUNT", "")
+    ))
+    timeout: int = field(default_factory=lambda: int(
+        os.environ.get("IBKR_TIMEOUT", "30")
     ))
 
     def is_configured(self) -> bool:
-        """Return True when both API credentials are non-empty."""
-        return bool(self.api_key and self.secret_key)
+        """Return True when a valid account ID is set."""
+        return bool(self.account)
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +105,7 @@ class DataConfig:
     """Market-data pipeline configuration."""
 
     provider: str = field(default_factory=lambda: (
-        os.environ.get("DATA_PROVIDER", "alpaca")
+        os.environ.get("DATA_PROVIDER", "ibkr")
     ))
     symbols: List[str] = field(default_factory=lambda: list(_DEFAULT_SYMBOLS))
     timeframes: List[str] = field(default_factory=lambda: list(_DEFAULT_TIMEFRAMES))
@@ -119,8 +114,6 @@ class DataConfig:
     ))
     # Minimum bars required before any strategy may emit signals
     min_history_bars: int = 60
-    # yfinance fallback is allowed in backtest mode only
-    allow_yfinance_fallback: bool = True
     # Cache directory for downloaded data
     cache_dir: str = field(default_factory=lambda: (
         os.environ.get("DATA_CACHE_DIR", "data/cache")
@@ -244,6 +237,9 @@ class RiskConfig:
     max_short_position_pct: float = field(default_factory=lambda: float(
         os.environ.get("RISK_MAX_SHORT_POSITION_PCT", "0.05")
     ))
+
+    # --- Volatility target ---
+    vol_target: float = 0.20  # Annualised portfolio volatility target
 
     # --- Kelly criterion ---
     # Position size is capped at half-Kelly
@@ -379,7 +375,7 @@ class Config:
     :func:`get_config` rather than instantiating this class directly.
     """
 
-    alpaca: AlpacaConfig = field(default_factory=AlpacaConfig)
+    ibkr: IBKRConfig = field(default_factory=IBKRConfig)
     data: DataConfig = field(default_factory=DataConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)

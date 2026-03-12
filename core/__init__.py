@@ -10,7 +10,7 @@ Importing from this package gives access to the four foundational modules:
 """
 
 from core.config import (
-    AlpacaConfig,
+    IBKRConfig,
     BacktestConfig,
     Config,
     DataConfig,
@@ -49,7 +49,7 @@ from core.risk_manager import (
 
 __all__ = [
     # config
-    "AlpacaConfig",
+    "IBKRConfig",
     "BacktestConfig",
     "Config",
     "DataConfig",

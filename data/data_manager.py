@@ -10,7 +10,7 @@ directly.
 
 Key responsibilities
 --------------------
-- Route data requests to the right provider (Alpaca primary / yfinance fallback).
+- Route data requests to the configured provider (IBKR for live trading).
 - Cache results in-memory with TTL-based stale detection.
 - Validate incoming data (NaN, negative prices, zero volume, out-of-hours ts).
 - Handle missing data: fill-forward for up to 5 bars, then emit a warning.
@@ -62,9 +62,8 @@ from core.config import get_config
 from core.logger import get_trade_logger
 from data.cache import DataCache, TTL_BARS
 from data.market_data import (
-    AlpacaDataProvider,
     DataProvider,
-    YFinanceDataProvider,
+    IBKRDataProvider,
     _OHLCV_COLS,
 )
 
@@ -91,8 +90,7 @@ class DataManager:
     provider:
         Explicit :class:`~data.market_data.DataProvider` instance.  If not
         supplied, the manager auto-selects based on ``core.config``:
-        ``AlpacaDataProvider`` when credentials are configured, otherwise
-        ``YFinanceDataProvider`` (with a warning).
+        ``IBKRDataProvider`` when IBKR is configured.
     cache:
         Explicit :class:`~data.cache.DataCache` instance.  Defaults to a
         fresh cache with ``max_entries=10_000``.
@@ -162,52 +160,35 @@ class DataManager:
     def _build_providers(
         self,
     ) -> Tuple[DataProvider, Optional[DataProvider]]:
-        """Select primary and fallback providers based on config.
+        """Select primary provider based on config.
 
         Returns
         -------
         (primary, fallback)
+            Fallback is always ``None`` — IBKR is the sole data source.
         """
-        cfg_provider = self._cfg.data.provider.lower()
-        alpaca_cfg = self._cfg.alpaca
+        ibkr_cfg = self._cfg.ibkr
 
-        # Prefer Alpaca if credentials are available or if explicitly configured
-        use_alpaca = (
-            cfg_provider == "alpaca" or alpaca_cfg.is_configured()
-        )
-
-        if use_alpaca:
+        if ibkr_cfg.is_configured():
             try:
-                primary: DataProvider = AlpacaDataProvider(
-                    api_key=alpaca_cfg.api_key or None,
-                    secret_key=alpaca_cfg.secret_key or None,
-                    base_url=alpaca_cfg.base_url,
+                primary: DataProvider = IBKRDataProvider(
+                    host=ibkr_cfg.host,
+                    port=ibkr_cfg.port,
+                    client_id=ibkr_cfg.client_id,
                 )
-                fallback: Optional[DataProvider] = (
-                    YFinanceDataProvider()
-                    if self._cfg.data.allow_yfinance_fallback
-                    else None
-                )
-                return primary, fallback
+                return primary, None
             except Exception as exc:
                 self._logger.log_error(
-                    f"Failed to initialise AlpacaDataProvider: {exc}; "
-                    "falling back to YFinance.",
+                    f"Failed to initialise IBKRDataProvider: {exc}",
                     exc_info=exc,
                 )
 
-        # Fall through to yfinance
+        # IBKR not configured — return a stub that will raise on actual calls
         self._logger.log_info(
-            "DataManager: using YFinanceDataProvider (FALLBACK)",
-            metadata={"reason": "Alpaca not configured or failed"},
+            "DataManager: IBKR not configured; "
+            "only backtest mode with pre-loaded data will work.",
         )
-        warnings.warn(
-            "DataManager: AlpacaDataProvider unavailable — using yfinance "
-            "as primary provider.  This is NOT suitable for live trading.",
-            UserWarning,
-            stacklevel=3,
-        )
-        return YFinanceDataProvider(), None
+        return IBKRDataProvider(), None
 
     # ------------------------------------------------------------------
     # Public API
@@ -224,7 +205,7 @@ class DataManager:
 
         Results are cached with a 60-second TTL.  On a cache miss, the
         primary provider is queried; on failure the fallback provider
-        (yfinance) is tried.
+        is tried (if configured).
 
         Missing data handling:
         - Up to 5 consecutive NaN / missing rows are forward-filled per
@@ -460,7 +441,7 @@ class DataManager:
         end: datetime,
         timeframe: str,
     ) -> pd.DataFrame:
-        """Try primary provider; fall back to yfinance on failure."""
+        """Try primary provider; fall back to secondary on failure."""
         try:
             return self._provider.get_bars(symbols, start, end, timeframe)
         except Exception as exc:
@@ -472,7 +453,7 @@ class DataManager:
 
         if self._fallback_provider is not None:
             self._logger.log_info(
-                "DataManager: using YFinance FALLBACK",
+                "DataManager: using fallback provider",
                 metadata={"symbols": symbols},
             )
             return self._fallback_provider.get_bars(symbols, start, end, timeframe)

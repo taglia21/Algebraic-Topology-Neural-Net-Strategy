@@ -16,8 +16,8 @@ This module provides:
 
 Design Principles
 -----------------
-- **Broker-agnostic**: Swap ``SimulatedBroker`` for a live broker (Alpaca,
-  IBKR) by implementing ``Broker`` without touching any strategy code.
+- **Broker-agnostic**: Swap ``SimulatedBroker`` for a live broker (IBKR)
+  by implementing ``Broker`` without touching any strategy code.
 - **Same code path**: Backtest and live modes run identical logic; only the
   ``Broker`` implementation differs.
 - **No silent failures**: All exceptions are logged and re-raised.
@@ -83,7 +83,7 @@ logger = logging.getLogger(__name__)
 class Broker(ABC):
     """Abstract base class for broker adapters.
 
-    All broker implementations (simulated, Alpaca, IBKR, etc.) must implement
+    All broker implementations (simulated, IBKR, etc.) must implement
     this interface.  The :class:`ExecutionManager` only ever calls these methods,
     ensuring strategy code is fully broker-agnostic.
     """

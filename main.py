@@ -8,13 +8,14 @@ Usage
     python main.py --mode backtest --start 2022-01-01 --end 2025-12-31
     python main.py --mode backtest --start 2022-01-01 --end 2025-12-31 --ml
     python main.py --mode paper
-    python main.py --mode live   # requires Alpaca credentials in environment
+    python main.py --mode live   # requires IBKR TWS/Gateway running
 
 Environment Variables
 ---------------------
-    ALPACA_API_KEY        — Alpaca API key
-    ALPACA_API_SECRET     — Alpaca secret key
-    ALPACA_BASE_URL       — Override base URL (default: paper trading)
+    IBKR_HOST             — IBKR TWS/Gateway host (default: 127.0.0.1)
+    IBKR_PORT             — IBKR TWS/Gateway port (default: 7497)
+    IBKR_CLIENT_ID        — IBKR client ID (default: 1)
+    IBKR_ACCOUNT          — IBKR account ID (e.g. U22452226)
     SYSTEM_MODE           — backtest | paper | live
     LOG_LEVEL             — DEBUG | INFO | WARNING | ERROR
     PORTFOLIO_VALUE       — Initial portfolio value in USD
@@ -27,7 +28,7 @@ The SAME :class:`SystemOrchestrator` runs in all modes.  Components differ:
     ---------  -------------------  ------------------
     backtest   DataManager (hist)   SimulatedBroker
     paper      DataManager (live)   SimulatedBroker
-    live       DataManager (live)   AlpacaBroker
+    live       DataManager (live)   IBKRBroker (TODO)
 
 All signal generation, regime detection, risk management, and ML code
 is identical across modes — this is the core design guarantee.
@@ -163,17 +164,13 @@ class SystemOrchestrator:
             9. Sleep until next cycle.
 
         In paper mode the broker is a :class:`SimulatedBroker`.
-        In live mode the broker is :class:`AlpacaBroker`, routing real
-        orders to Alpaca.
+        In live mode the broker is :class:`IBKRBroker` (TODO), routing real
+        orders to IBKR TWS/Gateway.
         """
         from data.data_manager import DataManager
         from data.cache import DataCache
         from equities.execution import ExecutionManager, SimulatedBroker
         from equities.signal_generator import SignalGenerator
-        from equities.strategies.stat_arb import StatArbStrategy
-        from equities.strategies.momentum import MomentumStrategy
-        from equities.strategies.factor_model import FactorModelStrategy
-        from equities.strategies.mean_reversion import MeanReversionStrategy
         from core.regime_detector import RegimeDetector
         from core.risk_manager import RiskManager
         from core.market_hours import MarketCalendar
@@ -190,14 +187,11 @@ class SystemOrchestrator:
         market_cal = MarketCalendar()
 
         # --- Select broker based on mode ---
-        if self.mode == "live" and cfg.alpaca.is_configured():
-            from equities.alpaca_broker import AlpacaBroker
-            broker = AlpacaBroker(paper=False)
-            logger.info("Using AlpacaBroker (LIVE trading).")
-        elif self.mode == "paper" and cfg.alpaca.is_configured():
-            from equities.alpaca_broker import AlpacaBroker
-            broker = AlpacaBroker(paper=True)
-            logger.info("Using AlpacaBroker (PAPER trading).")
+        # TODO: implement IBKRBroker in broker/ package for live trading
+        if self.mode == "live" and cfg.ibkr.is_configured():
+            raise NotImplementedError(
+                "IBKRBroker not yet implemented. Use --mode paper for now."
+            )
         else:
             broker = SimulatedBroker(
                 initial_cash=cfg.system.initial_portfolio_value,
@@ -205,7 +199,7 @@ class SystemOrchestrator:
                 commission_per_share=cfg.backtest.commission_per_share,
                 trade_logger=self._log,
             )
-            logger.info("Using SimulatedBroker (no Alpaca credentials).")
+            logger.info("Using SimulatedBroker.")
 
         # --- Kill switch + circuit breaker ---
         # Use actual broker equity (not config default) so we don't carry
@@ -228,13 +222,9 @@ class SystemOrchestrator:
         # --- Reconciler ---
         reconciler = Reconciler(broker=broker, mode="soft")
 
+        # TODO: re-implement strategies in v2 (options-first, equities dormant)
         signal_gen = SignalGenerator(
-            strategies=[
-                StatArbStrategy(config=cfg.strategy.stat_arb),
-                MomentumStrategy(config=cfg.strategy.momentum),
-                FactorModelStrategy(config=cfg.strategy.factor_model),
-                MeanReversionStrategy(config=cfg.strategy.mean_reversion),
-            ],
+            strategies=[],
             trade_logger=self._log,
         )
         exec_mgr = ExecutionManager(

@@ -2,7 +2,7 @@
 core/reconciliation.py
 ======================
 Position reconciliation between the internal execution engine and the
-live broker (Alpaca).
+live broker (IBKR).
 
 Run after every trading cycle (or on a schedule) to detect and resolve
 discrepancies between what the system *thinks* it holds and what the
@@ -18,7 +18,7 @@ Usage
 -----
     from core.reconciliation import Reconciler
 
-    reconciler = Reconciler(broker=alpaca_broker, mode="soft")
+    reconciler = Reconciler(broker=ibkr_broker, mode="soft")
     report = reconciler.reconcile(internal_positions)
     if report.has_discrepancies:
         logger.warning(f"Discrepancies found: {report.summary()}")

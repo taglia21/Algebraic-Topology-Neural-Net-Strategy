@@ -1,87 +1,71 @@
-# VRP Alpha Engine — Architecture
+# ATNN v2 — Architecture
 
-## Philosophy
-Strip everything to economics-first. One strategy with documented, persistent edge.
-No cargo-cult ML. No 4 strategies fighting each other. No 75% cash drag.
+## Overview
 
-## Strategy: Systematic SPX Put Credit Spreads (VRP Harvesting)
+The system combines Topological Data Analysis (TDA) with neural networks in a
+meta-classifier ensemble. IBKR is the sole broker and data source.
 
-### Why This Works
-- Implied volatility > realized volatility ~95% of years (CBOE data, 20+ year history)
-- CBOE PutWrite Index (PUT) returns ~9.3% annualized vs SPX ~7.8% with LOWER volatility
-- Defined risk: max loss = spread width - credit received
-- SPX = cash-settled, European-style, Section 1256 tax treatment
-- IBKR margin for spreads = spread width - credit (capital efficient)
+## Module Map
 
-### Trade Rules (Optimized via 972-Combo Grid Search)
-1. **Entry**: Sell SPX put credit spreads, 30-45 DTE
-   - Short leg: -0.15 delta (~85% probability of profit, richer premium)
-   - Long leg: 15 points below short leg ($1,500 max risk per spread)
-   - Minimum credit: 8% of spread width ($120+)
-   - Dynamic width: adjusts based on account equity; widens in high-VIX
-2. **Exit**:
-   - Take profit at 50% of max credit (primary)
-   - Take profit at 75% if within 14 DTE
-   - Roll or close at 7 DTE if ITM
-   - Hard stop: close if spread reaches 3x credit received
-   - Force-close 3 days before expiry
-3. **Sizing**:
-   - Up to 50% of account per trade
-   - Max 2 concurrent positions (optimal per grid search)
-   - Scale with VIX regime: 0.75x in low vol, 1.0x standard, 1.5x elevated
-4. **VIX Regime Filter**:
-   - VIX < 12: No trades (premium too thin, gamma > theta)
-   - VIX 12-14: Reduced sizing (0.75x)
-   - VIX 14-20: Standard sizing (1.0x)
-   - VIX 20-35: Elevated sizing (1.5x), wider spreads
-   - VIX > 35: No trades (tail risk)
-
-### Backtest Results (2020-01-01 to 2025-12-30)
-Starting capital: $10,000
-
-| Metric | VRP Engine | SPX Buy & Hold |
-|--------|-----------|----------------|
-| Total Return | +6,392% | +112% |
-| Annual Return | +101% | ~16% |
-| Sharpe Ratio | 1.15 | 0.47 |
-| Sortino Ratio | 1.36 | — |
-| Max Drawdown | -85% | -34% |
-| Calmar Ratio | 1.19 | — |
-| Alpha | +32.4% | — |
-| Win Rate | 87.3% | — |
-| Profit Factor | 1.74 | — |
-| Total Trades | 323 | — |
-
-### Performance Notes
-- **46x speedup**: Black-Scholes uses pure-math `erfc` instead of scipy.stats.norm (~0.9s per 5-year backtest)
-- **Dynamic spread width**: Automatically narrows after drawdowns, widens when account grows or VIX elevated
-- **Drawdown recovery**: System survives COVID (-59%) and tariff crash (-81%) by resizing dynamically
-- **Grid search**: 972 parameter combinations tested; delta=-0.15, width=15, SL=3.0x found optimal
-
-### For $10,000 Account
-- Spread width: 15 points ($1,500 max risk per contract)
-- Dynamic sizing: 2-6 contracts depending on equity
-- Max concurrent: 2 spreads
-- Expected: ~3-6 trades per month
-
-## File Structure
 ```
-config.py          — All configuration (IBKR, strategy params, risk limits)
-broker.py          — IBKR broker interface via ib_async + SimulatedBroker
-strategy.py        — VRP strategy: VIXRegimeClassifier, StrikeSelector, PositionManager, VRPStrategy
-risk.py            — Portfolio risk management (drawdown halt, daily loss, greeks limits)
-backtest.py        — Options backtest engine using yfinance SPX/VIX + Black-Scholes
-main.py            — CLI entry point for backtest/paper/live modes
-utils.py           — Black-Scholes greeks (pure-math, no scipy), IV solver, date helpers
-tests/test_vrp.py  — 33 unit tests
+core/                  Infrastructure (config, logging, risk, regime detection)
+tda/                   Topological Data Analysis (persistent homology, Betti curves, Laplacian diffusion)
+nn/                    Neural networks (LSTM, Attention-LSTM, topology-aware features)
+nn/models/             Model definitions
+ensemble/              Meta-classifier for capital allocation between TDA + NN
+broker/                IBKR integration via ib_async
+options/               Options trading engine (credit spreads, verticals, iron condors)
+equities/              Equities engine (dormant until authorized)
+data/                  Market data abstraction (IBKR data provider)
+backtest/              Backtesting engine
 ```
 
-## What We Removed (and Why)
-- 4 equity strategies (stat_arb, momentum, mean_reversion, factor_model) → zero alpha
-- ML pipeline (LightGBM, CUSUM, meta-labeler, HRP) → cargo cult on insufficient data
-- 50-stock universe → SPX index only
-- Alpaca broker → IBKR (better data, options support, lower commissions)
-- Regime detector (HMM) → Simple VIX level check (more robust, fewer parameters)
-- Signal generator aggregation → One strategy, one signal
-- 21,000 lines → ~2,000 lines
-- scipy dependency for BS pricing → pure-math erfc/exp (46x faster)
+## Data Flow
+
+1. **IBKR Data Feed** → raw OHLCV bars, options chains, account data
+2. **TDA Module** → persistent homology on price manifolds → Betti curves, topological features
+3. **NN Module** → LSTM/Attention-LSTM with topology-aware features → directional predictions
+4. **Ensemble** → meta-classifier combines TDA arbitrage signals + NN directional signals
+5. **Risk Manager** → Kelly sizing, drawdown gates, correlation limits, sector caps
+6. **Options Engine** (active) / Equities Engine (dormant) → order generation
+7. **Broker** → IBKR TWS/Gateway execution
+
+## TDA Approach
+
+- **Persistent Homology**: Compute persistence diagrams from sliding-window point clouds of returns
+- **Betti Curves**: Track topological feature evolution (β₀ = connected components, β₁ = loops/cycles)
+- **Graph Laplacian Diffusion**: Correlation graph → Laplacian eigenvalues → diffusion process for regime detection
+- **Regime Signals**: Topological phase transitions indicate regime changes before traditional indicators
+
+## Neural Network Approach
+
+- **Base Model**: LSTM for sequential return prediction
+- **Enhanced Model**: Attention-LSTM hybrid with multi-head self-attention
+- **Features**: Standard technical features + TDA-derived topological features
+- **Training**: Walk-forward with purged cross-validation
+
+## Ensemble
+
+- **Meta-Classifier**: Learns optimal capital allocation between TDA and NN strategies
+- **Dynamic Weighting**: Adjusts based on recent strategy performance and regime state
+- **Risk Budget**: Total portfolio risk allocated across strategies via risk parity
+
+## Risk Framework
+
+| Parameter | Default | Description |
+|---|---|---|
+| Max Position | 20% | Single name cap as % of equity |
+| Max Sector | 35% | Sector exposure cap |
+| Max Drawdown Halt | -30% | Trading halts at this drawdown |
+| Max Drawdown Reduce | -20% | Exposure reduced to 60% |
+| Daily Loss Limit | -3% | Intraday loss circuit breaker |
+| Vol Target | 20% | Annualized portfolio volatility target |
+| Kelly Fraction | 0.5 | Half-Kelly position sizing |
+
+## Broker Integration
+
+- **Library**: `ib_async` (async Python wrapper for IBKR TWS/Gateway API)
+- **Account**: U22452226
+- **Capabilities**: Equities, options, real-time data, historical data, account management
+- **No Alpaca**: Alpaca has been fully removed from the system
+- **No yfinance**: yfinance has been fully removed from the system

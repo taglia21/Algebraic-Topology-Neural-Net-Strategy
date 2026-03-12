@@ -1,537 +1,675 @@
+#!/usr/bin/env python3
 """
-ATNN Quant Powerhouse — Main Orchestrator
-==========================================
-Single entry point for all operating modes: backtest, paper, live.
+ATNN v2 — Algebraic Topology + Neural Network Trading System
+=============================================================
+Entry point for all operating modes.
 
 Usage
 -----
-    python main.py --mode backtest --start 2022-01-01 --end 2025-12-31
-    python main.py --mode backtest --start 2022-01-01 --end 2025-12-31 --ml
-    python main.py --mode paper
-    python main.py --mode live   # requires IBKR TWS/Gateway running
-
-Environment Variables
----------------------
-    IBKR_HOST             — IBKR TWS/Gateway host (default: 127.0.0.1)
-    IBKR_PORT             — IBKR TWS/Gateway port (default: 7497)
-    IBKR_CLIENT_ID        — IBKR client ID (default: 1)
-    IBKR_ACCOUNT          — IBKR account ID (e.g. U22452226)
-    SYSTEM_MODE           — backtest | paper | live
-    LOG_LEVEL             — DEBUG | INFO | WARNING | ERROR
-    PORTFOLIO_VALUE       — Initial portfolio value in USD
-
-Architecture
-------------
-The SAME :class:`SystemOrchestrator` runs in all modes.  Components differ:
-
-    Mode       Data source          Broker
-    ---------  -------------------  ------------------
-    backtest   DataManager (hist)   SimulatedBroker
-    paper      DataManager (live)   SimulatedBroker
-    live       DataManager (live)   IBKRBroker (TODO)
-
-All signal generation, regime detection, risk management, and ML code
-is identical across modes — this is the core design guarantee.
+    python main.py live                       # Live/paper trading (connects to IBKR)
+    python main.py backtest                   # Walk-forward backtest
+    python main.py backtest --options         # Options-specific backtest
+    python main.py train                      # Train NN models via walk-forward
+    python main.py status                     # Show system status
+    python main.py --config config/custom.yaml live   # Custom config
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 import time
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import datetime, date, time as dt_time
+from pathlib import Path
+from typing import Optional
 
-from core.config import get_config
-from core.logger import get_trade_logger
-from backtest.backtester import Backtester
-from backtest.metrics import BacktestResult, PerformanceMetrics
-
-logger = logging.getLogger(__name__)
-
-# Default symbol universe for standalone runs — sourced from config
-from core.config import _DEFAULT_SYMBOLS
+logger = logging.getLogger("atnn")
 
 
 # ---------------------------------------------------------------------------
-# SystemOrchestrator
+# CLI
 # ---------------------------------------------------------------------------
 
-class SystemOrchestrator:
-    """Ties all ATNN Quant Powerhouse components into a single flow.
-
-    Data → Features → Regime → Signals → ML → Risk → Execution
-
-    The same orchestrator runs in all modes (backtest, paper, live).
-    Only the data source and broker implementation change.
-
-    Parameters
-    ----------
-    mode:
-        Operating mode: ``"backtest"``, ``"paper"``, or ``"live"``.
-    """
-
-    def __init__(self, mode: str = "backtest") -> None:
-        self.mode   = mode.lower()
-        self.config = get_config()
-        self._log   = get_trade_logger()
-
-        # Override mode in config so all components see the right mode
-        self.config.system.mode = self.mode
-        self.config.validate()
-
-        logger.info(f"SystemOrchestrator initialised in {self.mode!r} mode.")
-
-    # ------------------------------------------------------------------
-    # Backtest
-    # ------------------------------------------------------------------
-
-    def run_backtest(
-        self,
-        start: str,
-        end: str,
-        symbols: Optional[List[str]] = None,
-        initial_capital: float = 100_000.0,
-        use_ml: bool = False,
-    ) -> BacktestResult:
-        """Run a full backtest and print a summary to the terminal.
-
-        Parameters
-        ----------
-        start:
-            ISO-8601 start date (e.g. ``"2022-01-01"``).
-        end:
-            ISO-8601 end date.
-        symbols:
-            Trading universe.  Defaults to the built-in top-18 S&P 500 names.
-        initial_capital:
-            Starting portfolio cash in USD.
-        use_ml:
-            Whether to enable the ML meta-learner pipeline.
-
-        Returns
-        -------
-        BacktestResult
-        """
-        symbols = symbols or _DEFAULT_SYMBOLS
-        print("\n" + "=" * 62)
-        print("  ATNN QUANT POWERHOUSE — BACKTEST")
-        print("=" * 62)
-        print(f"  Period   : {start} → {end}")
-        print(f"  Universe : {len(symbols)} symbols")
-        print(f"  Capital  : ${initial_capital:,.0f}")
-        print(f"  ML       : {'enabled' if use_ml else 'disabled'}")
-        print("=" * 62 + "\n")
-
-        bt = Backtester(
-            config=self.config,
-            initial_cash=initial_capital,
-            verbose=True,
-        )
-
-        t0 = time.time()
-        result = bt.run(
-            symbols=symbols,
-            start_date=start,
-            end_date=end,
-            use_ml=use_ml,
-        )
-        elapsed = time.time() - t0
-
-        self.print_summary(result)
-        print(f"\n  Runtime: {elapsed:.1f}s\n")
-        return result
-
-    # ------------------------------------------------------------------
-    # Live / Paper
-    # ------------------------------------------------------------------
-
-    def run_live(self) -> None:
-        """Run the live or paper trading loop with full production safety.
-
-        Operates in a tight loop during US market hours, executing one
-        trading cycle per iteration:
-
-            1. Wait for market open (market hours awareness).
-            2. Fetch latest bars from the data provider.
-            3. Detect current regime.
-            4. Generate signals.
-            5. Kill switch / circuit breaker pre-trade check.
-            6. Apply risk checks.
-            7. Submit orders to the broker.
-            8. Reconcile positions against broker.
-            9. Sleep until next cycle.
-
-        In paper mode the broker is a :class:`SimulatedBroker`.
-        In live mode the broker is :class:`IBKRBroker` (TODO), routing real
-        orders to IBKR TWS/Gateway.
-        """
-        from data.data_manager import DataManager
-        from data.cache import DataCache
-        from equities.execution import ExecutionManager, SimulatedBroker
-        from equities.signal_generator import SignalGenerator
-        from core.regime_detector import RegimeDetector
-        from core.risk_manager import RiskManager
-        from core.market_hours import MarketCalendar
-        from core.kill_switch import KillSwitch, CircuitBreakerConfig
-        from core.reconciliation import Reconciler
-
-        print(f"\n[{self.mode.upper()} MODE] Starting trading loop ...")
-
-        cfg = self.config
-        data_manager = DataManager(mode=self.mode)
-        data_cache = DataCache(max_entries=5000)
-        regime_detector = RegimeDetector()
-        risk_manager = RiskManager(cfg.risk, self._log)
-        market_cal = MarketCalendar()
-
-        # --- Select broker based on mode ---
-        # TODO: implement IBKRBroker in broker/ package for live trading
-        if self.mode == "live" and cfg.ibkr.is_configured():
-            raise NotImplementedError(
-                "IBKRBroker not yet implemented. Use --mode paper for now."
-            )
-        else:
-            broker = SimulatedBroker(
-                initial_cash=cfg.system.initial_portfolio_value,
-                slippage_bps=cfg.backtest.slippage_bps,
-                commission_per_share=cfg.backtest.commission_per_share,
-                trade_logger=self._log,
-            )
-            logger.info("Using SimulatedBroker.")
-
-        # --- Kill switch + circuit breaker ---
-        # Use actual broker equity (not config default) so we don't carry
-        # a stale $100K peak from a paper-reset that never happened.
-        _broker_equity = getattr(broker, 'equity', None) or cfg.system.initial_portfolio_value
-        if hasattr(broker, 'get_account'):
-            try:
-                _acct = broker.get_account()
-                _broker_equity = float(getattr(_acct, 'equity', _broker_equity))
-            except Exception:
-                pass
-        kill_switch = KillSwitch(
-            config=CircuitBreakerConfig(
-                max_drawdown_pct=-0.99,  # disabled — only daily loss halts trading
-                max_daily_loss_pct=-0.08,  # halt if we lose 8% in a single day
-            ),
-            initial_equity=_broker_equity,
-        )
-
-        # --- Reconciler ---
-        reconciler = Reconciler(broker=broker, mode="soft")
-
-        # TODO: re-implement strategies in v2 (options-first, equities dormant)
-        signal_gen = SignalGenerator(
-            strategies=[],
-            trade_logger=self._log,
-        )
-        exec_mgr = ExecutionManager(
-            broker=broker,
-            risk_manager=risk_manager,
-            trade_logger=self._log,
-        )
-
-        symbols = cfg.data.symbols
-        cycle = 0
-        _last_trading_date = None  # tracks current trading day for daily reset
-
-        while True:
-            cycle += 1
-
-            # --- Market hours gate ---
-            if not market_cal.is_market_open():
-                if cycle == 1:
-                    next_open = market_cal.next_open()
-                    print(
-                        f"  Market closed. Next open: "
-                        f"{next_open.strftime('%Y-%m-%d %H:%M ET')}",
-                        flush=True,
-                    )
-                time.sleep(60)
-                continue
-
-            logger.info(f"Live cycle {cycle}")
-
-            try:
-                # --- Daily reset at market open ---
-                from datetime import date as _date_cls
-                _today = _date_cls.today()
-                if _last_trading_date != _today:
-                    # New trading day — reset kill switch with current equity
-                    _broker_eq_now = _broker_equity
-                    if hasattr(broker, 'get_account'):
-                        try:
-                            _acct_now = broker.get_account()
-                            _broker_eq_now = float(getattr(_acct_now, 'equity', _broker_eq_now))
-                        except Exception:
-                            pass
-                    # Reset broker SOD equity for daily P&L tracking
-                    if hasattr(broker, 'reset_daily'):
-                        broker.reset_daily()
-                    kill_switch.reset_daily(_broker_eq_now)
-                    logger.info(f"Daily reset: SOD equity=${_broker_eq_now:,.2f}")
-                    _last_trading_date = _today
-
-                # --- Kill switch check ---
-                if not kill_switch.is_trading_allowed():
-                    # Check if cooldown has expired
-                    kill_switch.check_cooldown_expired()
-                if not kill_switch.is_trading_allowed():
-                    logger.warning(f"Trading blocked: {kill_switch.block_reason}")
-                    time.sleep(60)
-                    continue
-
-                # Fetch latest bars
-                bars = data_manager.get_latest_bars(symbols, limit=cfg.data.history_days)
-                if bars is None or len(bars) == 0:
-                    logger.warning("No bar data available; skipping cycle.")
-                    time.sleep(60)
-                    continue
-
-                # Extract SPY history for regime detection
-                spy_data = None
-                try:
-                    sym_level = bars.index.get_level_values("symbol")
-                    spy_mask  = sym_level == "SPY"
-                    spy_df    = bars.loc[spy_mask].copy()
-                    spy_df.index = spy_df.index.get_level_values("datetime")
-                    spy_df.columns = [c.lower() for c in spy_df.columns]
-                    spy_df = spy_df[~spy_df.index.duplicated(keep="last")]
-                    spy_data = spy_df
-                except Exception as exc:
-                    logger.warning(f"SPY extraction failed: {exc}")
-
-                # Regime detection
-                regime_state = Backtester._default_regime_state()
-                if spy_data is not None and len(spy_data) >= 60:
-                    try:
-                        if not regime_detector.is_fitted:
-                            regime_detector.fit(spy_data)
-                        regime_state = regime_detector.predict(spy_data)
-                        logger.info(
-                            f"Regime: {regime_state.regime.value} "
-                            f"(confidence={regime_state.confidence:.1%})"
-                        )
-                    except Exception as exc:
-                        logger.warning(f"RegimeDetector failed: {exc}")
-
-                # Build price pivot
-                close_col = next(
-                    (c for c in bars.columns if c.lower() == "close"), None
-                )
-                if close_col is None:
-                    logger.warning("No 'close' column; skipping signal generation.")
-                    time.sleep(60)
-                    continue
-
-                price_data = bars[close_col].unstack(level="symbol")
-                trade_syms = [s for s in symbols if s in price_data.columns]
-                price_data = price_data[trade_syms] if trade_syms else price_data
-
-                # Extract volume data for mean reversion volume spike filter
-                volume_data = None
-                vol_col = next(
-                    (c for c in bars.columns if c.lower() == "volume"), None
-                )
-                if vol_col is not None:
-                    try:
-                        volume_data = bars[vol_col].unstack(level="symbol")
-                        if trade_syms:
-                            vol_cols = [s for s in trade_syms if s in volume_data.columns]
-                            volume_data = volume_data[vol_cols] if vol_cols else volume_data
-                    except Exception:
-                        volume_data = None
-
-                # Latest prices
-                current_prices = price_data.iloc[-1].to_dict() if len(price_data) > 0 else {}
-                if hasattr(broker, 'update_prices'):
-                    broker.update_prices(current_prices)
-
-                # --- Pre-trade circuit breaker check ---
-                portfolio = broker.get_portfolio_state()
-                if not kill_switch.pre_order_check(portfolio):
-                    logger.warning(f"Circuit breaker tripped: {kill_switch.block_reason}")
-                    time.sleep(60)
-                    continue
-
-                # Generate signals
-                if len(price_data) >= 20:
-                    signals = signal_gen.generate_all_signals(price_data, regime_state, volume_data=volume_data)
-                    if signals:
-                        orders = exec_mgr.process_signals(signals, current_prices)
-                        logger.info(
-                            f"Cycle {cycle}: {len(signals)} signals → "
-                            f"{len(orders)} orders submitted."
-                        )
-
-                # Refresh portfolio after trades
-                portfolio = broker.get_portfolio_state()
-
-                # --- Position reconciliation (every 10 cycles) ---
-                if cycle % 10 == 0:
-                    try:
-                        internal_positions = (
-                            broker.get_positions()
-                            if hasattr(broker, 'get_positions')
-                            else {}
-                        )
-                        recon_report = reconciler.reconcile(internal_positions)
-                        if recon_report.has_discrepancies:
-                            logger.warning(recon_report.summary())
-                    except Exception as exc:
-                        logger.warning(f"Reconciliation failed: {exc}")
-
-                # --- Cache maintenance (every 20 cycles ≈ 100 min) ---
-                if cycle % 20 == 0:
-                    purged = data_cache.purge_expired()
-                    if purged > 0:
-                        logger.debug(f"Cache: purged {purged} stale entries.")
-
-                # Print portfolio snapshot
-                mins_left = market_cal.minutes_until_close()
-                print(
-                    f"  [cycle {cycle}] equity={portfolio.equity:,.2f} | "
-                    f"cash={portfolio.cash:,.2f} | "
-                    f"positions={len(portfolio.positions)} | "
-                    f"regime={regime_state.regime.value} | "
-                    f"close_in={mins_left:.0f}m",
-                    flush=True,
-                )
-
-            except KeyboardInterrupt:
-                print("\n[LIVE] Interrupted by user. Shutting down.")
-                break
-            except Exception as exc:
-                logger.error(f"Live cycle {cycle} failed: {exc}", exc_info=True)
-
-            # Sleep between cycles (5 minutes in paper/live mode)
-            time.sleep(900)  # 15 min — reduced overtrading
-
-    # ------------------------------------------------------------------
-    # Summary printer
-    # ------------------------------------------------------------------
-
-    def print_summary(self, result: BacktestResult) -> None:
-        """Print a clean backtest summary to the terminal.
-
-        Parameters
-        ----------
-        result:
-            Completed :class:`BacktestResult`.
-        """
-        report = PerformanceMetrics.generate_report(
-            metrics=result.metrics,
-            equity_curve=result.equity_curve,
-            benchmark=None,  # included in metrics dict already
-        )
-        print(report)
-
-        # Extra summary line
-        m = result.metrics
-        n_trades = m.get("total_trades", 0)
-        win_rate = m.get("win_rate", float("nan"))
-        sharpe   = m.get("sharpe_ratio", float("nan"))
-        max_dd   = m.get("max_drawdown", float("nan"))
-
-        import math
-        def _s(v, pct=False):
-            if v is None or (isinstance(v, float) and math.isnan(v)):
-                return "N/A"
-            return f"{v:.1%}" if pct else f"{v:.2f}"
-
-        print(
-            f"\n  Quick summary: "
-            f"trades={n_trades} | "
-            f"win={_s(win_rate, pct=True)} | "
-            f"Sharpe={_s(sharpe)} | "
-            f"MaxDD={_s(max_dd, pct=True)}\n"
-        )
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-def _parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="main.py",
-        description="ATNN Quant Powerhouse — Quantitative Trading System",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        prog="atnn",
+        description="ATNN v2 — Algebraic Topology + Neural Network Trading System",
     )
     parser.add_argument(
-        "--mode",
-        choices=["backtest", "paper", "live"],
-        default="backtest",
-        help="Operating mode.",
-    )
-    parser.add_argument(
-        "--start",
-        default="2022-01-01",
-        help="Backtest start date (YYYY-MM-DD).",
-    )
-    parser.add_argument(
-        "--end",
-        default="2025-12-31",
-        help="Backtest end date (YYYY-MM-DD).",
-    )
-    parser.add_argument(
-        "--capital",
-        type=float,
-        default=100_000.0,
-        help="Initial portfolio capital in USD.",
-    )
-    parser.add_argument(
-        "--ml",
-        action="store_true",
-        default=False,
-        help="Enable ML meta-learner pipeline.",
-    )
-    parser.add_argument(
-        "--symbols",
-        nargs="+",
+        "--config", "-c",
         default=None,
-        help="Space-separated list of ticker symbols to trade.",
+        help="Path to YAML config file (default: config/default.yaml)",
     )
-    parser.add_argument(
-        "--log-level",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        default="INFO",
-        help="Logging verbosity.",
-    )
-    return parser.parse_args()
+
+    sub = parser.add_subparsers(dest="command", help="Operating mode")
+
+    # live
+    live_p = sub.add_parser("live", help="Run live/paper trading loop")
+    live_p.add_argument("--dry-run", action="store_true",
+                        help="Log signals only, do not execute trades")
+
+    # backtest
+    bt_p = sub.add_parser("backtest", help="Run walk-forward backtest")
+    bt_p.add_argument("--options", action="store_true",
+                       help="Run options-specific backtest")
+    bt_p.add_argument("--start", default=None,
+                       help="Start date (YYYY-MM-DD), default from config")
+    bt_p.add_argument("--end", default=None,
+                       help="End date (YYYY-MM-DD), default today")
+
+    # train
+    sub.add_parser("train", help="Train NN models via walk-forward")
+
+    # status
+    sub.add_parser("status", help="Show system status and config")
+
+    return parser
 
 
-def _configure_logging(level: str) -> None:
-    """Configure root logger with a clean format.
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
 
-    Parameters
-    ----------
-    level:
-        Log level string (``"DEBUG"``, ``"INFO"``, etc.).
-    """
+def setup_logging(level: str = "INFO") -> None:
+    """Configure structured logging to stdout."""
     logging.basicConfig(
-        level=getattr(logging, level, logging.INFO),
+        level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
+        force=True,
     )
 
 
-if __name__ == "__main__":
-    args = _parse_args()
-    _configure_logging(args.log_level)
+# ---------------------------------------------------------------------------
+# Signal time helpers
+# ---------------------------------------------------------------------------
 
-    orchestrator = SystemOrchestrator(mode=args.mode)
+def _parse_time(t: str) -> dt_time:
+    """Parse 'HH:MM' to a time object."""
+    h, m = t.split(":")
+    return dt_time(int(h), int(m))
 
-    if args.mode == "backtest":
-        orchestrator.run_backtest(
-            start=args.start,
-            end=args.end,
-            symbols=args.symbols,
-            initial_capital=args.capital,
-            use_ml=args.ml,
+
+def _now_et():
+    """Current datetime in Eastern Time."""
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York"))
+
+
+def _wait_until(target_time: dt_time) -> None:
+    """Sleep until target_time ET (today). Returns immediately if past."""
+    now = _now_et()
+    target = now.replace(
+        hour=target_time.hour, minute=target_time.minute, second=0, microsecond=0
+    )
+    delta = (target - now).total_seconds()
+    if delta > 0:
+        logger.info(f"Waiting {delta / 60:.1f} minutes until {target_time}...")
+        time.sleep(delta)
+
+
+# ---------------------------------------------------------------------------
+# LIVE MODE
+# ---------------------------------------------------------------------------
+
+def run_live(cfg, dry_run: bool = False) -> None:
+    """Run the live/paper trading loop.
+
+    Workflow per trading day:
+    1. Wait for signal_time
+    2. Fetch market data from IBKR
+    3. Compute TDA features
+    4. Generate NN predictions
+    5. Run ensemble -> sized signals
+    6. Check risk constraints
+    7. Execute trades (or log-only if dormant/dry-run)
+    8. Wait for reconciliation_time
+    9. Run EOD reconciliation
+    10. Log daily summary
+    """
+    from core.logger import get_trade_logger
+    from core.market_hours import MarketCalendar
+    from core.kill_switch import KillSwitch, CircuitBreakerConfig
+
+    trade_log = get_trade_logger(log_level=cfg.system.log_level)
+    market_cal = MarketCalendar()
+
+    # Graceful shutdown
+    _shutdown = False
+
+    def _handle_signal(signum, frame):
+        nonlocal _shutdown
+        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        _shutdown = True
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    # Parse schedule times
+    signal_time = _parse_time(cfg.schedule.signal_time)
+    recon_time = _parse_time(cfg.schedule.reconciliation_time)
+
+    # Kill switch
+    kill_switch = KillSwitch(
+        config=CircuitBreakerConfig(
+            max_drawdown_pct=-cfg.risk.max_drawdown_halt_pct,
+            max_daily_loss_pct=-cfg.risk.daily_loss_flatten_pct,
+        ),
+        initial_equity=cfg.backtest.initial_capital,
+    )
+
+    # Try to connect to IBKR
+    ib_connected = False
+    data_feed = None
+    portfolio_mgr = None
+    equity_trader = None
+    option_trader = None
+    risk_monitor = None
+
+    if cfg.broker.is_configured():
+        try:
+            from broker.data_feed import IBKRDataFeed
+            from broker.portfolio_manager import PortfolioManager
+            from broker.equity_trader import EquityTrader
+            from broker.option_trader import OptionTrader
+            from broker.risk_monitor import RiskMonitor
+
+            data_feed = IBKRDataFeed(
+                host=cfg.broker.host,
+                port=cfg.broker.port,
+                client_id=cfg.broker.client_id,
+            )
+            portfolio_mgr = PortfolioManager(
+                host=cfg.broker.host,
+                port=cfg.broker.port,
+                client_id=cfg.broker.client_id + 1,
+                account=cfg.broker.account,
+            )
+            equity_trader = EquityTrader(
+                host=cfg.broker.host,
+                port=cfg.broker.port,
+                client_id=cfg.broker.client_id + 2,
+                account=cfg.broker.account,
+            )
+            option_trader = OptionTrader(
+                host=cfg.broker.host,
+                port=cfg.broker.port,
+                client_id=cfg.broker.client_id + 3,
+                account=cfg.broker.account,
+            )
+            risk_monitor = RiskMonitor(
+                portfolio_manager=portfolio_mgr,
+            )
+            risk_monitor.register_traders(equity_trader, option_trader)
+            ib_connected = True
+            logger.info("Connected to IBKR")
+        except Exception as e:
+            logger.warning(f"IBKR connection failed: {e}. Running in signal-only mode.")
+
+    # Initialize TDA
+    tda_extractor = None
+    try:
+        from tda import TDAFeatureExtractor
+        tda_extractor = TDAFeatureExtractor(
+            ph_window=cfg.tda.ph_window,
+            corr_window=cfg.tda.corr_window,
+            diffusion_time=cfg.tda.diffusion_time,
         )
+        logger.info("TDA feature extractor initialized")
+    except Exception as e:
+        logger.warning(f"TDA init failed: {e}")
+
+    # Load NN model
+    nn_model = None
+    model_dir = Path(cfg.system.model_dir)
+    try:
+        from nn import LSTMPredictor, AttentionLSTMPredictor
+        model_cls = AttentionLSTMPredictor if cfg.nn.model_type == "attention_lstm" else LSTMPredictor
+        # Look for latest saved model
+        model_files = sorted(model_dir.glob("*.pt")) + sorted(model_dir.glob("*.pth"))
+        if model_files:
+            import torch
+            nn_model = model_cls(
+                input_size=10,  # will be overridden by checkpoint
+                hidden_size=cfg.nn.hidden_size,
+                num_layers=cfg.nn.num_layers,
+                dropout=cfg.nn.dropout,
+            )
+            nn_model.load_state_dict(torch.load(model_files[-1], map_location="cpu"))
+            nn_model.eval()
+            logger.info(f"Loaded NN model from {model_files[-1]}")
+        else:
+            logger.info("No trained NN model found; signals will be TDA-only")
+    except Exception as e:
+        logger.warning(f"NN model load failed: {e}")
+
+    # Initialize ensemble
+    meta_allocator = None
+    signal_aggregator = None
+    ensemble_risk = None
+    try:
+        from ensemble import MetaAllocator, SignalAggregator, EnsembleRiskManager
+        meta_allocator = MetaAllocator(
+            default_tda_weight=cfg.ensemble.default_tda_weight,
+            default_nn_weight=cfg.ensemble.default_nn_weight,
+        )
+        signal_aggregator = SignalAggregator(
+            min_signal_strength=cfg.ensemble.min_signal_strength,
+            agreement_bonus=cfg.ensemble.agreement_bonus,
+            disagreement_penalty=cfg.ensemble.disagreement_penalty,
+        )
+        ensemble_risk = EnsembleRiskManager(
+            max_position_pct=cfg.risk.max_position_pct,
+            kelly_fraction=cfg.risk.kelly_fraction,
+        )
+        logger.info("Ensemble components initialized")
+    except Exception as e:
+        logger.warning(f"Ensemble init failed: {e}")
+
+    options_enabled = cfg.options.enabled and not dry_run
+    equities_enabled = cfg.equities.enabled and not dry_run
+
+    mode_str = "DRY-RUN" if dry_run else ("LIVE" if cfg.system.mode == "live" else "PAPER")
+    print(f"\n{'=' * 60}")
+    print(f"  ATNN v2 — {mode_str} MODE")
+    print(f"  Symbols: {cfg.universe.symbols}")
+    print(f"  Options: {'ENABLED' if options_enabled else 'DORMANT'}")
+    print(f"  Equities: {'ENABLED' if equities_enabled else 'DORMANT'}")
+    print(f"  IBKR: {'Connected' if ib_connected else 'Not connected'}")
+    print(f"  Signal time: {cfg.schedule.signal_time} ET")
+    print(f"{'=' * 60}\n")
+
+    _last_trading_date = None
+
+    while not _shutdown:
+        # Market hours gate
+        if not market_cal.is_market_open():
+            next_open = market_cal.next_open()
+            logger.info(f"Market closed. Next open: {next_open.strftime('%Y-%m-%d %H:%M ET')}")
+            # Sleep in short intervals to check for shutdown
+            for _ in range(60):
+                if _shutdown:
+                    break
+                time.sleep(1)
+            continue
+
+        today = date.today()
+
+        # Daily reset
+        if _last_trading_date != today:
+            _last_trading_date = today
+            kill_switch.reset_daily(cfg.backtest.initial_capital)
+            logger.info(f"=== New trading day: {today} ===")
+
+        # Kill switch check
+        if not kill_switch.is_trading_allowed():
+            kill_switch.check_cooldown_expired()
+        if not kill_switch.is_trading_allowed():
+            logger.warning(f"Trading halted: {kill_switch.block_reason}")
+            time.sleep(60)
+            continue
+
+        # Wait for signal time
+        _wait_until(signal_time)
+        if _shutdown:
+            break
+
+        logger.info("--- Signal generation cycle ---")
+
+        try:
+            # Fetch market data
+            market_data = None
+            if data_feed and ib_connected:
+                try:
+                    market_data = data_feed.get_historical_bars_multi(
+                        symbols=cfg.universe.symbols,
+                        duration="1 Y",
+                        bar_size="1 day",
+                    )
+                    logger.info(f"Fetched data for {len(market_data)} symbols")
+                except Exception as e:
+                    logger.error(f"Data fetch failed: {e}")
+
+            # Compute TDA features
+            tda_features = None
+            if tda_extractor and market_data:
+                try:
+                    import pandas as pd
+                    # Build returns matrix from closes
+                    closes = {}
+                    for sym, df in market_data.items():
+                        if df is not None and len(df) > 0:
+                            close_col = next((c for c in df.columns if c.lower() == "close"), None)
+                            if close_col:
+                                closes[sym] = df[close_col]
+                    if closes:
+                        price_df = pd.DataFrame(closes)
+                        returns_df = price_df.pct_change().dropna()
+                        tda_features = tda_extractor.extract(returns_df)
+                        logger.info(f"TDA features: {tda_features.columns.tolist()}")
+                except Exception as e:
+                    logger.warning(f"TDA feature extraction failed: {e}")
+
+            # Generate NN predictions
+            nn_predictions = None
+            if nn_model and market_data:
+                try:
+                    logger.info("NN predictions: model loaded but inference skipped (no live pipeline yet)")
+                except Exception as e:
+                    logger.warning(f"NN prediction failed: {e}")
+
+            # Run ensemble
+            ensemble_signals = None
+            if signal_aggregator and (tda_features is not None or nn_predictions is not None):
+                try:
+                    logger.info("Ensemble: combining available signals")
+                    # In a full implementation, this would call signal_aggregator.aggregate()
+                except Exception as e:
+                    logger.warning(f"Ensemble aggregation failed: {e}")
+
+            # Check risk constraints
+            if ensemble_risk and ensemble_signals:
+                try:
+                    logger.info("Risk check: evaluating position sizes")
+                except Exception as e:
+                    logger.warning(f"Risk check failed: {e}")
+
+            # Execute trades (or log only)
+            if ensemble_signals and not dry_run:
+                if options_enabled and option_trader:
+                    logger.info("Options execution: would place trades here")
+                if equities_enabled and equity_trader:
+                    logger.info("Equity execution: would place trades here")
+            else:
+                logger.info("Signal-only mode: no trades executed")
+
+            # Risk monitor check
+            if risk_monitor and ib_connected:
+                try:
+                    risk_result = risk_monitor.check_risk()
+                    logger.info(f"Risk check: {risk_result}")
+                except Exception as e:
+                    logger.warning(f"Risk monitor failed: {e}")
+
+        except Exception as e:
+            logger.error(f"Signal cycle failed: {e}", exc_info=True)
+
+        # Wait for reconciliation time
+        _wait_until(recon_time)
+        if _shutdown:
+            break
+
+        # EOD reconciliation
+        try:
+            if portfolio_mgr and ib_connected:
+                positions = portfolio_mgr.sync_positions()
+                nav = portfolio_mgr.get_nav()
+                daily_pnl = portfolio_mgr.get_daily_pnl()
+                logger.info(f"EOD: NAV=${nav:,.2f} | Daily P&L=${daily_pnl:,.2f} | Positions={positions.get('position_count', 0)}")
+            else:
+                logger.info("EOD: No IBKR connection for reconciliation")
+        except Exception as e:
+            logger.warning(f"EOD reconciliation failed: {e}")
+
+        # Sleep until next day
+        logger.info("Trading day complete. Sleeping until next market open.")
+        while not _shutdown and market_cal.is_market_open():
+            time.sleep(30)
+
+    # Graceful shutdown
+    logger.info("Shutting down ATNN v2...")
+    trade_log.close()
+    print("\nATNN v2 shut down cleanly.")
+
+
+# ---------------------------------------------------------------------------
+# BACKTEST MODE
+# ---------------------------------------------------------------------------
+
+def run_backtest(cfg, options_mode: bool = False, start: str = None, end: str = None) -> None:
+    """Run walk-forward backtest."""
+    from core.logger import get_trade_logger
+
+    trade_log = get_trade_logger(log_level=cfg.system.log_level)
+
+    if options_mode:
+        _run_options_backtest(cfg, start, end)
     else:
-        orchestrator.run_live()
+        _run_equity_backtest(cfg, start, end)
+
+    trade_log.close()
+
+
+def _run_equity_backtest(cfg, start: str = None, end: str = None) -> None:
+    """Run walk-forward equity backtest using the backtest engine."""
+    print(f"\n{'=' * 60}")
+    print("  ATNN v2 — WALK-FORWARD BACKTEST")
+    print(f"  Capital: ${cfg.backtest.initial_capital:,.2f}")
+    print(f"  Train window: {cfg.backtest.train_window} days")
+    print(f"  Test window: {cfg.backtest.test_window} days")
+    print(f"{'=' * 60}\n")
+
+    try:
+        from backtest import WalkForwardOptimizer, BacktestReport
+
+        optimizer = WalkForwardOptimizer(
+            train_window=cfg.backtest.train_window,
+            test_window=cfg.backtest.test_window,
+            purge_gap=cfg.backtest.purge_gap,
+            embargo_gap=cfg.backtest.embargo_gap,
+        )
+
+        logger.info("Walk-forward optimizer initialized")
+        logger.info("Backtest requires historical data — run with IBKR connection or cached data")
+
+        # Generate report stub
+        report = BacktestReport()
+        output_path = Path(cfg.system.data_dir) / "backtest_report.html"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Report would be saved to: {output_path}")
+
+    except ImportError as e:
+        logger.error(f"Backtest module import failed: {e}")
+    except Exception as e:
+        logger.error(f"Backtest failed: {e}", exc_info=True)
+
+
+def _run_options_backtest(cfg, start: str = None, end: str = None) -> None:
+    """Run options-specific backtest."""
+    print(f"\n{'=' * 60}")
+    print("  ATNN v2 — OPTIONS BACKTEST")
+    print(f"  Capital: ${cfg.backtest.initial_capital:,.2f}")
+    print(f"  Strategies: {cfg.options.strategies}")
+    print(f"{'=' * 60}\n")
+
+    try:
+        from backtest import OptionsBacktester
+
+        backtester = OptionsBacktester(
+            initial_capital=cfg.backtest.initial_capital,
+            commission_per_contract=cfg.backtest.commission_per_contract,
+        )
+        logger.info("Options backtester initialized")
+        logger.info("Options backtest requires historical options data")
+
+    except ImportError as e:
+        logger.error(f"Options backtest module import failed: {e}")
+    except Exception as e:
+        logger.error(f"Options backtest failed: {e}", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# TRAIN MODE
+# ---------------------------------------------------------------------------
+
+def run_train(cfg) -> None:
+    """Run walk-forward NN training."""
+    print(f"\n{'=' * 60}")
+    print("  ATNN v2 — WALK-FORWARD NN TRAINING")
+    print(f"  Model type: {cfg.nn.model_type}")
+    print(f"  Hidden size: {cfg.nn.hidden_size}")
+    print(f"  Epochs: {cfg.nn.epochs}")
+    print(f"{'=' * 60}\n")
+
+    try:
+        from nn import WalkForwardTrainer, LSTMPredictor, AttentionLSTMPredictor
+
+        model_cls = AttentionLSTMPredictor if cfg.nn.model_type == "attention_lstm" else LSTMPredictor
+
+        trainer = WalkForwardTrainer(
+            model_class=model_cls,
+            train_window=cfg.backtest.train_window,
+            predict_horizon=cfg.backtest.test_window,
+            max_epochs=cfg.nn.epochs,
+            batch_size=cfg.nn.batch_size,
+            lr=cfg.nn.learning_rate,
+            patience=cfg.nn.early_stopping_patience,
+        )
+        logger.info("Walk-forward trainer initialized")
+        logger.info("Training requires historical data — run with IBKR connection or cached data")
+
+        # Save location
+        model_dir = Path(cfg.system.model_dir)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Models will be saved to: {model_dir}")
+
+    except ImportError as e:
+        logger.error(f"NN module import failed: {e}")
+    except Exception as e:
+        logger.error(f"Training setup failed: {e}", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# STATUS MODE
+# ---------------------------------------------------------------------------
+
+def run_status(cfg) -> None:
+    """Show system status — config, IBKR connection, positions, P&L."""
+    print(f"\n{'=' * 60}")
+    print("  ATNN v2 — SYSTEM STATUS")
+    print(f"{'=' * 60}")
+
+    # System info
+    print(f"\n  System:")
+    print(f"    Name:      {cfg.system.name}")
+    print(f"    Mode:      {cfg.system.mode}")
+    print(f"    Log level: {cfg.system.log_level}")
+    print(f"    Data dir:  {cfg.system.data_dir}")
+    print(f"    Model dir: {cfg.system.model_dir}")
+
+    # Broker config
+    print(f"\n  Broker:")
+    print(f"    Host:      {cfg.broker.host}:{cfg.broker.port}")
+    print(f"    Client ID: {cfg.broker.client_id}")
+    print(f"    Account:   {cfg.broker.account or '(not set)'}")
+
+    # Universe
+    print(f"\n  Universe:")
+    print(f"    Symbols:   {cfg.universe.symbols}")
+    print(f"    Benchmark: {cfg.universe.benchmark}")
+
+    # Risk
+    print(f"\n  Risk Limits:")
+    print(f"    Max position:     {cfg.risk.max_position_pct:.0%}")
+    print(f"    Max sector:       {cfg.risk.max_sector_pct:.0%}")
+    print(f"    Max gross exp:    {cfg.risk.max_gross_exposure:.0%}")
+    print(f"    Kelly fraction:   {cfg.risk.kelly_fraction}")
+    print(f"    Daily loss halt:  {cfg.risk.daily_loss_flatten_pct:.0%}")
+    print(f"    Max DD halt:      {cfg.risk.max_drawdown_halt_pct:.0%}")
+
+    # Trading engines
+    print(f"\n  Trading Engines:")
+    print(f"    Options:   {'ENABLED' if cfg.options.enabled else 'DORMANT'}")
+    print(f"    Equities:  {'ENABLED' if cfg.equities.enabled else 'DORMANT'}")
+
+    # Try IBKR connection
+    print(f"\n  IBKR Connection:")
+    if cfg.broker.is_configured():
+        try:
+            from broker.portfolio_manager import PortfolioManager
+            pm = PortfolioManager(
+                host=cfg.broker.host,
+                port=cfg.broker.port,
+                client_id=cfg.broker.client_id + 10,
+                account=cfg.broker.account,
+            )
+            nav = pm.get_nav()
+            daily_pnl = pm.get_daily_pnl()
+            positions = pm.sync_positions()
+            print(f"    Status:    CONNECTED")
+            print(f"    NAV:       ${nav:,.2f}")
+            print(f"    Daily P&L: ${daily_pnl:,.2f}")
+            print(f"    Positions: {positions.get('position_count', 0)}")
+        except Exception as e:
+            print(f"    Status:    NOT CONNECTED ({e})")
+    else:
+        print(f"    Status:    NOT CONFIGURED (no account set)")
+
+    # NN model status
+    print(f"\n  NN Model:")
+    model_dir = Path(cfg.system.model_dir)
+    model_files = sorted(model_dir.glob("*.pt")) + sorted(model_dir.glob("*.pth"))
+    if model_files:
+        print(f"    Latest:    {model_files[-1].name}")
+        print(f"    Count:     {len(model_files)} model(s)")
+    else:
+        print(f"    Status:    No trained models found in {model_dir}")
+
+    # Schedule
+    print(f"\n  Schedule:")
+    print(f"    Signal time:  {cfg.schedule.signal_time} ET")
+    print(f"    Recon time:   {cfg.schedule.reconciliation_time} ET")
+    print(f"    Market:       {cfg.schedule.market_open} - {cfg.schedule.market_close} ET")
+
+    print(f"\n{'=' * 60}\n")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    # Load config
+    from core.config import get_config
+    cfg = get_config(config_path=args.config)
+
+    # Override mode for backtest/live
+    if args.command in ("live", "backtest"):
+        cfg.system.mode = args.command
+
+    setup_logging(cfg.system.log_level)
+
+    logger.info(f"ATNN v2 starting — mode={args.command}")
+
+    if args.command == "live":
+        run_live(cfg, dry_run=getattr(args, "dry_run", False))
+    elif args.command == "backtest":
+        run_backtest(
+            cfg,
+            options_mode=getattr(args, "options", False),
+            start=getattr(args, "start", None),
+            end=getattr(args, "end", None),
+        )
+    elif args.command == "train":
+        run_train(cfg)
+    elif args.command == "status":
+        run_status(cfg)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

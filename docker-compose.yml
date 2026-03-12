@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  atnn-bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      - IBKR_HOST=ib-gateway
+      - IBKR_PORT=4002
+      - IBKR_ACCOUNT=U22452226
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - ib-gateway
+
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    restart: unless-stopped
+    environment:
+      - TWS_USERID=${TWS_USERID}
+      - TWS_PASSWORD=${TWS_PASSWORD}
+      - TRADING_MODE=live
+      - TWS_ACCEPT_INCOMING=accept
+    ports:
+      - "4002:4002"

@@ -1,167 +1,379 @@
 """
 core/config.py
 ==============
-Central configuration for the ATNN Quant Powerhouse trading system.
+Central configuration for the ATNN v2 trading system.
 
-All configuration is expressed as Python dataclasses. Values are loaded from
-environment variables with sensible defaults so the system works out-of-the-box
-in paper mode without any configuration.
+Loads configuration from YAML files with environment variable overrides.
+Provides typed access via nested dataclasses.
 
 Usage
 -----
-    from core.config import get_config, SystemConfig
+    from core.config import get_config
 
-    cfg = get_config()
-    print(cfg.risk.max_position_pct)  # 0.20
-    print(cfg.ibkr.host)              # 127.0.0.1
+    cfg = get_config()                              # loads config/default.yaml
+    cfg = get_config("config/custom.yaml")          # custom YAML
+    print(cfg.broker.host)                          # typed access
+    print(cfg.risk.max_position_pct)
 
-Environment Variables
----------------------
-    IBKR_HOST             — TWS/Gateway host  (default: 127.0.0.1)
-    IBKR_PORT             — TWS/Gateway port  (default: 7497 = paper)
-    IBKR_CLIENT_ID        — Unique client ID   (default: 1)
-    IBKR_ACCOUNT          — IBKR account ID    (default: empty)
-    SYSTEM_MODE           — backtest | paper | live  (default: paper)
-    LOG_LEVEL             — DEBUG | INFO | WARNING | ERROR  (default: INFO)
-    TIMEZONE              — IANA timezone string  (default: America/New_York)
-    PORTFOLIO_VALUE       — Initial portfolio value in USD (default: 100000)
+Environment Variable Overrides
+------------------------------
+    IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, IBKR_ACCOUNT
+    SYSTEM_MODE, LOG_LEVEL
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
-# Top-50 S&P 500 equities by market cap (approximate, as of early 2026)
-# together with the three ETF benchmarks used throughout the system.
+# Default config file path
 # ---------------------------------------------------------------------------
-_DEFAULT_SYMBOLS: List[str] = [
-    # Benchmarks
-    "SPY", "QQQ", "IWM",
-    # Mega-cap tech
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO",
-    # Financials
-    "BRK.B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS",
-    # Healthcare
-    "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT",
-    # Consumer / Industrials
-    "WMT", "HD", "COST", "PG", "KO", "PEP", "MCD", "NKE",
-    # Energy & Materials
-    "XOM", "CVX", "COP",
-    # Communication & Media
-    "NFLX", "DIS", "CMCSA",
-    # Semis / Hardware
-    "AMD", "INTC", "QCOM", "MU", "AMAT", "LRCX",
-    # Cloud / SaaS
-    "CRM", "ORCL", "ADBE", "NOW",
-    # Miscellaneous
-    "RTX", "CAT", "DE", "LIN",
-]
-
-_DEFAULT_TIMEFRAMES: List[str] = ["1Day", "1Hour", "15Min"]
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config" / "default.yaml"
 
 
 # ---------------------------------------------------------------------------
-# IBKR (Interactive Brokers)
+# YAML loader
+# ---------------------------------------------------------------------------
+
+def _load_yaml(path: Path) -> Dict[str, Any]:
+    """Load a YAML file and return as a dict."""
+    import yaml
+    with open(path, "r") as f:
+        data = yaml.safe_load(f) or {}
+    return data
+
+
+def _deep_merge(base: Dict, override: Dict) -> Dict:
+    """Recursively merge *override* into *base* (override wins)."""
+    result = dict(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Dataclass config sections
 # ---------------------------------------------------------------------------
 
 @dataclass
-class IBKRConfig:
-    """Interactive Brokers TWS / Gateway configuration.
+class SystemCfg:
+    name: str = "ATNN-v2"
+    mode: str = "paper"
+    log_level: str = "INFO"
+    data_dir: str = "./data"
+    model_dir: str = "./models"
 
-    Connects via ib_async to a running TWS or IB Gateway instance.
-    """
+    def validate(self) -> None:
+        valid_modes = {"backtest", "paper", "live"}
+        if self.mode not in valid_modes:
+            raise ValueError(
+                f"Invalid mode={self.mode!r}. Must be one of {sorted(valid_modes)}."
+            )
 
-    host: str = field(default_factory=lambda: (
-        os.environ.get("IBKR_HOST", "127.0.0.1")
-    ))
-    port: int = field(default_factory=lambda: int(
-        os.environ.get("IBKR_PORT", "7497")  # 7497=paper, 7496=live
-    ))
-    client_id: int = field(default_factory=lambda: int(
-        os.environ.get("IBKR_CLIENT_ID", "1")
-    ))
-    account: str = field(default_factory=lambda: (
-        os.environ.get("IBKR_ACCOUNT", "")
-    ))
-    timeout: int = field(default_factory=lambda: int(
-        os.environ.get("IBKR_TIMEOUT", "30")
-    ))
+
+@dataclass
+class BrokerCfg:
+    host: str = "127.0.0.1"
+    port: int = 7497
+    client_id: int = 1
+    account: str = ""
+    timeout: int = 30
+    auto_reconnect: bool = True
+    max_reconnect_attempts: int = 5
 
     def is_configured(self) -> bool:
-        """Return True when a valid account ID is set."""
         return bool(self.account)
 
 
+@dataclass
+class UniverseCfg:
+    symbols: List[str] = field(default_factory=lambda: [
+        "SPY", "QQQ", "IWM", "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "TSLA"
+    ])
+    benchmark: str = "SPY"
+
+
+@dataclass
+class TDACfg:
+    ph_window: int = 30
+    corr_window: int = 60
+    diffusion_time: float = 1.0
+    spectral_threshold: float = 1.0
+    regime_lookback: int = 252
+
+
+@dataclass
+class NNCfg:
+    model_type: str = "lstm"
+    hidden_size: int = 128
+    num_layers: int = 2
+    dropout: float = 0.3
+    sequence_length: int = 60
+    learning_rate: float = 0.001
+    batch_size: int = 32
+    epochs: int = 100
+    early_stopping_patience: int = 10
+    direction_threshold: float = 0.005
+
+
+@dataclass
+class EnsembleCfg:
+    default_tda_weight: float = 0.5
+    default_nn_weight: float = 0.5
+    min_signal_strength: float = 0.3
+    agreement_bonus: float = 0.2
+    disagreement_penalty: float = 0.3
+
+
+@dataclass
+class SmallAccountCfg:
+    enabled: bool = True
+    max_risk_per_trade: float = 50.0
+    max_concurrent_positions: int = 3
+    max_option_premium: float = 50.0
+
+
+@dataclass
+class RiskCfg:
+    max_position_pct: float = 0.05
+    max_sector_pct: float = 0.20
+    max_long_exposure: float = 1.0
+    max_short_exposure: float = 0.5
+    max_gross_exposure: float = 1.3
+    kelly_fraction: float = 0.5
+    daily_loss_reduce_pct: float = 0.03
+    daily_loss_flatten_pct: float = 0.05
+    max_drawdown_halt_pct: float = 0.15
+    small_account: SmallAccountCfg = field(default_factory=SmallAccountCfg)
+
+
+@dataclass
+class OptionsCfg:
+    enabled: bool = False
+    strategies: List[str] = field(default_factory=lambda: ["vertical_spread", "iron_condor"])
+    default_dte_range: List[int] = field(default_factory=lambda: [14, 45])
+    profit_target_pct: float = 0.50
+    early_close_dte: int = 2
+    max_delta: float = 0.30
+    preferred_underlyings: List[str] = field(default_factory=lambda: ["SPY", "QQQ"])
+
+
+@dataclass
+class EquitiesCfg:
+    enabled: bool = False
+
+
+@dataclass
+class BacktestCfg:
+    initial_capital: float = 444.0
+    train_window: int = 756
+    test_window: int = 21
+    purge_gap: int = 5
+    embargo_gap: int = 5
+    commission_per_share: float = 0.005
+    commission_per_contract: float = 0.65
+    slippage_pct: float = 0.001
+
+
+@dataclass
+class ScheduleCfg:
+    market_open: str = "09:30"
+    market_close: str = "16:00"
+    timezone: str = "America/New_York"
+    signal_time: str = "09:45"
+    reconciliation_time: str = "15:45"
+
+
 # ---------------------------------------------------------------------------
-# Data
+# Root config container
 # ---------------------------------------------------------------------------
 
 @dataclass
-class DataConfig:
-    """Market-data pipeline configuration."""
+class ATNNConfig:
+    """Root configuration for ATNN v2."""
 
-    provider: str = field(default_factory=lambda: (
-        os.environ.get("DATA_PROVIDER", "ibkr")
-    ))
-    symbols: List[str] = field(default_factory=lambda: list(_DEFAULT_SYMBOLS))
-    timeframes: List[str] = field(default_factory=lambda: list(_DEFAULT_TIMEFRAMES))
-    history_days: int = field(default_factory=lambda: int(
-        os.environ.get("HISTORY_DAYS", "756")  # ~3 trading years
-    ))
-    # Minimum bars required before any strategy may emit signals
-    min_history_bars: int = 60
-    # Cache directory for downloaded data
-    cache_dir: str = field(default_factory=lambda: (
-        os.environ.get("DATA_CACHE_DIR", "data/cache")
-    ))
+    system: SystemCfg = field(default_factory=SystemCfg)
+    broker: BrokerCfg = field(default_factory=BrokerCfg)
+    universe: UniverseCfg = field(default_factory=UniverseCfg)
+    tda: TDACfg = field(default_factory=TDACfg)
+    nn: NNCfg = field(default_factory=NNCfg)
+    ensemble: EnsembleCfg = field(default_factory=EnsembleCfg)
+    risk: RiskCfg = field(default_factory=RiskCfg)
+    options: OptionsCfg = field(default_factory=OptionsCfg)
+    equities: EquitiesCfg = field(default_factory=EquitiesCfg)
+    backtest: BacktestCfg = field(default_factory=BacktestCfg)
+    schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
+
+    def validate(self) -> None:
+        self.system.validate()
+
+    def to_dict(self) -> Dict[str, Any]:
+        import dataclasses
+        return dataclasses.asdict(self)
+
+
+def _build_dataclass(cls, data: Dict[str, Any]):
+    """Construct a dataclass from a dict, handling nested dataclasses."""
+    import dataclasses
+    if not dataclasses.is_dataclass(cls):
+        return data
+
+    field_types = {f.name: f.type for f in dataclasses.fields(cls)}
+    kwargs = {}
+    for f in dataclasses.fields(cls):
+        if f.name in data:
+            val = data[f.name]
+            # Resolve the type for nested dataclasses
+            ftype = f.type
+            if isinstance(ftype, str):
+                # Handle forward references
+                ftype = globals().get(ftype, ftype)
+            if dataclasses.is_dataclass(ftype) and isinstance(val, dict):
+                kwargs[f.name] = _build_dataclass(ftype, val)
+            else:
+                kwargs[f.name] = val
+    return cls(**kwargs)
 
 
 # ---------------------------------------------------------------------------
-# Strategy
+# Environment variable overrides
 # ---------------------------------------------------------------------------
 
+def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Override specific config values from environment variables."""
+    env_map = {
+        "IBKR_HOST": ("broker", "host"),
+        "IBKR_PORT": ("broker", "port", int),
+        "IBKR_CLIENT_ID": ("broker", "client_id", int),
+        "IBKR_ACCOUNT": ("broker", "account"),
+        "SYSTEM_MODE": ("system", "mode"),
+        "LOG_LEVEL": ("system", "log_level"),
+    }
+
+    for env_var, path in env_map.items():
+        val = os.environ.get(env_var)
+        if val is not None:
+            section = path[0]
+            key = path[1]
+            converter = path[2] if len(path) > 2 else str
+            raw.setdefault(section, {})[key] = converter(val)
+
+    return raw
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+_CONFIG_CACHE: Optional[ATNNConfig] = None
+_CACHED_PATH: Optional[str] = None
+
+
+def get_config(
+    config_path: Optional[str] = None,
+    reload: bool = False,
+) -> ATNNConfig:
+    """Load and return the ATNN v2 configuration.
+
+    Parameters
+    ----------
+    config_path:
+        Path to a YAML config file. Defaults to ``config/default.yaml``.
+    reload:
+        Force re-read from disk.
+
+    Returns
+    -------
+    ATNNConfig
+    """
+    global _CONFIG_CACHE, _CACHED_PATH
+
+    path_str = config_path or str(_DEFAULT_CONFIG_PATH)
+
+    if _CONFIG_CACHE is not None and not reload and _CACHED_PATH == path_str:
+        return _CONFIG_CACHE
+
+    path = Path(path_str)
+    if path.exists():
+        raw = _load_yaml(path)
+    else:
+        raw = {}
+
+    # Apply env var overrides
+    raw = _apply_env_overrides(raw)
+
+    # Build typed config
+    cfg = _build_dataclass(ATNNConfig, raw)
+    cfg.validate()
+
+    _CONFIG_CACHE = cfg
+    _CACHED_PATH = path_str
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility — legacy code imports these names
+# ---------------------------------------------------------------------------
+
+# Re-export the old names so existing imports don't break.
+# The old Config class with sub-configs is replaced, but we alias the key ones.
+IBKRConfig = BrokerCfg
+DataConfig = UniverseCfg
+RiskConfig = RiskCfg
+SystemConfig = SystemCfg
+BacktestConfig = BacktestCfg
+Config = ATNNConfig
+
+# Legacy default symbols list (used by old main.py imports)
+_DEFAULT_SYMBOLS: List[str] = [
+    "SPY", "QQQ", "IWM",
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO",
+    "BRK.B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS",
+    "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT",
+    "WMT", "HD", "COST", "PG", "KO", "PEP", "MCD", "NKE",
+    "XOM", "CVX", "COP",
+    "NFLX", "DIS", "CMCSA",
+    "AMD", "INTC", "QCOM", "MU", "AMAT", "LRCX",
+    "CRM", "ORCL", "ADBE", "NOW",
+    "RTX", "CAT", "DE", "LIN",
+]
+
+# Legacy dataclasses needed by old core/__init__.py imports
 @dataclass
 class StatArbConfig:
-    """Pairs / statistical-arbitrage strategy parameters."""
-
-    entry_z: float = 1.5          # Enter when spread Z-score exceeds this
-    exit_z: float = 0.3           # Exit when spread Z-score falls below this
-    stop_z: float = 3.5           # Hard stop at this Z-score
-    min_entry_z: float = 1.0      # Minimum Z-score to trigger entry
-    lookback_days: int = 252      # 1 year minimum cointegration history
-    # Kalman filter noise parameters (initial defaults)
+    entry_z: float = 1.5
+    exit_z: float = 0.3
+    stop_z: float = 3.5
+    min_entry_z: float = 1.0
+    lookback_days: int = 252
     kalman_transition_cov: float = 1e-5
     kalman_observation_cov: float = 1e-3
 
 
 @dataclass
 class MomentumConfig:
-    """Cross-sectional momentum strategy parameters."""
-
-    lookback_days: int = 252      # 12-month lookback
-    skip_days: int = 21           # Skip most recent month (1-month reversal)
-    long_pct: float = 0.20        # Long top quintile
-    short_pct: float = 0.20       # Short bottom quintile
-    # Sector-neutral construction
+    lookback_days: int = 252
+    skip_days: int = 21
+    long_pct: float = 0.20
+    short_pct: float = 0.20
     sector_neutral: bool = True
-    # Volatility scaling: inverse-vol weight positions
     vol_scale: bool = True
-    vol_target: float = 0.20      # Annualised volatility target
+    vol_target: float = 0.20
 
 
 @dataclass
 class FactorModelConfig:
-    """Multi-factor alpha model parameters."""
-
-    lookback_days: int = 63       # ~3 months for factor estimation
-    # Factor composite Z-score thresholds
+    lookback_days: int = 63
     entry_z: float = 0.75
     exit_z: float = -0.25
-    # Factor weights (equal by default; override to time factors)
     quality_weight: float = 0.25
     value_weight: float = 0.25
     low_vol_weight: float = 0.25
@@ -182,78 +394,14 @@ class MeanReversionConfig:
 
 @dataclass
 class StrategyConfig:
-    """Aggregated strategy configuration."""
-
     stat_arb: StatArbConfig = field(default_factory=StatArbConfig)
     momentum: MomentumConfig = field(default_factory=MomentumConfig)
     factor_model: FactorModelConfig = field(default_factory=FactorModelConfig)
     mean_reversion: MeanReversionConfig = field(default_factory=MeanReversionConfig)
 
 
-# ---------------------------------------------------------------------------
-# Risk
-# ---------------------------------------------------------------------------
-
-@dataclass
-class RiskConfig:
-    """Portfolio risk limits and position-sizing parameters."""
-
-    # --- Position limits ---
-    max_position_pct: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_POSITION_PCT", "0.20")
-    ))
-    max_sector_pct: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_SECTOR_PCT", "0.35")
-    ))
-
-    # --- Drawdown gates ---
-    max_drawdown_halt: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_DRAWDOWN_HALT", "-0.30")
-    ))
-    max_drawdown_reduce: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_DRAWDOWN_REDUCE", "-0.20")
-    ))
-    # How far to reduce exposure when max_drawdown_reduce is breached
-    drawdown_reduce_target: float = 0.60  # 60% of normal exposure
-
-    # --- Daily P&L gate ---
-    daily_loss_limit: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_DAILY_LOSS_LIMIT", "-0.03")
-    ))
-
-    # --- Correlation limit ---
-    max_correlation: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_CORRELATION", "0.85")
-    ))
-    # Lookback for pairwise correlation estimation
-    correlation_lookback: int = 63  # ~3 months
-
-    # --- Short-selling limits ---
-    # Maximum gross short exposure as fraction of equity
-    max_short_exposure: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_SHORT_EXPOSURE", "0.20")
-    ))
-    # Maximum individual short position as fraction of equity
-    max_short_position_pct: float = field(default_factory=lambda: float(
-        os.environ.get("RISK_MAX_SHORT_POSITION_PCT", "0.05")
-    ))
-
-    # --- Volatility target ---
-    vol_target: float = 0.20  # Annualised portfolio volatility target
-
-    # --- Kelly criterion ---
-    # Position size is capped at half-Kelly
-    kelly_fraction: float = 0.5
-
-
-# ---------------------------------------------------------------------------
-# ML
-# ---------------------------------------------------------------------------
-
 @dataclass
 class LightGBMParams:
-    """LightGBM hyperparameters (shared across prediction horizons)."""
-
     max_depth: int = 6
     num_leaves: int = 31
     learning_rate: float = 0.05
@@ -268,165 +416,9 @@ class LightGBMParams:
 
 @dataclass
 class MLConfig:
-    """Machine-learning pipeline configuration."""
-
-    feature_lookback: int = field(default_factory=lambda: int(
-        os.environ.get("ML_FEATURE_LOOKBACK", "252")
-    ))
-    # Retraining frequency in calendar days
-    retrain_freq_days: int = field(default_factory=lambda: int(
-        os.environ.get("ML_RETRAIN_FREQ_DAYS", "7")
-    ))
-    # Training window in trading days (~2 years)
+    feature_lookback: int = 252
+    retrain_freq_days: int = 7
     train_window_days: int = 504
-    # Prediction horizons in trading days
     horizons: List[int] = field(default_factory=lambda: [1, 5, 20])
     model_params: LightGBMParams = field(default_factory=LightGBMParams)
-    # Directory for persisting trained models
-    model_dir: str = field(default_factory=lambda: (
-        os.environ.get("ML_MODEL_DIR", "models/lgbm")
-    ))
-
-
-# ---------------------------------------------------------------------------
-# Backtest
-# ---------------------------------------------------------------------------
-
-@dataclass
-class BacktestConfig:
-    """Walk-forward back-test configuration."""
-
-    slippage_bps: float = field(default_factory=lambda: float(
-        os.environ.get("BACKTEST_SLIPPAGE_BPS", "7")
-    ))
-    commission_per_share: float = field(default_factory=lambda: float(
-        os.environ.get("BACKTEST_COMMISSION_PER_SHARE", "0.005")
-    ))
-    # Market-impact model: cost ≈ market_impact_factor * sqrt(qty / adv)
-    market_impact_factor: float = 0.1
-    # Short borrow rate, annualised
-    short_borrow_rate: float = 0.02
-
-    # Walk-forward parameters
-    train_window: int = field(default_factory=lambda: int(
-        os.environ.get("BACKTEST_TRAIN_WINDOW", "504")  # 2 trading years
-    ))
-    test_window: int = field(default_factory=lambda: int(
-        os.environ.get("BACKTEST_TEST_WINDOW", "21")  # 1 trading month
-    ))
-    step_size: int = field(default_factory=lambda: int(
-        os.environ.get("BACKTEST_STEP_SIZE", "21")
-    ))
-    min_windows: int = field(default_factory=lambda: int(
-        os.environ.get("BACKTEST_MIN_WINDOWS", "12")
-    ))
-
-    # CPCV parameters
-    cpcv_groups: int = 10
-    cpcv_purge_days: int = 25  # max holding period (20) + 5-day buffer
-    cpcv_min_sharpe_pct: float = 0.80  # 80 % of paths must show positive Sharpe
-
-
-# ---------------------------------------------------------------------------
-# System
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SystemConfig:
-    """Top-level system / runtime configuration."""
-
-    mode: str = field(default_factory=lambda: (
-        os.environ.get("SYSTEM_MODE", "paper").lower()
-    ))
-    log_level: str = field(default_factory=lambda: (
-        os.environ.get("LOG_LEVEL", "INFO").upper()
-    ))
-    timezone: str = field(default_factory=lambda: (
-        os.environ.get("TIMEZONE", "America/New_York")
-    ))
-    initial_portfolio_value: float = field(default_factory=lambda: float(
-        os.environ.get("PORTFOLIO_VALUE", "100000")
-    ))
-    log_dir: str = field(default_factory=lambda: (
-        os.environ.get("LOG_DIR", "logs")
-    ))
-    # Session ID is set at runtime by the orchestrator; config holds default.
-    session_id: Optional[str] = None
-
-    def validate(self) -> None:
-        """Raise ValueError if the mode is not a recognised value."""
-        valid_modes = {"backtest", "paper", "live"}
-        if self.mode not in valid_modes:
-            raise ValueError(
-                f"Invalid SYSTEM_MODE={self.mode!r}. "
-                f"Must be one of {sorted(valid_modes)}."
-            )
-
-
-# ---------------------------------------------------------------------------
-# Root config container
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Config:
-    """Fully-populated system configuration.
-
-    Compose all sub-configs into a single object.  Callers should use
-    :func:`get_config` rather than instantiating this class directly.
-    """
-
-    ibkr: IBKRConfig = field(default_factory=IBKRConfig)
-    data: DataConfig = field(default_factory=DataConfig)
-    strategy: StrategyConfig = field(default_factory=StrategyConfig)
-    risk: RiskConfig = field(default_factory=RiskConfig)
-    ml: MLConfig = field(default_factory=MLConfig)
-    backtest: BacktestConfig = field(default_factory=BacktestConfig)
-    system: SystemConfig = field(default_factory=SystemConfig)
-
-    def validate(self) -> None:
-        """Run validation on all sub-configs that support it."""
-        self.system.validate()
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialise the config to a plain dictionary (for logging / audit)."""
-        import dataclasses
-        return dataclasses.asdict(self)
-
-
-# ---------------------------------------------------------------------------
-# Factory function
-# ---------------------------------------------------------------------------
-
-_CONFIG_CACHE: Optional[Config] = None
-
-
-def get_config(reload: bool = False) -> Config:
-    """Return the singleton :class:`Config` instance.
-
-    The config is loaded once from the environment and cached.  Pass
-    ``reload=True`` to force a fresh read (useful in tests or when env vars
-    change at runtime).
-
-    Parameters
-    ----------
-    reload:
-        Force re-construction of the config from the current environment.
-
-    Returns
-    -------
-    Config
-        Fully-populated configuration object.
-
-    Raises
-    ------
-    ValueError
-        If any sub-config fails validation.
-    """
-    global _CONFIG_CACHE
-
-    if _CONFIG_CACHE is None or reload:
-        cfg = Config()
-        cfg.validate()
-        _CONFIG_CACHE = cfg
-
-    return _CONFIG_CACHE
+    model_dir: str = "models/lgbm"

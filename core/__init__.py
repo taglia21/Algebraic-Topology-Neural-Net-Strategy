@@ -1,28 +1,39 @@
 """
 core/__init__.py
 ================
-Public API for the ATNN Quant Powerhouse core infrastructure.
-
-Importing from this package gives access to the four foundational modules:
-
-    from core import get_config, get_trade_logger, RegimeDetector, RiskManager
-
+Public API for the ATNN v2 core infrastructure.
 """
 
 from core.config import (
+    # New v2 config classes
+    ATNNConfig,
+    SystemCfg,
+    BrokerCfg,
+    UniverseCfg,
+    TDACfg,
+    NNCfg,
+    EnsembleCfg,
+    RiskCfg,
+    OptionsCfg,
+    EquitiesCfg,
+    BacktestCfg,
+    ScheduleCfg,
+    SmallAccountCfg,
+    get_config,
+    # Legacy aliases (backward compat)
     IBKRConfig,
-    BacktestConfig,
     Config,
     DataConfig,
+    RiskConfig,
+    SystemConfig,
+    BacktestConfig,
     FactorModelConfig,
     LightGBMParams,
     MLConfig,
     MomentumConfig,
-    RiskConfig,
     StatArbConfig,
     StrategyConfig,
-    SystemConfig,
-    get_config,
+    MeanReversionConfig,
 )
 from core.logger import (
     TradeLogger,
@@ -48,37 +59,21 @@ from core.risk_manager import (
 )
 
 __all__ = [
-    # config
-    "IBKRConfig",
-    "BacktestConfig",
-    "Config",
-    "DataConfig",
-    "FactorModelConfig",
-    "LightGBMParams",
-    "MLConfig",
-    "MomentumConfig",
-    "RiskConfig",
-    "StatArbConfig",
-    "StrategyConfig",
-    "SystemConfig",
+    # v2 config
+    "ATNNConfig", "SystemCfg", "BrokerCfg", "UniverseCfg", "TDACfg",
+    "NNCfg", "EnsembleCfg", "RiskCfg", "OptionsCfg", "EquitiesCfg",
+    "BacktestCfg", "ScheduleCfg", "SmallAccountCfg",
     "get_config",
+    # legacy config aliases
+    "IBKRConfig", "Config", "DataConfig", "RiskConfig", "SystemConfig",
+    "BacktestConfig", "FactorModelConfig", "LightGBMParams", "MLConfig",
+    "MomentumConfig", "StatArbConfig", "StrategyConfig", "MeanReversionConfig",
     # logger
-    "TradeLogger",
-    "get_trade_logger",
-    "EVENT_SIGNAL",
-    "EVENT_ORDER",
-    "EVENT_FILL",
-    "EVENT_RISK_EVENT",
-    "EVENT_REGIME_CHANGE",
-    "EVENT_PERF_SNAPSHOT",
+    "TradeLogger", "get_trade_logger",
+    "EVENT_SIGNAL", "EVENT_ORDER", "EVENT_FILL",
+    "EVENT_RISK_EVENT", "EVENT_REGIME_CHANGE", "EVENT_PERF_SNAPSHOT",
     # regime detector
-    "RegimeDetector",
-    "RegimeState",
-    "Regime",
-    "VIXLevel",
+    "RegimeDetector", "RegimeState", "Regime", "VIXLevel",
     # risk manager
-    "RiskAction",
-    "RiskManager",
-    "PortfolioState",
-    "TradeApproval",
+    "RiskAction", "RiskManager", "PortfolioState", "TradeApproval",
 ]

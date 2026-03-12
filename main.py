@@ -17,13 +17,19 @@ Usage
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import signal
 import sys
 import time
-from datetime import datetime, date, time as dt_time
+from datetime import date, datetime
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Optional
+
+import numpy as np
+import pandas as pd
+import torch
 
 logger = logging.getLogger("atnn")
 
@@ -115,23 +121,86 @@ def _wait_until(target_time: dt_time) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Broker init helper — shared by live and status
+# ---------------------------------------------------------------------------
+
+def _create_broker_components(cfg, enable_trading: bool = False):
+    """Create IBKRClient and all broker modules.
+
+    Returns
+    -------
+    dict with keys: client, data_feed, portfolio_mgr, equity_trader,
+    option_trader, risk_monitor.  All values may be None if IBKR
+    is not configured.
+    """
+    result = {
+        "client": None,
+        "data_feed": None,
+        "portfolio_mgr": None,
+        "equity_trader": None,
+        "option_trader": None,
+        "risk_monitor": None,
+    }
+
+    if not cfg.broker.is_configured():
+        return result
+
+    from broker.ibkr_client import IBKRClient, IBKRConfig
+    from broker.data_feed import IBKRDataFeed
+    from broker.portfolio_manager import PortfolioManager
+    from broker.equity_trader import EquityTrader
+    from broker.option_trader import OptionTrader
+    from broker.risk_monitor import RiskMonitor
+
+    ibkr_config = IBKRConfig(
+        host=cfg.broker.host,
+        port=cfg.broker.port,
+        client_id=cfg.broker.client_id,
+        account=cfg.broker.account,
+        timeout=cfg.broker.timeout,
+        max_reconnect_attempts=cfg.broker.max_reconnect_attempts,
+    )
+    client = IBKRClient(ibkr_config)
+
+    data_feed = IBKRDataFeed(client)
+    portfolio_mgr = PortfolioManager(client)
+    equity_trader = EquityTrader(client, enabled=enable_trading)
+    option_trader = OptionTrader(client, data_feed=data_feed, enabled=enable_trading)
+    risk_monitor = RiskMonitor(client, portfolio_mgr)
+    risk_monitor.register_traders(
+        equity_trader=equity_trader,
+        option_trader=option_trader,
+    )
+
+    result.update(
+        client=client,
+        data_feed=data_feed,
+        portfolio_mgr=portfolio_mgr,
+        equity_trader=equity_trader,
+        option_trader=option_trader,
+        risk_monitor=risk_monitor,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # LIVE MODE
 # ---------------------------------------------------------------------------
 
-def run_live(cfg, dry_run: bool = False) -> None:
-    """Run the live/paper trading loop.
+async def _run_live_async(cfg, dry_run: bool = False) -> None:
+    """Async live/paper trading loop.
 
     Workflow per trading day:
     1. Wait for signal_time
     2. Fetch market data from IBKR
-    3. Compute TDA features
-    4. Generate NN predictions
-    5. Run ensemble -> sized signals
-    6. Check risk constraints
-    7. Execute trades (or log-only if dormant/dry-run)
-    8. Wait for reconciliation_time
-    9. Run EOD reconciliation
-    10. Log daily summary
+    3. Compute TDA features → TDA signals
+    4. Build NN features → generate NN predictions
+    5. MetaAllocator → allocation weights
+    6. SignalAggregator → ranked signals
+    7. EnsembleRiskManager → sized positions
+    8. Execute trades (or log-only if dormant/dry-run)
+    9. Wait for reconciliation_time
+    10. Run EOD reconciliation + periodic retraining check
     """
     from core.logger import get_trade_logger
     from core.market_hours import MarketCalendar
@@ -164,84 +233,66 @@ def run_live(cfg, dry_run: bool = False) -> None:
         initial_equity=cfg.backtest.initial_capital,
     )
 
-    # Try to connect to IBKR
+    # --- Connect to IBKR ---
     ib_connected = False
-    data_feed = None
-    portfolio_mgr = None
-    equity_trader = None
-    option_trader = None
-    risk_monitor = None
+    broker = _create_broker_components(
+        cfg,
+        enable_trading=(not dry_run),
+    )
 
-    if cfg.broker.is_configured():
+    if broker["client"] is not None:
         try:
-            from broker.data_feed import IBKRDataFeed
-            from broker.portfolio_manager import PortfolioManager
-            from broker.equity_trader import EquityTrader
-            from broker.option_trader import OptionTrader
-            from broker.risk_monitor import RiskMonitor
-
-            data_feed = IBKRDataFeed(
-                host=cfg.broker.host,
-                port=cfg.broker.port,
-                client_id=cfg.broker.client_id,
-            )
-            portfolio_mgr = PortfolioManager(
-                host=cfg.broker.host,
-                port=cfg.broker.port,
-                client_id=cfg.broker.client_id + 1,
-                account=cfg.broker.account,
-            )
-            equity_trader = EquityTrader(
-                host=cfg.broker.host,
-                port=cfg.broker.port,
-                client_id=cfg.broker.client_id + 2,
-                account=cfg.broker.account,
-            )
-            option_trader = OptionTrader(
-                host=cfg.broker.host,
-                port=cfg.broker.port,
-                client_id=cfg.broker.client_id + 3,
-                account=cfg.broker.account,
-            )
-            risk_monitor = RiskMonitor(
-                portfolio_manager=portfolio_mgr,
-            )
-            risk_monitor.register_traders(equity_trader, option_trader)
+            await broker["client"].connect()
             ib_connected = True
             logger.info("Connected to IBKR")
         except Exception as e:
             logger.warning(f"IBKR connection failed: {e}. Running in signal-only mode.")
 
-    # Initialize TDA
+    data_feed = broker["data_feed"]
+    portfolio_mgr = broker["portfolio_mgr"]
+    equity_trader = broker["equity_trader"]
+    option_trader = broker["option_trader"]
+    risk_monitor = broker["risk_monitor"]
+
+    # --- Initialize TDA ---
     tda_extractor = None
+    tda_strategy = None
     try:
         from tda import TDAFeatureExtractor
+        from ensemble import TDADiffusionStrategy
         tda_extractor = TDAFeatureExtractor(
             ph_window=cfg.tda.ph_window,
             corr_window=cfg.tda.corr_window,
             diffusion_time=cfg.tda.diffusion_time,
         )
-        logger.info("TDA feature extractor initialized")
+        tda_strategy = TDADiffusionStrategy()
+        logger.info("TDA feature extractor + strategy initialized")
     except Exception as e:
         logger.warning(f"TDA init failed: {e}")
 
-    # Load NN model
+    # --- Load NN model ---
     nn_model = None
+    nn_strategy = None
+    nn_feature_engine = None
     model_dir = Path(cfg.system.model_dir)
     try:
-        from nn import LSTMPredictor, AttentionLSTMPredictor
+        from nn import LSTMPredictor, AttentionLSTMPredictor, NNFeatureEngine
+        from ensemble import NNDirectionalStrategy
+
+        nn_feature_engine = NNFeatureEngine()
+        nn_strategy = NNDirectionalStrategy()
         model_cls = AttentionLSTMPredictor if cfg.nn.model_type == "attention_lstm" else LSTMPredictor
+
         # Look for latest saved model
         model_files = sorted(model_dir.glob("*.pt")) + sorted(model_dir.glob("*.pth"))
         if model_files:
-            import torch
             nn_model = model_cls(
                 input_size=10,  # will be overridden by checkpoint
                 hidden_size=cfg.nn.hidden_size,
                 num_layers=cfg.nn.num_layers,
                 dropout=cfg.nn.dropout,
             )
-            nn_model.load_state_dict(torch.load(model_files[-1], map_location="cpu"))
+            nn_model.load_state_dict(torch.load(model_files[-1], map_location="cpu", weights_only=True))
             nn_model.eval()
             logger.info(f"Loaded NN model from {model_files[-1]}")
         else:
@@ -249,24 +300,21 @@ def run_live(cfg, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"NN model load failed: {e}")
 
-    # Initialize ensemble
+    # --- Initialize ensemble ---
     meta_allocator = None
     signal_aggregator = None
     ensemble_risk = None
     try:
         from ensemble import MetaAllocator, SignalAggregator, EnsembleRiskManager
-        meta_allocator = MetaAllocator(
-            default_tda_weight=cfg.ensemble.default_tda_weight,
-            default_nn_weight=cfg.ensemble.default_nn_weight,
-        )
+
+        meta_allocator = MetaAllocator()
         signal_aggregator = SignalAggregator(
-            min_signal_strength=cfg.ensemble.min_signal_strength,
-            agreement_bonus=cfg.ensemble.agreement_bonus,
-            disagreement_penalty=cfg.ensemble.disagreement_penalty,
+            agreement_bonus=1.0 + cfg.ensemble.agreement_bonus,
+            disagreement_penalty=1.0 - cfg.ensemble.disagreement_penalty,
         )
         ensemble_risk = EnsembleRiskManager(
-            max_position_pct=cfg.risk.max_position_pct,
-            kelly_fraction=cfg.risk.kelly_fraction,
+            max_position_pct=cfg.risk.max_position_pct * 100,
+            kelly_multiplier=cfg.risk.kelly_fraction,
         )
         logger.info("Ensemble components initialized")
     except Exception as e:
@@ -286,13 +334,15 @@ def run_live(cfg, dry_run: bool = False) -> None:
     print(f"{'=' * 60}\n")
 
     _last_trading_date = None
+    _days_since_retrain = 0
+    _retrain_interval = 21  # retrain every 21 trading days
+    _min_accuracy_threshold = 0.45  # emergency retrain if below this
 
     while not _shutdown:
         # Market hours gate
         if not market_cal.is_market_open():
             next_open = market_cal.next_open()
             logger.info(f"Market closed. Next open: {next_open.strftime('%Y-%m-%d %H:%M ET')}")
-            # Sleep in short intervals to check for shutdown
             for _ in range(60):
                 if _shutdown:
                     break
@@ -304,6 +354,7 @@ def run_live(cfg, dry_run: bool = False) -> None:
         # Daily reset
         if _last_trading_date != today:
             _last_trading_date = today
+            _days_since_retrain += 1
             kill_switch.reset_daily(cfg.backtest.initial_capital)
             logger.info(f"=== New trading day: {today} ===")
 
@@ -323,11 +374,13 @@ def run_live(cfg, dry_run: bool = False) -> None:
         logger.info("--- Signal generation cycle ---")
 
         try:
-            # Fetch market data
+            # -------------------------------------------------------
+            # 1. Fetch market data
+            # -------------------------------------------------------
             market_data = None
             if data_feed and ib_connected:
                 try:
-                    market_data = data_feed.get_historical_bars_multi(
+                    market_data = await data_feed.get_historical_bars_multi(
                         symbols=cfg.universe.symbols,
                         duration="1 Y",
                         bar_size="1 day",
@@ -336,64 +389,177 @@ def run_live(cfg, dry_run: bool = False) -> None:
                 except Exception as e:
                     logger.error(f"Data fetch failed: {e}")
 
-            # Compute TDA features
+            if not market_data:
+                logger.warning("No market data available — skipping signal cycle")
+                time.sleep(60)
+                continue
+
+            # Build price/volume DataFrames from fetched data
+            closes = {}
+            volumes = {}
+            for sym, df in market_data.items():
+                if df is not None and len(df) > 0:
+                    close_col = next((c for c in df.columns if c.lower() == "close"), None)
+                    vol_col = next((c for c in df.columns if c.lower() == "volume"), None)
+                    if close_col:
+                        closes[sym] = df[close_col]
+                    if vol_col:
+                        volumes[sym] = df[vol_col]
+
+            if not closes:
+                logger.warning("No valid close prices — skipping signal cycle")
+                time.sleep(60)
+                continue
+
+            price_df = pd.DataFrame(closes)
+            volume_df = pd.DataFrame(volumes) if volumes else None
+            returns_df = price_df.pct_change().dropna()
+
+            # -------------------------------------------------------
+            # 2. TDA features → TDA signals
+            # -------------------------------------------------------
+            tda_signals = pd.DataFrame()
+            current_regime = "NORMAL"
             tda_features = None
-            if tda_extractor and market_data:
+            if tda_extractor and tda_strategy:
                 try:
-                    import pandas as pd
-                    # Build returns matrix from closes
-                    closes = {}
-                    for sym, df in market_data.items():
-                        if df is not None and len(df) > 0:
-                            close_col = next((c for c in df.columns if c.lower() == "close"), None)
-                            if close_col:
-                                closes[sym] = df[close_col]
-                    if closes:
-                        price_df = pd.DataFrame(closes)
-                        returns_df = price_df.pct_change().dropna()
-                        tda_features = tda_extractor.extract(returns_df)
-                        logger.info(f"TDA features: {tda_features.columns.tolist()}")
+                    tda_features = tda_extractor.extract(returns_df)
+                    tda_signals = tda_strategy.generate_signals(tda_features)
+                    # Detect regime from TDA features
+                    if "regime" in tda_signals.columns and len(tda_signals) > 0:
+                        regime_vals = tda_signals["regime"].value_counts()
+                        current_regime = regime_vals.index[0] if len(regime_vals) > 0 else "NORMAL"
+                    logger.info(f"TDA signals: {len(tda_signals)} | regime={current_regime}")
                 except Exception as e:
                     logger.warning(f"TDA feature extraction failed: {e}")
 
-            # Generate NN predictions
-            nn_predictions = None
-            if nn_model and market_data:
+            # -------------------------------------------------------
+            # 3. NN features → NN predictions
+            # -------------------------------------------------------
+            nn_signals = pd.DataFrame()
+            if nn_model and nn_feature_engine and nn_strategy:
                 try:
-                    logger.info("NN predictions: model loaded but inference skipped (no live pipeline yet)")
+                    nn_features = nn_feature_engine.build_features(
+                        price_df=price_df,
+                        volume_df=volume_df,
+                        tda_features_df=tda_features,
+                    )
+                    nn_signals = nn_strategy.generate_signals(
+                        features=nn_features,
+                        model=nn_model,
+                        regime=current_regime,
+                    )
+                    logger.info(f"NN signals: {len(nn_signals)}")
                 except Exception as e:
                     logger.warning(f"NN prediction failed: {e}")
 
-            # Run ensemble
-            ensemble_signals = None
-            if signal_aggregator and (tda_features is not None or nn_predictions is not None):
+            # -------------------------------------------------------
+            # 4. Ensemble: allocate → aggregate → size
+            # -------------------------------------------------------
+            sized_signals = []
+            if signal_aggregator and (not tda_signals.empty or not nn_signals.empty):
                 try:
-                    logger.info("Ensemble: combining available signals")
-                    # In a full implementation, this would call signal_aggregator.aggregate()
+                    # Meta-allocator decides TDA vs NN weights
+                    if meta_allocator:
+                        alloc = meta_allocator.allocate(
+                            tda_signals=tda_signals,
+                            nn_signals=nn_signals,
+                            market_state={"regime": current_regime},
+                        )
+                        tda_w = alloc.tda_weight
+                        nn_w = alloc.nn_weight
+                        logger.info(f"Allocation: TDA={tda_w:.2f} NN={nn_w:.2f} — {alloc.reasoning}")
+                    else:
+                        tda_w, nn_w = 0.5, 0.5
+
+                    # Aggregate signals
+                    combined = signal_aggregator.aggregate(
+                        tda_signals=tda_signals if not tda_signals.empty else pd.DataFrame(
+                            columns=["ticker", "direction", "strength"]
+                        ),
+                        nn_signals=nn_signals if not nn_signals.empty else pd.DataFrame(
+                            columns=["ticker", "direction", "strength"]
+                        ),
+                        tda_weight=tda_w,
+                        nn_weight=nn_w,
+                    )
+
+                    # Filter to actionable signals
+                    actionable = signal_aggregator.filter_signals(
+                        min_strength=cfg.ensemble.min_signal_strength,
+                    )
+                    logger.info(f"Actionable signals: {len(actionable)}")
+
+                    # Size positions via risk manager
+                    if ensemble_risk and not actionable.empty:
+                        nav = cfg.backtest.initial_capital
+                        if portfolio_mgr and ib_connected:
+                            try:
+                                nav = await portfolio_mgr.get_nav()
+                            except Exception:
+                                pass
+
+                        exposure = {"long_pct": 0.0, "short_pct": 0.0, "gross_pct": 0.0}
+                        if portfolio_mgr and ib_connected:
+                            try:
+                                exposure = await portfolio_mgr.get_total_exposure()
+                            except Exception:
+                                pass
+
+                        for _, sig in actionable.iterrows():
+                            ps = ensemble_risk.size_position(
+                                signal={
+                                    "ticker": sig["ticker"],
+                                    "direction": sig["direction"],
+                                    "strength": sig["final_strength"],
+                                },
+                                portfolio_value=nav,
+                                current_exposure=exposure,
+                                regime=current_regime,
+                            )
+                            if ps.position_value > 0:
+                                sized_signals.append(ps)
+                                logger.info(
+                                    f"  {ps.ticker} {ps.direction} "
+                                    f"${ps.position_value:.2f} ({ps.position_pct:.2f}% NAV)"
+                                    f"{' [CAPPED]' if ps.capped else ''}"
+                                )
                 except Exception as e:
                     logger.warning(f"Ensemble aggregation failed: {e}")
 
-            # Check risk constraints
-            if ensemble_risk and ensemble_signals:
-                try:
-                    logger.info("Risk check: evaluating position sizes")
-                except Exception as e:
-                    logger.warning(f"Risk check failed: {e}")
-
-            # Execute trades (or log only)
-            if ensemble_signals and not dry_run:
-                if options_enabled and option_trader:
-                    logger.info("Options execution: would place trades here")
-                if equities_enabled and equity_trader:
-                    logger.info("Equity execution: would place trades here")
+            # -------------------------------------------------------
+            # 5. Execute trades
+            # -------------------------------------------------------
+            if sized_signals and not dry_run:
+                for ps in sized_signals:
+                    try:
+                        if equities_enabled and equity_trader:
+                            # Convert position value to shares
+                            last_price = price_df[ps.ticker].iloc[-1] if ps.ticker in price_df.columns else None
+                            if last_price and last_price > 0:
+                                qty = max(1, int(ps.position_value / last_price))
+                                action = "BUY" if ps.direction == "LONG" else "SELL"
+                                order_result = await equity_trader.place_market_order(
+                                    symbol=ps.ticker,
+                                    quantity=qty,
+                                    action=action,
+                                )
+                                logger.info(f"Order: {action} {qty} {ps.ticker} → {order_result}")
+                    except Exception as e:
+                        logger.error(f"Trade execution failed for {ps.ticker}: {e}")
             else:
-                logger.info("Signal-only mode: no trades executed")
+                logger.info(f"Signal-only mode: {len(sized_signals)} signals generated, no trades executed")
 
-            # Risk monitor check
+            # -------------------------------------------------------
+            # 6. Risk monitor check
+            # -------------------------------------------------------
             if risk_monitor and ib_connected:
                 try:
-                    risk_result = risk_monitor.check_risk()
+                    risk_result = await risk_monitor.check_risk()
                     logger.info(f"Risk check: {risk_result}")
+                    if hasattr(risk_result, "should_flatten") and risk_result.should_flatten:
+                        logger.warning("Risk monitor triggered flatten!")
+                        await risk_monitor.trigger_kill_switch("Risk limit breach")
                 except Exception as e:
                     logger.warning(f"Risk monitor failed: {e}")
 
@@ -405,17 +571,45 @@ def run_live(cfg, dry_run: bool = False) -> None:
         if _shutdown:
             break
 
-        # EOD reconciliation
+        # -------------------------------------------------------
+        # 7. EOD reconciliation
+        # -------------------------------------------------------
         try:
             if portfolio_mgr and ib_connected:
-                positions = portfolio_mgr.sync_positions()
-                nav = portfolio_mgr.get_nav()
-                daily_pnl = portfolio_mgr.get_daily_pnl()
-                logger.info(f"EOD: NAV=${nav:,.2f} | Daily P&L=${daily_pnl:,.2f} | Positions={positions.get('position_count', 0)}")
+                positions = await portfolio_mgr.sync_positions()
+                nav = await portfolio_mgr.get_nav()
+                daily_pnl = await portfolio_mgr.get_daily_pnl()
+                logger.info(
+                    f"EOD: NAV=${nav:,.2f} | Daily P&L=${daily_pnl:,.2f} "
+                    f"| Positions={positions.get('position_count', 0)}"
+                )
             else:
                 logger.info("EOD: No IBKR connection for reconciliation")
         except Exception as e:
             logger.warning(f"EOD reconciliation failed: {e}")
+
+        # -------------------------------------------------------
+        # 8. Periodic retraining check
+        # -------------------------------------------------------
+        try:
+            needs_retrain = _days_since_retrain >= _retrain_interval
+            # TODO: track rolling accuracy and trigger emergency retrain
+            # if rolling_accuracy < _min_accuracy_threshold: needs_retrain = True
+
+            if needs_retrain and market_data:
+                logger.info("=== Triggering periodic NN retrain ===")
+                _run_retrain_inline(cfg, price_df, volume_df, tda_features)
+                _days_since_retrain = 0
+                # Reload model
+                new_files = sorted(model_dir.glob("*.pt")) + sorted(model_dir.glob("*.pth"))
+                if new_files and nn_model is not None:
+                    nn_model.load_state_dict(
+                        torch.load(new_files[-1], map_location="cpu", weights_only=True)
+                    )
+                    nn_model.eval()
+                    logger.info(f"Reloaded NN model from {new_files[-1]}")
+        except Exception as e:
+            logger.warning(f"Periodic retrain check failed: {e}")
 
         # Sleep until next day
         logger.info("Trading day complete. Sleeping until next market open.")
@@ -424,8 +618,96 @@ def run_live(cfg, dry_run: bool = False) -> None:
 
     # Graceful shutdown
     logger.info("Shutting down ATNN v2...")
+    if broker["client"] is not None:
+        try:
+            await broker["client"].disconnect()
+        except Exception:
+            pass
     trade_log.close()
     print("\nATNN v2 shut down cleanly.")
+
+
+def _run_retrain_inline(cfg, price_df, volume_df, tda_features) -> None:
+    """Retrain NN model inline using current data."""
+    try:
+        from nn import (
+            WalkForwardTrainer, LSTMPredictor, AttentionLSTMPredictor,
+            NNFeatureEngine,
+        )
+        from nn.data_loader import direction_labels
+
+        model_cls = AttentionLSTMPredictor if cfg.nn.model_type == "attention_lstm" else LSTMPredictor
+
+        # Build features + labels
+        engine = NNFeatureEngine()
+        features = engine.build_features(
+            price_df=price_df,
+            volume_df=volume_df,
+            tda_features_df=tda_features,
+        )
+        if features.empty:
+            logger.warning("No features for retraining — skipping")
+            return
+
+        # Create direction labels from returns
+        returns = price_df.pct_change().dropna()
+        # Use first symbol or mean returns for labels
+        if len(returns.columns) > 0:
+            avg_returns = returns.mean(axis=1)
+        else:
+            logger.warning("No return data for labels — skipping retrain")
+            return
+
+        target = direction_labels(avg_returns, threshold=cfg.nn.direction_threshold)
+
+        # Align features and target
+        common_idx = features.index.intersection(target.index)
+        features = features.loc[common_idx]
+        target = target.loc[common_idx]
+
+        if len(features) < 100:
+            logger.warning(f"Insufficient data for retrain: {len(features)} samples")
+            return
+
+        input_size = features.shape[1]
+
+        trainer = WalkForwardTrainer(
+            train_window=cfg.backtest.train_window,
+            predict_horizon=cfg.backtest.test_window,
+            max_epochs=cfg.nn.epochs,
+            batch_size=cfg.nn.batch_size,
+            lr=cfg.nn.learning_rate,
+            patience=cfg.nn.early_stopping_patience,
+            checkpoint_dir=cfg.system.model_dir,
+        )
+
+        result = trainer.train_walk_forward(
+            features_df=features,
+            target=target,
+            model_class=model_cls,
+            window=cfg.nn.sequence_length,
+            input_size=input_size,
+            hidden_size=cfg.nn.hidden_size,
+            num_layers=cfg.nn.num_layers,
+            dropout=cfg.nn.dropout,
+        )
+
+        if result.metrics_per_fold:
+            avg_acc = np.mean([m.accuracy for m in result.metrics_per_fold])
+            logger.info(
+                f"Retrain complete: {len(result.metrics_per_fold)} folds, "
+                f"avg accuracy={avg_acc:.4f}, best model={result.best_model_path}"
+            )
+        else:
+            logger.warning("Retrain produced no folds")
+
+    except Exception as e:
+        logger.error(f"Retrain failed: {e}", exc_info=True)
+
+
+def run_live(cfg, dry_run: bool = False) -> None:
+    """Synchronous wrapper for the async live loop."""
+    asyncio.run(_run_live_async(cfg, dry_run=dry_run))
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +791,11 @@ def _run_options_backtest(cfg, start: str = None, end: str = None) -> None:
 # ---------------------------------------------------------------------------
 
 def run_train(cfg) -> None:
-    """Run walk-forward NN training."""
+    """Run walk-forward NN training.
+
+    Connects to IBKR to fetch historical data, builds features,
+    and runs walk-forward training with the configured model type.
+    """
     print(f"\n{'=' * 60}")
     print("  ATNN v2 — WALK-FORWARD NN TRAINING")
     print(f"  Model type: {cfg.nn.model_type}")
@@ -518,31 +804,125 @@ def run_train(cfg) -> None:
     print(f"{'=' * 60}\n")
 
     try:
-        from nn import WalkForwardTrainer, LSTMPredictor, AttentionLSTMPredictor
+        from nn import (
+            WalkForwardTrainer, LSTMPredictor, AttentionLSTMPredictor,
+            NNFeatureEngine,
+        )
+        from nn.data_loader import direction_labels
 
         model_cls = AttentionLSTMPredictor if cfg.nn.model_type == "attention_lstm" else LSTMPredictor
+        model_dir = Path(cfg.system.model_dir)
+        model_dir.mkdir(parents=True, exist_ok=True)
 
+        # Try to fetch data from IBKR
+        price_df = None
+        volume_df = None
+
+        if cfg.broker.is_configured():
+            logger.info("Fetching historical data from IBKR for training...")
+            try:
+                async def _fetch():
+                    broker = _create_broker_components(cfg)
+                    await broker["client"].connect()
+                    data = await broker["data_feed"].get_historical_bars_multi(
+                        symbols=cfg.universe.symbols,
+                        duration="5 Y",
+                        bar_size="1 day",
+                    )
+                    await broker["client"].disconnect()
+                    return data
+
+                market_data = asyncio.run(_fetch())
+                closes = {}
+                vols = {}
+                for sym, df in market_data.items():
+                    if df is not None and len(df) > 0:
+                        close_col = next((c for c in df.columns if c.lower() == "close"), None)
+                        vol_col = next((c for c in df.columns if c.lower() == "volume"), None)
+                        if close_col:
+                            closes[sym] = df[close_col]
+                        if vol_col:
+                            vols[sym] = df[vol_col]
+                if closes:
+                    price_df = pd.DataFrame(closes)
+                    volume_df = pd.DataFrame(vols) if vols else None
+                    logger.info(f"Fetched {len(price_df)} bars for {len(closes)} symbols")
+            except Exception as e:
+                logger.warning(f"IBKR data fetch failed: {e}")
+
+        if price_df is None:
+            logger.error("No data available for training. Connect to IBKR or provide cached data.")
+            return
+
+        # Build features
+        engine = NNFeatureEngine()
+        tda_features = None
+        try:
+            from tda import TDAFeatureExtractor
+            tda_ext = TDAFeatureExtractor(
+                ph_window=cfg.tda.ph_window,
+                corr_window=cfg.tda.corr_window,
+                diffusion_time=cfg.tda.diffusion_time,
+            )
+            returns_df = price_df.pct_change().dropna()
+            tda_features = tda_ext.extract(returns_df)
+        except Exception as e:
+            logger.warning(f"TDA features skipped: {e}")
+
+        features = engine.build_features(
+            price_df=price_df,
+            volume_df=volume_df,
+            tda_features_df=tda_features,
+        )
+
+        # Create direction labels
+        returns = price_df.pct_change().dropna()
+        avg_returns = returns.mean(axis=1)
+        target = direction_labels(avg_returns, threshold=cfg.nn.direction_threshold)
+
+        # Align
+        common_idx = features.index.intersection(target.index)
+        features = features.loc[common_idx]
+        target = target.loc[common_idx]
+
+        logger.info(f"Training data: {len(features)} samples, {features.shape[1]} features")
+
+        input_size = features.shape[1]
         trainer = WalkForwardTrainer(
-            model_class=model_cls,
             train_window=cfg.backtest.train_window,
             predict_horizon=cfg.backtest.test_window,
             max_epochs=cfg.nn.epochs,
             batch_size=cfg.nn.batch_size,
             lr=cfg.nn.learning_rate,
             patience=cfg.nn.early_stopping_patience,
+            checkpoint_dir=str(model_dir),
         )
-        logger.info("Walk-forward trainer initialized")
-        logger.info("Training requires historical data — run with IBKR connection or cached data")
 
-        # Save location
-        model_dir = Path(cfg.system.model_dir)
-        model_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Models will be saved to: {model_dir}")
+        result = trainer.train_walk_forward(
+            features_df=features,
+            target=target,
+            model_class=model_cls,
+            window=cfg.nn.sequence_length,
+            input_size=input_size,
+            hidden_size=cfg.nn.hidden_size,
+            num_layers=cfg.nn.num_layers,
+            dropout=cfg.nn.dropout,
+        )
+
+        if result.metrics_per_fold:
+            avg_acc = np.mean([m.accuracy for m in result.metrics_per_fold])
+            logger.info(
+                f"Training complete: {len(result.metrics_per_fold)} folds, "
+                f"avg accuracy={avg_acc:.4f}"
+            )
+            logger.info(f"Best model saved to: {result.best_model_path}")
+        else:
+            logger.warning("Training produced no folds — insufficient data?")
 
     except ImportError as e:
         logger.error(f"NN module import failed: {e}")
     except Exception as e:
-        logger.error(f"Training setup failed: {e}", exc_info=True)
+        logger.error(f"Training failed: {e}", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -592,16 +972,16 @@ def run_status(cfg) -> None:
     print(f"\n  IBKR Connection:")
     if cfg.broker.is_configured():
         try:
-            from broker.portfolio_manager import PortfolioManager
-            pm = PortfolioManager(
-                host=cfg.broker.host,
-                port=cfg.broker.port,
-                client_id=cfg.broker.client_id + 10,
-                account=cfg.broker.account,
-            )
-            nav = pm.get_nav()
-            daily_pnl = pm.get_daily_pnl()
-            positions = pm.sync_positions()
+            async def _status_check():
+                broker = _create_broker_components(cfg)
+                await broker["client"].connect()
+                nav = await broker["portfolio_mgr"].get_nav()
+                daily_pnl = await broker["portfolio_mgr"].get_daily_pnl()
+                positions = await broker["portfolio_mgr"].sync_positions()
+                await broker["client"].disconnect()
+                return nav, daily_pnl, positions
+
+            nav, daily_pnl, positions = asyncio.run(_status_check())
             print(f"    Status:    CONNECTED")
             print(f"    NAV:       ${nav:,.2f}")
             print(f"    Daily P&L: ${daily_pnl:,.2f}")

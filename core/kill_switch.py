@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Deque, Dict, Optional
 
-from equities.models import PortfolioState
+from core.risk_manager import PortfolioState
 
 logger = logging.getLogger(__name__)
 

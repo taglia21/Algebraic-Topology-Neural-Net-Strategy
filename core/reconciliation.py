@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from equities.models import Position
+from core.models import Position
 
 logger = logging.getLogger(__name__)
 

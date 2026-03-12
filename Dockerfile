@@ -15,5 +15,5 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p data logs models config
 
-# Default: run in live mode
-CMD ["python", "main.py", "live"]
+# Default: run in live mode with production config
+CMD ["python", "main.py", "--config", "config/live.yaml", "live"]

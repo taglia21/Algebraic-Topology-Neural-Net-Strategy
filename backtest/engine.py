@@ -581,7 +581,7 @@ class BacktestEngine:
                         sym_price = prices.get(sym, 0.0)
                         if sym_price > 0:
                             alloc = nav * 0.10
-                            qty = max(1, int(alloc / sym_price))
+                            qty = round(alloc / sym_price, 4)
                         else:
                             qty = 0
 

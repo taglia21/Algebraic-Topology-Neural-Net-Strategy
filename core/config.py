@@ -169,6 +169,7 @@ class OptionsCfg:
 @dataclass
 class EquitiesCfg:
     enabled: bool = False
+    fractional_shares: bool = False
 
 
 @dataclass

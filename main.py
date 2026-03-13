@@ -537,7 +537,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                             # Convert position value to shares
                             last_price = price_df[ps.ticker].iloc[-1] if ps.ticker in price_df.columns else None
                             if last_price and last_price > 0:
-                                qty = max(1, int(ps.position_value / last_price))
+                                qty = round(ps.position_value / last_price, 4)
                                 action = "BUY" if ps.direction == "LONG" else "SELL"
                                 order_result = await equity_trader.place_market_order(
                                     symbol=ps.ticker,

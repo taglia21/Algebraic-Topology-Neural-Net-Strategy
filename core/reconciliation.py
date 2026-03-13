@@ -59,15 +59,15 @@ class Discrepancy:
     """
 
     symbol: str
-    internal_qty: int
-    broker_qty: int
+    internal_qty: float
+    broker_qty: float
     internal_avg_entry: float
     broker_avg_entry: float
     discrepancy_type: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
-    def qty_delta(self) -> int:
+    def qty_delta(self) -> float:
         """broker_qty − internal_qty; positive means broker has more."""
         return self.broker_qty - self.internal_qty
 
@@ -119,7 +119,7 @@ class ReconciliationReport:
         for d in self.discrepancies:
             lines.append(
                 f"  {d.symbol}: internal={d.internal_qty} vs broker={d.broker_qty} "
-                f"({d.discrepancy_type}, delta={d.qty_delta:+d})"
+                f"({d.discrepancy_type}, delta={d.qty_delta:+g})"
             )
         if self.corrections_applied > 0:
             lines.append(f"  Corrections applied: {self.corrections_applied}")

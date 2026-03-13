@@ -30,7 +30,7 @@ class OrderResult:
     order_id: int
     symbol: str
     action: str            # BUY or SELL
-    quantity: int
+    quantity: float
     order_type: str        # MKT, LMT, STP
     limit_price: Optional[float] = None
     stop_price: Optional[float] = None
@@ -83,13 +83,13 @@ class EquityTrader:
     # --- Order Placement ---
 
     async def place_market_order(
-        self, symbol: str, quantity: int, action: str
+        self, symbol: str, quantity: float, action: str
     ) -> OrderResult:
         """Place a market order. BUY or SELL."""
         return await self._place_order(symbol, quantity, action, "MKT")
 
     async def place_limit_order(
-        self, symbol: str, quantity: int, action: str, limit_price: float
+        self, symbol: str, quantity: float, action: str, limit_price: float
     ) -> OrderResult:
         """Place a limit order."""
         return await self._place_order(
@@ -97,7 +97,7 @@ class EquityTrader:
         )
 
     async def place_stop_order(
-        self, symbol: str, quantity: int, action: str, stop_price: float
+        self, symbol: str, quantity: float, action: str, stop_price: float
     ) -> OrderResult:
         """Place a stop order."""
         return await self._place_order(
@@ -107,7 +107,7 @@ class EquityTrader:
     async def place_bracket_order(
         self,
         symbol: str,
-        quantity: int,
+        quantity: float,
         action: str,
         limit_price: float,
         take_profit: float,
@@ -122,7 +122,7 @@ class EquityTrader:
 
         if not self._enabled:
             logger.info(
-                "[SIMULATED] Bracket %s %d %s @ LMT %.2f | TP=%.2f SL=%.2f",
+                "[SIMULATED] Bracket %s %g %s @ LMT %.2f | TP=%.2f SL=%.2f",
                 action, quantity, symbol, limit_price, take_profit, stop_loss,
             )
             ts = datetime.now().isoformat()
@@ -185,7 +185,7 @@ class EquityTrader:
         for pos in positions:
             if pos.contract.secType == "STK" and pos.position != 0:
                 action = "SELL" if pos.position > 0 else "BUY"
-                qty = abs(int(pos.position))
+                qty = abs(pos.position)
                 result = await self.place_market_order(
                     pos.contract.symbol, qty, action
                 )
@@ -197,7 +197,7 @@ class EquityTrader:
     async def _place_order(
         self,
         symbol: str,
-        quantity: int,
+        quantity: float,
         action: str,
         order_type: str,
         limit_price: Optional[float] = None,
@@ -208,7 +208,7 @@ class EquityTrader:
 
         if not self._enabled:
             logger.info(
-                "[SIMULATED] %s %s %d %s%s%s",
+                "[SIMULATED] %s %s %g %s%s%s",
                 order_type,
                 action,
                 quantity,
@@ -241,7 +241,7 @@ class EquityTrader:
 
         trade = self.ib.placeOrder(contract, order)
         logger.info(
-            "LIVE ORDER: %s %s %d %s (id=%d)",
+            "LIVE ORDER: %s %s %g %s (id=%d)",
             order_type, action, quantity, symbol, trade.order.orderId,
         )
 

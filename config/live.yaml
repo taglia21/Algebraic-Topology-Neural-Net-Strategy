@@ -69,6 +69,7 @@ options:
 
 equities:
   enabled: true           # LIVE — authorized by board
+  fractional_shares: true # IBKR supports fractional US equities
 
 backtest:
   initial_capital: 444.0

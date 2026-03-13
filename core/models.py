@@ -22,8 +22,8 @@ class Position:
     ----------
     symbol : str
         Ticker symbol.
-    qty : int
-        Net shares held. Positive = long, negative = short.
+    qty : float
+        Net shares held. Positive = long, negative = short. Float to support fractional shares.
     avg_entry : float
         Volume-weighted average entry price.
     current_price : float
@@ -37,7 +37,7 @@ class Position:
     """
 
     symbol: str
-    qty: int
+    qty: float
     avg_entry: float
     current_price: float
     unrealized_pnl: float

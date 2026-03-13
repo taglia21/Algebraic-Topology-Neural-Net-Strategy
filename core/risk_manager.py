@@ -534,7 +534,7 @@ class RiskManager:
         Returns
         -------
         float
-            Number of shares (rounded down to the nearest integer).
+            Number of shares (rounded to 4 decimal places for fractional share support).
 
         Raises
         ------
@@ -589,7 +589,7 @@ class RiskManager:
             notional = signal_strength * vol_adj * portfolio_value
 
         notional = min(notional, max_notional)
-        shares = np.floor(notional / price)
+        shares = round(notional / price, 4)
 
         return float(shares)
 

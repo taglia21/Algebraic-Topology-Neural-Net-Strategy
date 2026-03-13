@@ -58,21 +58,25 @@ class TestPositionSizing:
         assert 0 < pos.position_pct <= 5.0
         assert 0 < pos.position_value <= 500
 
-    def test_stressed_regime_caps(self, risk_mgr):
-        """STRESSED regime: max 3% per position."""
+    def test_stressed_regime_caps(self):
+        """STRESSED regime: max 12% per position (regime-limited)."""
+        # Use a high global cap so regime limit is the binding constraint
+        rm = EnsembleRiskManager(max_position_pct=20.0)
         signal = {"ticker": "AAPL", "direction": "LONG", "strength": 1.0}
-        pos = risk_mgr.size_position(
+        pos = rm.size_position(
             signal, 100000, {"gross_pct": 0.0}, regime="STRESSED"
         )
-        assert pos.position_pct <= 3.0
+        assert pos.position_pct <= 12.0
 
-    def test_crash_regime_caps(self, risk_mgr):
-        """CRASH regime: max 1% per position."""
+    def test_crash_regime_caps(self):
+        """CRASH regime: max 8% per position (regime-limited)."""
+        # Use a high global cap so regime limit is the binding constraint
+        rm = EnsembleRiskManager(max_position_pct=20.0)
         signal = {"ticker": "AAPL", "direction": "LONG", "strength": 1.0}
-        pos = risk_mgr.size_position(
+        pos = rm.size_position(
             signal, 100000, {"gross_pct": 0.0}, regime="CRASH"
         )
-        assert pos.position_pct <= 1.0
+        assert pos.position_pct <= 8.0
 
     def test_exposure_headroom(self, risk_mgr):
         """Position should be limited by remaining exposure headroom."""

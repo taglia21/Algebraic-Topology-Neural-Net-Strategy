@@ -357,6 +357,8 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
         ensemble_risk = EnsembleRiskManager(
             max_position_pct=cfg.risk.max_position_pct * 100,
             kelly_multiplier=cfg.risk.kelly_fraction,
+            max_risk_per_trade=getattr(cfg.risk.small_account, 'max_risk_per_trade', 500.0),
+            max_equity_position=getattr(cfg.risk.small_account, 'max_equity_position', 1000.0),
         )
         logger.info("Ensemble components initialized")
     except Exception as e:
@@ -414,6 +416,13 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
             break
 
         logger.info("--- Signal generation cycle ---")
+
+        # Initialize variables that may be referenced in EOD even if signal cycle fails
+        sized_signals = []
+        actionable = pd.DataFrame()
+        tda_signals = pd.DataFrame()
+        nn_signals = pd.DataFrame()
+        current_regime = "NORMAL"
 
         try:
             # -------------------------------------------------------
@@ -530,6 +539,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
             # 4. Ensemble: allocate → aggregate → size
             # -------------------------------------------------------
             sized_signals = []
+            actionable = pd.DataFrame()
             if signal_aggregator and (not tda_signals.empty or not nn_signals.empty):
                 try:
                     # Meta-allocator decides TDA vs NN weights
@@ -680,7 +690,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                             symbol=ps.ticker,
                                             quantity=qty,
                                             action=action,
-                                            limit_price=last_price,
+                                            limit_price=round(last_price * 1.005, 2),  # Slight premium to ensure fill
                                             take_profit=profit_price,
                                             stop_loss=stop_price,
                                         )
@@ -710,7 +720,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                             ticker=ps.ticker, action=action, quantity=qty,
                                             price=last_price, fill_price=last_price,
                                             strategy_source="TDA" if nn_model is None else "ENSEMBLE",
-                                            signal_strength=float(sig["final_strength"]),
+                                            signal_strength=ps.position_pct / 100.0,
                                             regime=current_regime,
                                         )
                                     except Exception as e:
@@ -886,10 +896,10 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                             daily_pnl=daily_pnl,
                             positions=trade_journal.get_open_positions() if trade_journal else [],
                             trades_today=trade_journal.get_recent_trades(limit=50) if trade_journal else [],
-                            kelly_params=trade_journal.get_kelly_params() if trade_journal else kelly_params,
+                            kelly_params=trade_journal.get_kelly_params() if trade_journal else {"win_rate": 0.55, "avg_win": 0.02, "avg_loss": 0.015},
                             regime=current_regime,
                             signals_generated=len(tda_signals) if not tda_signals.empty else 0,
-                            signals_actionable=len(actionable) if 'actionable' in dir() and not actionable.empty else 0,
+                            signals_actionable=len(actionable) if not actionable.empty else 0,
                         )
                         reporter.log_report(report)
                     except Exception as e:

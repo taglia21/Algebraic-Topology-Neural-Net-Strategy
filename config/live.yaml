@@ -11,7 +11,7 @@ system:
 
 broker:
   host: "127.0.0.1"
-  port: 4002            # IB Gateway live
+  port: 4003            # IB Gateway live (socat forwards to 4001)
   client_id: 1
   account: "U22452226"
   timeout: 30
@@ -49,27 +49,28 @@ ensemble:
   disagreement_penalty: 0.3
 
 risk:
-  max_position_pct: 0.05
-  max_sector_pct: 0.20
+  max_position_pct: 0.25        # 25% of NAV per position (~$111 at $444)
+  max_sector_pct: 0.50          # 50% sector cap
   max_long_exposure: 1.0
-  max_short_exposure: 0.5
-  max_gross_exposure: 1.3
+  max_short_exposure: 0.0       # No shorting on cash account
+  max_gross_exposure: 1.0       # Max 100% invested (no leverage)
   kelly_fraction: 0.5
   daily_loss_reduce_pct: 0.03
   daily_loss_flatten_pct: 0.05
   max_drawdown_halt_pct: 0.15
   small_account:
     enabled: true
-    max_risk_per_trade: 50
+    max_risk_per_trade: 200     # Allow up to $200 per trade
     max_concurrent_positions: 3
     max_option_premium: 50
+    max_equity_position: 200    # Allow up to $200 per equity position
 
 options:
   enabled: false          # DORMANT — do NOT enable until authorized
 
 equities:
   enabled: true           # LIVE — authorized by board
-  fractional_shares: true # IBKR supports fractional US equities
+  fractional_shares: false  # IBKR TWS API does NOT support fractional shares
 
 backtest:
   initial_capital: 444.0

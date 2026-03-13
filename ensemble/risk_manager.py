@@ -46,17 +46,19 @@ class RiskReport:
 
 
 # Regime-based exposure limits
+# Tuned for small accounts ($444). With expensive stocks ($100-600),
+# positions need to be larger to hold at least 1 whole share.
 _REGIME_LIMITS = {
     "NORMAL": {
-        "max_position_pct": 5.0,
+        "max_position_pct": 25.0,       # ~$111 at $444
         "max_total_exposure_pct": 100.0,
     },
     "STRESSED": {
-        "max_position_pct": 3.0,
+        "max_position_pct": 15.0,       # ~$67 at $444
         "max_total_exposure_pct": 60.0,
     },
     "CRASH": {
-        "max_position_pct": 1.0,
+        "max_position_pct": 10.0,       # ~$44 at $444
         "max_total_exposure_pct": 30.0,
     },
 }

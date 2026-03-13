@@ -72,8 +72,10 @@ class IBKRClient:
                 timeout=self._config.timeout,
                 readonly=self._config.readonly,
             )
-            if self._config.account:
-                self._ib.reqAccountUpdates(True, self._config.account)
+            # IB Gateway auto-subscribes to account updates on connect.
+            # reqAccountUpdates() throws "event loop already running" in
+            # ib_async v2.1, so we skip it and rely on the auto-subscription.
+            # accountValues() returns cached data populated by the gateway.
 
             self._connected = True
             self._reconnect_attempts = 0
@@ -147,31 +149,22 @@ class IBKRClient:
 
     async def get_account_summary(self) -> dict:
         """
-        Get account summary: NAV, buying power, cash, margin.
+        Get account summary from cached accountValues (no new request).
 
-        Returns dict with keys: net_liquidation, buying_power, cash,
-        total_cash_value, settled_cash, unrealized_pnl, realized_pnl.
+        Uses the real-time account subscription started on connect()
+        instead of reqAccountSummary which creates new subscriptions
+        and hits the IBKR request limit (Error 322).
+
+        Returns dict with keys like NetLiquidation, BuyingPower, etc.
         """
-        tags = [
-            "NetLiquidation",
-            "BuyingPower",
-            "TotalCashValue",
-            "SettledCash",
-            "UnrealizedPnL",
-            "RealizedPnL",
-            "AvailableFunds",
-            "ExcessLiquidity",
-            "MaintMarginReq",
-        ]
-        summary_items = await self.ib.reqAccountSummaryAsync()
+        acct = self._config.account
+        values = self.ib.accountValues(account=acct)
         result: dict = {}
-        for item in summary_items:
-            if item.account == self._config.account or not self._config.account:
-                key = item.tag
-                try:
-                    result[key] = float(item.value)
-                except (ValueError, TypeError):
-                    result[key] = item.value
+        for av in values:
+            try:
+                result[av.tag] = float(av.value)
+            except (ValueError, TypeError):
+                result[av.tag] = av.value
         return result
 
     async def get_positions(self) -> list:

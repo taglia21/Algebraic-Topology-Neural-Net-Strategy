@@ -423,12 +423,29 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
             tda_features = None
             if tda_extractor and tda_strategy:
                 try:
+                    # Extract aggregate features for NN and regime detection
                     tda_features = tda_extractor.extract(returns_df)
-                    tda_signals = tda_strategy.generate_signals(tda_features)
-                    # Detect regime from TDA features
-                    if "regime" in tda_signals.columns and len(tda_signals) > 0:
-                        regime_vals = tda_signals["regime"].value_counts()
-                        current_regime = regime_vals.index[0] if len(regime_vals) > 0 else "NORMAL"
+                    # Get regime from the last row of features
+                    if "regime" in tda_features.columns and len(tda_features) > 0:
+                        last_regime = tda_features["regime"].iloc[-1]
+                        _REGIME_MAP = {0: "NORMAL", 1: "STRESSED", 2: "CRASH"}
+                        if isinstance(last_regime, (int, float)):
+                            current_regime = _REGIME_MAP.get(int(last_regime), "NORMAL")
+                        else:
+                            current_regime = str(last_regime)
+
+                    # Compute per-ticker diffusion residuals for trading signals
+                    # LaplacianDiffusion.generate_signals() returns z-scored
+                    # residuals with actual ticker columns (SPY, QQQ, etc.)
+                    diffusion_residuals = tda_extractor.diffusion.generate_signals(
+                        returns_df,
+                        window=tda_extractor.corr_window,
+                        diffusion_time=tda_extractor.diffusion_time,
+                    )
+                    # Add regime column so strategy can gate signal strength
+                    if not diffusion_residuals.empty:
+                        diffusion_residuals["regime"] = current_regime
+                    tda_signals = tda_strategy.generate_signals(diffusion_residuals)
                     logger.info(f"TDA signals: {len(tda_signals)} | regime={current_regime}")
                 except Exception as e:
                     logger.warning(f"TDA feature extraction failed: {e}")
@@ -495,16 +512,25 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                         nav = cfg.backtest.initial_capital
                         if portfolio_mgr and ib_connected:
                             try:
-                                nav = await portfolio_mgr.get_nav()
-                            except Exception:
-                                pass
+                                fetched_nav = await portfolio_mgr.get_nav()
+                                if fetched_nav and fetched_nav > 0:
+                                    nav = fetched_nav
+                                else:
+                                    logger.warning("NAV returned %.2f, using fallback $%.2f", fetched_nav, nav)
+                            except Exception as e:
+                                logger.warning("NAV fetch failed (%s), using fallback $%.2f", e, nav)
 
                         exposure = {"long_pct": 0.0, "short_pct": 0.0, "gross_pct": 0.0}
                         if portfolio_mgr and ib_connected:
                             try:
-                                exposure = await portfolio_mgr.get_total_exposure()
-                            except Exception:
-                                pass
+                                exp_data = await portfolio_mgr.get_total_exposure()
+                                exposure = {
+                                    "long_pct": exp_data.get("gross_exposure_pct", 0.0),
+                                    "short_pct": exp_data.get("net_exposure_pct", 0.0),
+                                    "gross_pct": exp_data.get("gross_exposure_pct", 0.0),
+                                }
+                            except Exception as e:
+                                logger.warning("Exposure fetch failed (%s), using defaults", e)
 
                         for _, sig in actionable.iterrows():
                             ps = ensemble_risk.size_position(
@@ -534,21 +560,43 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                 for ps in sized_signals:
                     try:
                         if equities_enabled and equity_trader:
-                            # Convert position value to shares
+                            # IBKR TWS API does NOT support fractional shares
                             last_price = price_df[ps.ticker].iloc[-1] if ps.ticker in price_df.columns else None
                             if last_price and last_price > 0:
-                                qty = round(ps.position_value / last_price, 4)
+                                qty = int(ps.position_value / last_price)
+                                # Small account floor: ensure at least 1 share if
+                                # we can afford it and the signal is actionable
+                                if qty < 1 and last_price <= nav * 0.50:
+                                    qty = 1
+                                    logger.info(
+                                        f"Small account floor: bumping {ps.ticker} to 1 share "
+                                        f"(${last_price:.2f}, {last_price/nav*100:.1f}% of NAV)"
+                                    )
+                                elif qty < 1:
+                                    logger.info(
+                                        f"Skipping {ps.ticker}: 1 share @ ${last_price:.2f} "
+                                        f"exceeds 50% of NAV (${nav:.2f})"
+                                    )
+                                    continue
+                                # Skip SHORT on cash account (no margin)
+                                if ps.direction == "SHORT":
+                                    logger.info(f"Skipping {ps.ticker} SHORT: cash account cannot short-sell")
+                                    continue
                                 action = "BUY" if ps.direction == "LONG" else "SELL"
                                 order_result = await equity_trader.place_market_order(
                                     symbol=ps.ticker,
                                     quantity=qty,
                                     action=action,
                                 )
-                                logger.info(f"Order: {action} {qty} {ps.ticker} → {order_result}")
+                                logger.info(f"Order: {action} {qty} {ps.ticker} @ ~${last_price:.2f} → {order_result}")
                     except Exception as e:
                         logger.error(f"Trade execution failed for {ps.ticker}: {e}")
-            else:
-                logger.info(f"Signal-only mode: {len(sized_signals)} signals generated, no trades executed")
+            elif dry_run:
+                logger.info(f"Dry-run mode: {len(sized_signals)} signals generated, no trades executed")
+            elif not sized_signals:
+                logger.info("No sized signals to execute (actionable signals may have been filtered by risk limits)")
+            elif not ib_connected:
+                logger.info(f"Signal-only mode (no IBKR): {len(sized_signals)} signals generated, no trades executed")
 
             # -------------------------------------------------------
             # 6. Risk monitor check

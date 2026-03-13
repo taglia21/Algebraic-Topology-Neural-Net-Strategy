@@ -46,19 +46,18 @@ class RiskReport:
 
 
 # Regime-based exposure limits
-# Tuned for small accounts ($444). With expensive stocks ($100-600),
-# positions need to be larger to hold at least 1 whole share.
+# Tuned for small-to-mid accounts ($5,444).
 _REGIME_LIMITS = {
     "NORMAL": {
-        "max_position_pct": 25.0,       # ~$111 at $444
+        "max_position_pct": 20.0,
         "max_total_exposure_pct": 100.0,
     },
     "STRESSED": {
-        "max_position_pct": 15.0,       # ~$67 at $444
+        "max_position_pct": 12.0,
         "max_total_exposure_pct": 60.0,
     },
     "CRASH": {
-        "max_position_pct": 10.0,       # ~$44 at $444
+        "max_position_pct": 8.0,
         "max_total_exposure_pct": 30.0,
     },
 }
@@ -106,9 +105,9 @@ class EnsembleRiskManager:
         daily_loss_flatten_pct: float = 5.0,
         daily_loss_reduce_pct: float = 3.0,
         max_drawdown_halt_pct: float = 15.0,
-        max_risk_per_trade: float = 50.0,
+        max_risk_per_trade: float = 500.0,
         max_option_premium: float = 50.0,
-        max_equity_position: float = 100.0,
+        max_equity_position: float = 1000.0,
     ) -> None:
         self.max_position_pct = max_position_pct
         self.max_sector_exposure_pct = max_sector_exposure_pct
@@ -234,8 +233,8 @@ class EnsembleRiskManager:
         # Dollar value
         position_value = portfolio_value * position_pct / 100.0
 
-        # Small account constraints ($444)
-        if portfolio_value < 1000:
+        # Small account constraints ($5,444)
+        if portfolio_value < 2000:
             if position_value > self.max_equity_position:
                 position_value = self.max_equity_position
                 position_pct = (position_value / portfolio_value) * 100 if portfolio_value > 0 else 0.0

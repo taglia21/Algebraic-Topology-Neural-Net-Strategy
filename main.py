@@ -209,6 +209,47 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     trade_log = get_trade_logger(log_level=cfg.system.log_level)
     market_cal = MarketCalendar()
 
+    # --- Initialize enhancement modules (all wrapped in try/except) ---
+    nav_cache = None
+    try:
+        from core.nav_cache import NAVCache
+        nav_cache = NAVCache()
+        logger.info("NAVCache initialized")
+    except Exception as e:
+        logger.warning("NAVCache init failed (non-fatal): %s", e)
+
+    data_cache = None
+    try:
+        from core.data_cache import MarketDataCache
+        data_cache = MarketDataCache()
+        logger.info("MarketDataCache initialized")
+    except Exception as e:
+        logger.warning("MarketDataCache init failed (non-fatal): %s", e)
+
+    trade_journal = None
+    try:
+        from core.trade_journal import TradeJournal
+        trade_journal = TradeJournal()
+        logger.info("TradeJournal initialized")
+    except Exception as e:
+        logger.warning("TradeJournal init failed (non-fatal): %s", e)
+
+    paper_returns = None
+    try:
+        from core.paper_returns import PaperReturnsCollector
+        paper_returns = PaperReturnsCollector()
+        logger.info("PaperReturnsCollector initialized")
+    except Exception as e:
+        logger.warning("PaperReturnsCollector init failed (non-fatal): %s", e)
+
+    reporter = None
+    try:
+        from core.daily_report import DailyReporter
+        reporter = DailyReporter()
+        logger.info("DailyReporter initialized")
+    except Exception as e:
+        logger.warning("DailyReporter init failed (non-fatal): %s", e)
+
     # Graceful shutdown
     _shutdown = False
 
@@ -224,13 +265,14 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     signal_time = _parse_time(cfg.schedule.signal_time)
     recon_time = _parse_time(cfg.schedule.reconciliation_time)
 
-    # Kill switch
+    # Kill switch — use cached NAV if available
+    cached_nav = nav_cache.load(cfg.backtest.initial_capital) if nav_cache else cfg.backtest.initial_capital
     kill_switch = KillSwitch(
         config=CircuitBreakerConfig(
             max_drawdown_pct=-cfg.risk.max_drawdown_halt_pct,
             max_daily_loss_pct=-cfg.risk.daily_loss_flatten_pct,
         ),
-        initial_equity=cfg.backtest.initial_capital,
+        initial_equity=cached_nav,
     )
 
     # --- Connect to IBKR ---
@@ -355,7 +397,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
         if _last_trading_date != today:
             _last_trading_date = today
             _days_since_retrain += 1
-            kill_switch.reset_daily(cfg.backtest.initial_capital)
+            kill_switch.reset_daily(nav_cache.load(cfg.backtest.initial_capital) if nav_cache else cfg.backtest.initial_capital)
             logger.info(f"=== New trading day: {today} ===")
 
         # Kill switch check
@@ -389,6 +431,13 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                 except Exception as e:
                     logger.error(f"Data fetch failed: {e}")
 
+            # Cache market data for NN training
+            if market_data and data_cache:
+                try:
+                    data_cache.save_bars(market_data)
+                except Exception as e:
+                    logger.warning("Data cache save_bars failed (non-fatal): %s", e)
+
             if not market_data:
                 logger.warning("No market data available — skipping signal cycle")
                 time.sleep(60)
@@ -414,6 +463,13 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
             price_df = pd.DataFrame(closes)
             volume_df = pd.DataFrame(volumes) if volumes else None
             returns_df = price_df.pct_change().dropna()
+
+            # Cache combined data
+            if data_cache:
+                try:
+                    data_cache.save_combined(price_df, volume_df)
+                except Exception as e:
+                    logger.warning("Data cache save_combined failed (non-fatal): %s", e)
 
             # -------------------------------------------------------
             # 2. TDA features → TDA signals
@@ -509,12 +565,17 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
 
                     # Size positions via risk manager
                     if ensemble_risk and not actionable.empty:
-                        nav = cfg.backtest.initial_capital
+                        nav = nav_cache.load(cfg.backtest.initial_capital) if nav_cache else cfg.backtest.initial_capital
                         if portfolio_mgr and ib_connected:
                             try:
                                 fetched_nav = await portfolio_mgr.get_nav()
                                 if fetched_nav and fetched_nav > 0:
                                     nav = fetched_nav
+                                    if nav_cache:
+                                        try:
+                                            nav_cache.save(nav)
+                                        except Exception:
+                                            pass
                                 else:
                                     logger.warning("NAV returned %.2f, using fallback $%.2f", fetched_nav, nav)
                             except Exception as e:
@@ -532,6 +593,14 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                             except Exception as e:
                                 logger.warning("Exposure fetch failed (%s), using defaults", e)
 
+                        # Get rolling Kelly params from trade journal
+                        kelly_params = {"win_rate": 0.55, "avg_win": 0.02, "avg_loss": 0.015}
+                        if trade_journal:
+                            try:
+                                kelly_params = trade_journal.get_kelly_params()
+                            except Exception as e:
+                                logger.warning("Kelly params fetch failed (non-fatal): %s", e)
+
                         for _, sig in actionable.iterrows():
                             ps = ensemble_risk.size_position(
                                 signal={
@@ -542,6 +611,9 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 portfolio_value=nav,
                                 current_exposure=exposure,
                                 regime=current_regime,
+                                win_rate=kelly_params["win_rate"],
+                                avg_win=kelly_params["avg_win"],
+                                avg_loss=kelly_params["avg_loss"],
                             )
                             if ps.position_value > 0:
                                 sized_signals.append(ps)
@@ -552,6 +624,19 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 )
                 except Exception as e:
                     logger.warning(f"Ensemble aggregation failed: {e}")
+
+            # Record paper returns for meta-allocator training
+            if paper_returns:
+                try:
+                    paper_returns.record(
+                        date=today.isoformat(),
+                        tda_signals=tda_signals,
+                        nn_signals=nn_signals,
+                        returns_df=returns_df,
+                        regime=current_regime,
+                    )
+                except Exception as e:
+                    logger.warning("Paper returns recording failed (non-fatal): %s", e)
 
             # -------------------------------------------------------
             # 5. Execute trades
@@ -583,12 +668,53 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                     logger.info(f"Skipping {ps.ticker} SHORT: cash account cannot short-sell")
                                     continue
                                 action = "BUY" if ps.direction == "LONG" else "SELL"
-                                order_result = await equity_trader.place_market_order(
-                                    symbol=ps.ticker,
-                                    quantity=qty,
-                                    action=action,
-                                )
-                                logger.info(f"Order: {action} {qty} {ps.ticker} @ ~${last_price:.2f} → {order_result}")
+
+                                # Bracket order for new BUY entries
+                                if action == "BUY":
+                                    stop_loss_pct = 0.03  # 3% stop-loss
+                                    take_profit_pct = 0.06  # 6% take-profit (2:1 reward/risk)
+                                    stop_price = round(last_price * (1 - stop_loss_pct), 2)
+                                    profit_price = round(last_price * (1 + take_profit_pct), 2)
+                                    try:
+                                        bracket_results = await equity_trader.place_bracket_order(
+                                            symbol=ps.ticker,
+                                            quantity=qty,
+                                            action=action,
+                                            limit_price=last_price,
+                                            take_profit=profit_price,
+                                            stop_loss=stop_price,
+                                        )
+                                        logger.info(
+                                            "Bracket order: %s %d %s entry~$%.2f TP=$%.2f SL=$%.2f → %s",
+                                            action, qty, ps.ticker, last_price, profit_price, stop_price,
+                                            bracket_results,
+                                        )
+                                    except Exception as bracket_err:
+                                        # Fallback to market order if bracket fails
+                                        logger.warning("Bracket order failed (%s), falling back to market order", bracket_err)
+                                        order_result = await equity_trader.place_market_order(
+                                            symbol=ps.ticker, quantity=qty, action=action,
+                                        )
+                                        logger.info(f"Order: {action} {qty} {ps.ticker} @ ~${last_price:.2f} → {order_result}")
+                                else:
+                                    # SELL orders — simple market order
+                                    order_result = await equity_trader.place_market_order(
+                                        symbol=ps.ticker, quantity=qty, action=action,
+                                    )
+                                    logger.info(f"Order: {action} {qty} {ps.ticker} @ ~${last_price:.2f} → {order_result}")
+
+                                # Record trade in journal
+                                if trade_journal:
+                                    try:
+                                        trade_journal.record_trade(
+                                            ticker=ps.ticker, action=action, quantity=qty,
+                                            price=last_price, fill_price=last_price,
+                                            strategy_source="TDA" if nn_model is None else "ENSEMBLE",
+                                            signal_strength=float(sig["final_strength"]),
+                                            regime=current_regime,
+                                        )
+                                    except Exception as e:
+                                        logger.warning("Trade journal record failed (non-fatal): %s", e)
                     except Exception as e:
                         logger.error(f"Trade execution failed for {ps.ticker}: {e}")
             elif dry_run:
@@ -614,8 +740,110 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
         except Exception as e:
             logger.error(f"Signal cycle failed: {e}", exc_info=True)
 
-        # Wait for reconciliation time
-        _wait_until(recon_time)
+        # -------------------------------------------------------
+        # 5b. Intraday monitoring (every 15 minutes)
+        # -------------------------------------------------------
+        intraday_check_interval = 15 * 60  # 15 minutes in seconds
+        recon_dt = _now_et().replace(
+            hour=recon_time.hour, minute=recon_time.minute, second=0
+        )
+
+        while not _shutdown:
+            now = _now_et()
+            if now >= recon_dt:
+                break
+
+            # Check positions for stop-loss / take-profit triggers
+            if portfolio_mgr and ib_connected and equity_trader:
+                try:
+                    await portfolio_mgr.sync_positions()
+                    equity_positions = list(portfolio_mgr.get_equity_positions())
+                    intraday_nav = await portfolio_mgr.get_nav()
+                    if nav_cache and intraday_nav and intraday_nav > 0:
+                        try:
+                            nav_cache.save(intraday_nav)
+                        except Exception:
+                            pass
+
+                    for pos in equity_positions:
+                        symbol = pos.contract.symbol if hasattr(pos, 'contract') else None
+                        current_price = pos.marketPrice if hasattr(pos, 'marketPrice') else None
+                        avg_cost = pos.avgCost if hasattr(pos, 'avgCost') else None
+                        pos_qty = pos.position if hasattr(pos, 'position') else 0
+
+                        if not symbol or not current_price or current_price <= 0 or not avg_cost or avg_cost <= 0:
+                            continue
+
+                        change_pct = (current_price - avg_cost) / avg_cost
+
+                        # Emergency stop: -5% from entry
+                        if change_pct <= -0.05 and pos_qty > 0:
+                            logger.warning(
+                                "INTRADAY STOP: %s down %.1f%% from entry ($%.2f → $%.2f). Selling.",
+                                symbol, change_pct * 100, avg_cost, current_price,
+                            )
+                            try:
+                                result = await equity_trader.place_market_order(
+                                    symbol=symbol, quantity=abs(pos_qty), action="SELL",
+                                )
+                                if trade_journal:
+                                    try:
+                                        trade_journal.record_trade(
+                                            ticker=symbol, action="SELL", quantity=abs(pos_qty),
+                                            price=current_price, fill_price=current_price,
+                                            strategy_source="INTRADAY_STOP", regime=current_regime,
+                                        )
+                                    except Exception:
+                                        pass
+                                logger.info("Emergency sell %s: %s", symbol, result)
+                            except Exception as e:
+                                logger.error("Emergency sell failed for %s: %s", symbol, e)
+
+                        # Partial profit taking: +5% from entry, sell half
+                        elif change_pct >= 0.05 and pos_qty > 1:
+                            sell_qty = max(1, int(pos_qty / 2))
+                            logger.info(
+                                "INTRADAY PROFIT: %s up %.1f%%. Taking partial profit (%d of %d shares).",
+                                symbol, change_pct * 100, sell_qty, int(pos_qty),
+                            )
+                            try:
+                                result = await equity_trader.place_market_order(
+                                    symbol=symbol, quantity=sell_qty, action="SELL",
+                                )
+                                if trade_journal:
+                                    try:
+                                        trade_journal.record_trade(
+                                            ticker=symbol, action="SELL", quantity=sell_qty,
+                                            price=current_price, fill_price=current_price,
+                                            strategy_source="INTRADAY_PROFIT", regime=current_regime,
+                                        )
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                logger.error("Partial profit sell failed for %s: %s", symbol, e)
+
+                    # Update kill switch with current NAV
+                    if intraday_nav and intraday_nav > 0:
+                        try:
+                            daily_pnl_check = await portfolio_mgr.get_daily_pnl()
+                            pnl_pct = daily_pnl_check / intraday_nav * 100 if intraday_nav > 0 else 0.0
+                            if pnl_pct <= -cfg.risk.daily_loss_flatten_pct * 100:
+                                logger.warning("INTRADAY KILL SWITCH: Daily loss %.1f%%. Flattening.", pnl_pct)
+                                await equity_trader.flatten_all()
+                        except Exception as e:
+                            logger.warning("Intraday kill switch check failed: %s", e)
+
+                except Exception as e:
+                    logger.warning("Intraday monitoring error: %s", e)
+
+            # Sleep until next check or recon time
+            sleep_secs = min(intraday_check_interval, (recon_dt - _now_et()).total_seconds())
+            if sleep_secs > 0:
+                for _ in range(int(sleep_secs)):
+                    if _shutdown:
+                        break
+                    time.sleep(1)
+
         if _shutdown:
             break
 
@@ -631,6 +859,41 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                     f"EOD: NAV=${nav:,.2f} | Daily P&L=${daily_pnl:,.2f} "
                     f"| Positions={positions.get('position_count', 0)}"
                 )
+
+                # Cache EOD NAV
+                if nav_cache and nav and nav > 0:
+                    try:
+                        nav_cache.save(nav)
+                    except Exception as e:
+                        logger.warning("EOD NAV cache save failed (non-fatal): %s", e)
+
+                # Record daily stats in trade journal
+                if trade_journal:
+                    try:
+                        trade_journal.record_daily_stats(
+                            nav, daily_pnl,
+                            positions.get("position_count", 0),
+                            len(sized_signals),
+                        )
+                    except Exception as e:
+                        logger.warning("Trade journal daily stats failed (non-fatal): %s", e)
+
+                # Generate and log daily report
+                if reporter:
+                    try:
+                        report = reporter.generate_report(
+                            nav=nav,
+                            daily_pnl=daily_pnl,
+                            positions=trade_journal.get_open_positions() if trade_journal else [],
+                            trades_today=trade_journal.get_recent_trades(limit=50) if trade_journal else [],
+                            kelly_params=trade_journal.get_kelly_params() if trade_journal else kelly_params,
+                            regime=current_regime,
+                            signals_generated=len(tda_signals) if not tda_signals.empty else 0,
+                            signals_actionable=len(actionable) if 'actionable' in dir() and not actionable.empty else 0,
+                        )
+                        reporter.log_report(report)
+                    except Exception as e:
+                        logger.warning("Daily report generation failed (non-fatal): %s", e)
             else:
                 logger.info("EOD: No IBKR connection for reconciliation")
         except Exception as e:
@@ -671,6 +934,11 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
             await broker["client"].disconnect()
         except Exception:
             pass
+    if trade_journal:
+        try:
+            trade_journal.close()
+        except Exception as e:
+            logger.warning("Trade journal close failed (non-fatal): %s", e)
     trade_log.close()
     print("\nATNN v2 shut down cleanly.")
 

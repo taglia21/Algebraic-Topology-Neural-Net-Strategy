@@ -19,8 +19,25 @@ broker:
   max_reconnect_attempts: 10
 
 universe:
-  symbols: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "TSLA"]
-  benchmark: "SPY"
+  symbols:
+    - SPY
+    - QQQ
+    - IWM
+    - AAPL
+    - MSFT
+    - AMZN
+    - NVDA
+    - META
+    - GOOGL
+    - TSLA
+    - XLF    # Financials
+    - XLE    # Energy
+    - XLK    # Technology
+    - XLV    # Healthcare
+    - XLI    # Industrials
+    - GLD    # Gold (uncorrelated)
+    - TLT    # Long-term bonds (uncorrelated)
+  benchmark: SPY
 
 tda:
   ph_window: 30
@@ -49,7 +66,7 @@ ensemble:
   disagreement_penalty: 0.3
 
 risk:
-  max_position_pct: 0.25        # 25% of NAV per position (~$111 at $444)
+  max_position_pct: 0.15        # 15% of NAV per position
   max_sector_pct: 0.50          # 50% sector cap
   max_long_exposure: 1.0
   max_short_exposure: 0.0       # No shorting on cash account
@@ -58,12 +75,13 @@ risk:
   daily_loss_reduce_pct: 0.03
   daily_loss_flatten_pct: 0.05
   max_drawdown_halt_pct: 0.15
+  max_equity_position: 1000.0
   small_account:
     enabled: true
-    max_risk_per_trade: 200     # Allow up to $200 per trade
-    max_concurrent_positions: 3
-    max_option_premium: 50
-    max_equity_position: 200    # Allow up to $200 per equity position
+    max_risk_per_trade: 500     # Allow up to $500 per trade
+    max_concurrent_positions: 5
+    max_option_premium: 200
+    max_equity_position: 1000   # Allow up to $1000 per equity position
 
 options:
   enabled: false          # DORMANT — do NOT enable until authorized
@@ -73,7 +91,7 @@ equities:
   fractional_shares: false  # IBKR TWS API does NOT support fractional shares
 
 backtest:
-  initial_capital: 444.0
+  initial_capital: 5444.0
   train_window: 756
   test_window: 21
   purge_gap: 5

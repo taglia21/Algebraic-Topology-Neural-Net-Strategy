@@ -139,19 +139,27 @@ class SmallAccountCfg:
     max_risk_per_trade: float = 50.0
     max_concurrent_positions: int = 3
     max_option_premium: float = 50.0
+    max_equity_position: float = 1000.0  # Max $ per equity position
 
 
 @dataclass
 class RiskCfg:
-    max_position_pct: float = 0.05
-    max_sector_pct: float = 0.20
-    max_long_exposure: float = 1.0
-    max_short_exposure: float = 0.5
-    max_gross_exposure: float = 1.3
-    kelly_fraction: float = 0.5
-    daily_loss_reduce_pct: float = 0.03
-    daily_loss_flatten_pct: float = 0.05
-    max_drawdown_halt_pct: float = 0.15
+    """Risk parameters — all percentages stored as **fractions** (0.15 = 15%).
+
+    When passing to broker/risk_monitor.RiskConfig or
+    ensemble/risk_manager.EnsembleRiskManager (which expect whole-number
+    percentages like 15.0), multiply by 100.
+    """
+
+    max_position_pct: float = 0.05       # 5% — max single position as fraction of NAV
+    max_sector_pct: float = 0.20         # 20%
+    max_long_exposure: float = 1.0       # 100%
+    max_short_exposure: float = 0.5      # 50%
+    max_gross_exposure: float = 1.3      # 130%
+    kelly_fraction: float = 0.5          # half-Kelly
+    daily_loss_reduce_pct: float = 0.03  # 3% — reduce exposure trigger
+    daily_loss_flatten_pct: float = 0.05 # 5% — flatten all trigger
+    max_drawdown_halt_pct: float = 0.15  # 15% — full system halt
     small_account: SmallAccountCfg = field(default_factory=SmallAccountCfg)
 
 
@@ -333,93 +341,7 @@ SystemConfig = SystemCfg
 BacktestConfig = BacktestCfg
 Config = ATNNConfig
 
-# Legacy default symbols list (used by old main.py imports)
-_DEFAULT_SYMBOLS: List[str] = [
-    "SPY", "QQQ", "IWM",
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "AVGO",
-    "BRK.B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS",
-    "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT",
-    "WMT", "HD", "COST", "PG", "KO", "PEP", "MCD", "NKE",
-    "XOM", "CVX", "COP",
-    "NFLX", "DIS", "CMCSA",
-    "AMD", "INTC", "QCOM", "MU", "AMAT", "LRCX",
-    "CRM", "ORCL", "ADBE", "NOW",
-    "RTX", "CAT", "DE", "LIN",
-]
-
-# Legacy dataclasses needed by old core/__init__.py imports
-@dataclass
-class StatArbConfig:
-    entry_z: float = 1.5
-    exit_z: float = 0.3
-    stop_z: float = 3.5
-    min_entry_z: float = 1.0
-    lookback_days: int = 252
-    kalman_transition_cov: float = 1e-5
-    kalman_observation_cov: float = 1e-3
-
-
-@dataclass
-class MomentumConfig:
-    lookback_days: int = 252
-    skip_days: int = 21
-    long_pct: float = 0.20
-    short_pct: float = 0.20
-    sector_neutral: bool = True
-    vol_scale: bool = True
-    vol_target: float = 0.20
-
-
-@dataclass
-class FactorModelConfig:
-    lookback_days: int = 63
-    entry_z: float = 0.75
-    exit_z: float = -0.25
-    quality_weight: float = 0.25
-    value_weight: float = 0.25
-    low_vol_weight: float = 0.25
-    momentum_weight: float = 0.25
-
-
-@dataclass
-class MeanReversionConfig:
-    lookback: int = 60
-    entry_z: float = 1.2
-    exit_z: float = 0.5
-    hard_stop_z: float = 3.0
-    rsi_period: int = 14
-    rsi_oversold: float = 30.0
-    rsi_overbought: float = 70.0
-    rv_window: int = 20
-
-
-@dataclass
-class StrategyConfig:
-    stat_arb: StatArbConfig = field(default_factory=StatArbConfig)
-    momentum: MomentumConfig = field(default_factory=MomentumConfig)
-    factor_model: FactorModelConfig = field(default_factory=FactorModelConfig)
-    mean_reversion: MeanReversionConfig = field(default_factory=MeanReversionConfig)
-
-
-@dataclass
-class LightGBMParams:
-    max_depth: int = 6
-    num_leaves: int = 31
-    learning_rate: float = 0.05
-    min_child_samples: int = 50
-    n_estimators: int = 300
-    subsample: float = 0.8
-    colsample_bytree: float = 0.8
-    reg_alpha: float = 0.1
-    reg_lambda: float = 0.1
-    random_state: int = 42
-
-
-@dataclass
-class MLConfig:
-    feature_lookback: int = 252
-    retrain_freq_days: int = 7
-    train_window_days: int = 504
-    horizons: List[int] = field(default_factory=lambda: [1, 5, 20])
-    model_params: LightGBMParams = field(default_factory=LightGBMParams)
-    model_dir: str = "models/lgbm"
+# NOTE: Legacy config classes (StatArbConfig, MomentumConfig, FactorModelConfig,
+# MeanReversionConfig, MLConfig, LightGBMParams, StrategyConfig) and
+# _DEFAULT_SYMBOLS were removed in the v2 audit cleanup.  The old strategies
+# that depended on them live in archive/ and are no longer used.

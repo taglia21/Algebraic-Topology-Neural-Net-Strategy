@@ -17,11 +17,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RiskConfig:
-    """Risk monitoring thresholds."""
-    max_daily_loss_pct: float = 5.0       # Flatten all at 5% daily loss
-    reduce_exposure_pct: float = 3.0      # Reduce to 50% at 3% daily loss
-    max_drawdown_pct: float = 15.0        # Full halt at 15% drawdown
-    max_position_pct: float = 5.0         # No single position > 5% of NAV
+    """Risk monitoring thresholds — all percentages as **whole numbers** (5.0 = 5%).
+
+    NOTE: core/config.RiskCfg stores the same values as fractions (0.05 = 5%).
+    When constructing this from RiskCfg, multiply by 100.
+    """
+
+    max_daily_loss_pct: float = 5.0        # Flatten all at 5% daily loss
+    reduce_exposure_pct: float = 3.0       # Reduce to 50% at 3% daily loss
+    max_drawdown_pct: float = 15.0         # Full halt at 15% drawdown
+    max_position_pct: float = 5.0          # No single position > 5% of NAV
     max_gross_exposure_pct: float = 100.0  # Max 100% gross exposure
     connection_timeout_minutes: float = 5.0  # Flatten after 5 min disconnect
 
@@ -141,7 +146,11 @@ class RiskMonitor:
                 violations.append(
                     f"CONNECTION_LOST: {elapsed:.1f} min >= {self._config.connection_timeout_minutes} min"
                 )
-                action = "CONNECTION_KILL_SWITCH"
+                await self.trigger_kill_switch(
+                    f"Connection lost for {elapsed:.1f} min "
+                    f"(threshold: {self._config.connection_timeout_minutes} min)"
+                )
+                action = "KILL_SWITCH"
         else:
             self._last_connected = None
 
@@ -172,36 +181,91 @@ class RiskMonitor:
 
         This is the nuclear option. Closes every position (equity + options)
         and disables both trading engines.
+
+        IMPORTANT: Flatten FIRST, then disable.  If we disabled first the
+        flatten calls would be silently skipped because the trader checks
+        the ``enabled`` flag before submitting orders.
         """
         logger.critical("KILL SWITCH TRIGGERED: %s", reason)
         self._kill_switch_triggered = True
 
-        # Disable trading engines
-        if self._equity_trader:
-            self._equity_trader.disable()
-        if self._option_trader:
-            self._option_trader.disable()
-
-        # Flatten all positions
+        # --- FLATTEN FIRST — before disabling traders ---
         try:
-            if self._equity_trader and self._equity_trader.enabled:
+            if self._equity_trader:
                 await self._equity_trader.flatten_all()
-            if self._option_trader and self._option_trader.enabled:
+            if self._option_trader:
                 await self._option_trader.flatten_all_options()
             logger.critical("Kill switch: all positions flattened")
         except Exception as exc:
             logger.critical("Kill switch flatten FAILED: %s", exc)
 
+        # --- THEN disable trading engines ---
+        if self._equity_trader:
+            self._equity_trader.disable()
+        if self._option_trader:
+            self._option_trader.disable()
+
     async def reduce_exposure(self, target_pct: float) -> None:
         """
-        Reduce gross exposure to target percentage.
+        Reduce gross exposure to *target_pct* by closing the largest
+        losing positions first.
 
-        Closes positions proportionally until target is reached.
+        Parameters
+        ----------
+        target_pct :
+            Desired gross exposure as a percentage of NAV (e.g. 50.0).
         """
         logger.warning("Reducing exposure to %.0f%%", target_pct)
-        # For now, log the intent. Full implementation requires
-        # position-level decisions about what to close first.
-        # Priority: close most volatile / largest positions first.
+
+        if not self._equity_trader or not self._portfolio:
+            logger.warning("Cannot reduce exposure: no equity trader or portfolio manager")
+            return
+
+        try:
+            nav = await self._portfolio.get_nav()
+            if nav <= 0:
+                return
+
+            exposure = await self._portfolio.get_total_exposure()
+            current_gross_pct = exposure.get("gross_exposure_pct", 0.0)
+
+            if current_gross_pct <= target_pct:
+                logger.info(
+                    "Exposure already at %.1f%% (target %.1f%%)",
+                    current_gross_pct, target_pct,
+                )
+                return
+
+            # Get stock positions, sort by unrealized P&L (worst losers first)
+            await self._portfolio.sync_positions()
+            positions = [
+                p for p in self._portfolio._cached_positions
+                if p.contract.secType == "STK" and p.position != 0
+            ]
+            positions.sort(
+                key=lambda p: getattr(p, "unrealizedPNL", 0) or 0,
+            )
+
+            # Close positions one by one until we hit the target
+            for pos in positions:
+                current_exposure = await self._portfolio.get_total_exposure()
+                if current_exposure.get("gross_exposure_pct", 0.0) <= target_pct:
+                    break
+
+                action = "SELL" if pos.position > 0 else "BUY"
+                qty = abs(pos.position)
+                symbol = pos.contract.symbol
+
+                logger.warning(
+                    "Reducing: %s %d %s (unrealized P&L: $%.2f)",
+                    action, qty, symbol,
+                    getattr(pos, "unrealizedPNL", 0) or 0,
+                )
+                await self._equity_trader.place_market_order(symbol, qty, action)
+
+            logger.info("Exposure reduction complete")
+        except Exception as exc:
+            logger.error("Exposure reduction failed: %s", exc)
 
     def reset_kill_switch(self) -> None:
         """

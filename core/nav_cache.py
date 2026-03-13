@@ -18,15 +18,16 @@ class NAVCache:
         self._path = cache_path
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
-    def save(self, nav: float) -> None:
-        """Save current NAV to disk."""
+    def save(self, nav: float, peak_nav: float = 0.0) -> None:
+        """Save current NAV and peak NAV to disk."""
         data = {
             "nav": nav,
+            "peak_nav": peak_nav if peak_nav > 0 else nav,
             "timestamp": datetime.now().isoformat(),
         }
         try:
             self._path.write_text(json.dumps(data))
-            logger.debug("Cached NAV: $%.2f", nav)
+            logger.debug("Cached NAV: $%.2f (peak: $%.2f)", nav, data["peak_nav"])
         except Exception as e:
             logger.warning("Failed to cache NAV: %s", e)
 
@@ -41,4 +42,16 @@ class NAVCache:
                     return nav
         except Exception as e:
             logger.warning("Failed to load NAV cache: %s", e)
+        return fallback
+
+    def load_peak_nav(self, fallback: float = 0.0) -> float:
+        """Load peak NAV from disk, or return fallback."""
+        try:
+            if self._path.exists():
+                data = json.loads(self._path.read_text())
+                peak = float(data.get("peak_nav", fallback))
+                if peak > 0:
+                    return peak
+        except Exception as e:
+            logger.warning("Failed to load peak NAV cache: %s", e)
         return fallback

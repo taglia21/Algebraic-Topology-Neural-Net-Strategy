@@ -126,6 +126,16 @@ class PortfolioManager:
         """Historical peak NAV for drawdown calculation."""
         return self._peak_nav
 
+    def initialize_peak_nav(self, cached_nav: float) -> None:
+        """Initialize peak NAV from cached value to prevent cold-start bypass.
+
+        Without this, ``_peak_nav`` starts at 0.0 and drawdown detection is
+        completely bypassed on the first cycle after a restart.
+        """
+        if cached_nav > 0:
+            self._peak_nav = cached_nav
+            logger.info("Initialized peak NAV from cache: $%.2f", cached_nav)
+
     async def position_summary(self) -> pd.DataFrame:
         """
         Generate a summary table of all positions.

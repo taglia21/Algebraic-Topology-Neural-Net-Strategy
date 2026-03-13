@@ -20,20 +20,13 @@ from core.config import (
     ScheduleCfg,
     SmallAccountCfg,
     get_config,
-    # Legacy aliases (backward compat)
+    # Legacy aliases (backward compat — aliased to active classes)
     IBKRConfig,
     Config,
     DataConfig,
     RiskConfig,
     SystemConfig,
     BacktestConfig,
-    FactorModelConfig,
-    LightGBMParams,
-    MLConfig,
-    MomentumConfig,
-    StatArbConfig,
-    StrategyConfig,
-    MeanReversionConfig,
 )
 from core.logger import (
     TradeLogger,
@@ -64,10 +57,9 @@ __all__ = [
     "NNCfg", "EnsembleCfg", "RiskCfg", "OptionsCfg", "EquitiesCfg",
     "BacktestCfg", "ScheduleCfg", "SmallAccountCfg",
     "get_config",
-    # legacy config aliases
+    # legacy config aliases (aliased to active classes)
     "IBKRConfig", "Config", "DataConfig", "RiskConfig", "SystemConfig",
-    "BacktestConfig", "FactorModelConfig", "LightGBMParams", "MLConfig",
-    "MomentumConfig", "StatArbConfig", "StrategyConfig", "MeanReversionConfig",
+    "BacktestConfig",
     # logger
     "TradeLogger", "get_trade_logger",
     "EVENT_SIGNAL", "EVENT_ORDER", "EVENT_FILL",

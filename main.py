@@ -21,7 +21,6 @@ import asyncio
 import logging
 import signal
 import sys
-import time
 from datetime import date, datetime
 from datetime import time as dt_time
 from pathlib import Path
@@ -108,7 +107,7 @@ def _now_et():
     return datetime.now(ZoneInfo("America/New_York"))
 
 
-def _wait_until(target_time: dt_time) -> None:
+async def _wait_until(target_time: dt_time) -> None:
     """Sleep until target_time ET (today). Returns immediately if past."""
     now = _now_et()
     target = now.replace(
@@ -117,7 +116,7 @@ def _wait_until(target_time: dt_time) -> None:
     delta = (target - now).total_seconds()
     if delta > 0:
         logger.info(f"Waiting {delta / 60:.1f} minutes until {target_time}...")
-        time.sleep(delta)
+        await asyncio.sleep(delta)
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +149,7 @@ def _create_broker_components(cfg, enable_trading: bool = False):
     from broker.portfolio_manager import PortfolioManager
     from broker.equity_trader import EquityTrader
     from broker.option_trader import OptionTrader
-    from broker.risk_monitor import RiskMonitor
+    from broker.risk_monitor import RiskMonitor, RiskConfig as RiskMonitorConfig
 
     ibkr_config = IBKRConfig(
         host=cfg.broker.host,
@@ -166,7 +165,14 @@ def _create_broker_components(cfg, enable_trading: bool = False):
     portfolio_mgr = PortfolioManager(client)
     equity_trader = EquityTrader(client, enabled=enable_trading)
     option_trader = OptionTrader(client, data_feed=data_feed, enabled=enable_trading)
-    risk_monitor = RiskMonitor(client, portfolio_mgr)
+    # Wire risk thresholds from YAML config (fraction → whole-number pct)
+    risk_monitor_cfg = RiskMonitorConfig(
+        max_daily_loss_pct=cfg.risk.daily_loss_flatten_pct * 100,   # 0.05 → 5.0
+        reduce_exposure_pct=cfg.risk.daily_loss_reduce_pct * 100,   # 0.03 → 3.0
+        max_drawdown_pct=cfg.risk.max_drawdown_halt_pct * 100,      # 0.15 → 15.0
+        max_position_pct=cfg.risk.max_position_pct * 100,           # 0.05 → 5.0
+    )
+    risk_monitor = RiskMonitor(client, portfolio_mgr, config=risk_monitor_cfg)
     risk_monitor.register_traders(
         equity_trader=equity_trader,
         option_trader=option_trader,
@@ -296,6 +302,12 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     option_trader = broker["option_trader"]
     risk_monitor = broker["risk_monitor"]
 
+    # Initialize peak NAV from cache to prevent cold-start drawdown bypass (M-4)
+    if portfolio_mgr and nav_cache:
+        cached_peak = nav_cache.load_peak_nav(fallback=cached_nav)
+        if cached_peak > 0:
+            portfolio_mgr.initialize_peak_nav(cached_peak)
+
     # --- Initialize TDA ---
     tda_extractor = None
     tda_strategy = None
@@ -390,7 +402,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
             for _ in range(60):
                 if _shutdown:
                     break
-                time.sleep(1)
+                await asyncio.sleep(1)
             continue
 
         today = date.today()
@@ -407,11 +419,11 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
             kill_switch.check_cooldown_expired()
         if not kill_switch.is_trading_allowed():
             logger.warning(f"Trading halted: {kill_switch.block_reason}")
-            time.sleep(60)
+            await asyncio.sleep(60)
             continue
 
         # Wait for signal time
-        _wait_until(signal_time)
+        await _wait_until(signal_time)
         if _shutdown:
             break
 
@@ -449,7 +461,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
 
             if not market_data:
                 logger.warning("No market data available — skipping signal cycle")
-                time.sleep(60)
+                await asyncio.sleep(60)
                 continue
 
             # Build price/volume DataFrames from fetched data
@@ -466,7 +478,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
 
             if not closes:
                 logger.warning("No valid close prices — skipping signal cycle")
-                time.sleep(60)
+                await asyncio.sleep(60)
                 continue
 
             price_df = pd.DataFrame(closes)
@@ -583,7 +595,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                     nav = fetched_nav
                                     if nav_cache:
                                         try:
-                                            nav_cache.save(nav)
+                                            nav_cache.save(nav, peak_nav=portfolio_mgr.peak_nav if portfolio_mgr else nav)
                                         except Exception:
                                             pass
                                 else:
@@ -651,9 +663,38 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
             # -------------------------------------------------------
             # 5. Execute trades
             # -------------------------------------------------------
+            # Build PortfolioState for KillSwitch pre-order checks (M-2)
+            _portfolio_state = None
+            if kill_switch and sized_signals:
+                try:
+                    from core.risk_manager import PortfolioState
+                    _ks_equity = nav
+                    _ks_pnl = 0.0
+                    if portfolio_mgr and ib_connected:
+                        try:
+                            _ks_pnl = await portfolio_mgr.get_daily_pnl()
+                        except Exception:
+                            pass
+                    _portfolio_state = PortfolioState(
+                        equity=_ks_equity,
+                        peak_equity=portfolio_mgr.peak_nav if portfolio_mgr else _ks_equity,
+                        today_pnl=_ks_pnl,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to build PortfolioState for kill switch: %s", e)
+
             if sized_signals and not dry_run:
                 for ps in sized_signals:
                     try:
+                        # Pre-order kill switch check (M-2)
+                        if kill_switch and _portfolio_state:
+                            if not kill_switch.pre_order_check(_portfolio_state):
+                                logger.warning(
+                                    "Kill switch blocked order for %s: %s",
+                                    ps.ticker, kill_switch.block_reason,
+                                )
+                                continue
+
                         if equities_enabled and equity_trader:
                             # IBKR TWS API does NOT support fractional shares
                             last_price = price_df[ps.ticker].iloc[-1] if ps.ticker in price_df.columns else None
@@ -725,6 +766,10 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                         )
                                     except Exception as e:
                                         logger.warning("Trade journal record failed (non-fatal): %s", e)
+
+                                # Notify kill switch of the fill (M-2)
+                                if kill_switch:
+                                    kill_switch.on_fill(0.0)  # PnL unknown for new entries
                     except Exception as e:
                         logger.error(f"Trade execution failed for {ps.ticker}: {e}")
             elif dry_run:
@@ -771,7 +816,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                     intraday_nav = await portfolio_mgr.get_nav()
                     if nav_cache and intraday_nav and intraday_nav > 0:
                         try:
-                            nav_cache.save(intraday_nav)
+                            nav_cache.save(intraday_nav, peak_nav=portfolio_mgr.peak_nav)
                         except Exception:
                             pass
 
@@ -852,7 +897,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                 for _ in range(int(sleep_secs)):
                     if _shutdown:
                         break
-                    time.sleep(1)
+                    await asyncio.sleep(1)
 
         if _shutdown:
             break
@@ -873,7 +918,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                 # Cache EOD NAV
                 if nav_cache and nav and nav > 0:
                     try:
-                        nav_cache.save(nav)
+                        nav_cache.save(nav, peak_nav=portfolio_mgr.peak_nav if portfolio_mgr else nav)
                     except Exception as e:
                         logger.warning("EOD NAV cache save failed (non-fatal): %s", e)
 
@@ -935,7 +980,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
         # Sleep until next day
         logger.info("Trading day complete. Sleeping until next market open.")
         while not _shutdown and market_cal.is_market_open():
-            time.sleep(30)
+            await asyncio.sleep(30)
 
     # Graceful shutdown
     logger.info("Shutting down ATNN v2...")

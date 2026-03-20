@@ -26,6 +26,9 @@ exchange-calendars>=4.2
 statsmodels>=0.14
 hmmlearn>=0.3
 
+# Data caching
+pyarrow>=14.0
+
 # Infrastructure
 pyyaml>=6.0
 python-dotenv>=1.0

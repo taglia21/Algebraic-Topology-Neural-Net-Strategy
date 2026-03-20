@@ -180,6 +180,12 @@ class EquityTrader:
 
     async def flatten_all(self) -> list[OrderResult]:
         """Close all equity positions with market orders."""
+        if not self._enabled:
+            logger.critical(
+                "flatten_all() called but trader is DISABLED — orders will be simulated! "
+                "Temporarily re-enabling for emergency flatten."
+            )
+            self._enabled = True  # Re-enable for flatten only
         positions = await self._client.get_positions()
         results = []
         for pos in positions:

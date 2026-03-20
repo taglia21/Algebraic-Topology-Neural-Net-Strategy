@@ -31,7 +31,7 @@ class NAVCache:
         except Exception as e:
             logger.warning("Failed to cache NAV: %s", e)
 
-    def load(self, fallback: float = 444.0) -> float:
+    def load(self, fallback: float = 6043.0) -> float:
         """Load last known NAV from disk, or return fallback."""
         try:
             if self._path.exists():

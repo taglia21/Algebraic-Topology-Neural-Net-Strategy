@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     environment:
       - IBKR_HOST=ib-gateway
-      - IBKR_PORT=4002
+      - IBKR_PORT=4003
       - IBKR_ACCOUNT=U22452226
       - SYSTEM_MODE=live
     volumes:
@@ -35,7 +35,7 @@ services:
       - TWS_ACCEPT_INCOMING=accept
       - READ_ONLY_API=no
     ports:
-      - "4002:4002"
+      - "4001:4001"
     logging:
       driver: "json-file"
       options:

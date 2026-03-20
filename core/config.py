@@ -182,7 +182,7 @@ class EquitiesCfg:
 
 @dataclass
 class BacktestCfg:
-    initial_capital: float = 444.0
+    initial_capital: float = 6043.0
     train_window: int = 756
     test_window: int = 21
     purge_gap: int = 5

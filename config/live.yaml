@@ -6,8 +6,8 @@ system:
   name: "ATNN-v2"
   mode: "live"
   log_level: "INFO"
-  data_dir: "/opt/atnn/data"
-  model_dir: "/opt/atnn/models"
+  data_dir: "/app/data"
+  model_dir: "/app/models"
 
 broker:
   host: "127.0.0.1"
@@ -75,13 +75,13 @@ risk:
   daily_loss_reduce_pct: 0.03
   daily_loss_flatten_pct: 0.05
   max_drawdown_halt_pct: 0.15
-  max_equity_position: 1000.0
+  max_equity_position: 1200.0
   small_account:
     enabled: true
-    max_risk_per_trade: 500     # Allow up to $500 per trade
+    max_risk_per_trade: 400     # Max $400 risk per trade (~7% of $6K)
     max_concurrent_positions: 5
     max_option_premium: 200
-    max_equity_position: 1000   # Allow up to $1000 per equity position
+    max_equity_position: 1000   # Max $1000 per equity position (~16% of $6K)
 
 options:
   enabled: false          # DORMANT — do NOT enable until authorized
@@ -91,7 +91,7 @@ equities:
   fractional_shares: false  # IBKR TWS API does NOT support fractional shares
 
 backtest:
-  initial_capital: 5444.0
+  initial_capital: 6043.0
   train_window: 756
   test_window: 21
   purge_gap: 5

@@ -256,6 +256,14 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning("DailyReporter init failed (non-fatal): %s", e)
 
+    discord_notifier = None
+    try:
+        from core.discord_notifier import DiscordNotifier
+        discord_notifier = DiscordNotifier()
+        logger.info("DiscordNotifier initialized")
+    except Exception as e:
+        logger.warning("DiscordNotifier init failed (non-fatal): %s", e)
+
     # Graceful shutdown
     _shutdown = False
 
@@ -337,18 +345,37 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
         nn_strategy = NNDirectionalStrategy()
         model_cls = AttentionLSTMPredictor if cfg.nn.model_type == "attention_lstm" else LSTMPredictor
 
-        # Look for latest saved model
+        # Look for latest saved model — prefer best_model.pt, else latest fold
+        best_model = model_dir / "best_model.pt"
         model_files = sorted(model_dir.glob("*.pt")) + sorted(model_dir.glob("*.pth"))
-        if model_files:
+        model_to_load = best_model if best_model.exists() else (model_files[-1] if model_files else None)
+
+        if model_to_load:
+            # Read input_size from model metadata or infer from checkpoint
+            meta_path = model_dir / "model_meta.json"
+            nn_input_size = 28  # default: 28 features (price + volume + technical + TDA)
+            if meta_path.exists():
+                import json
+                with open(meta_path) as _mf:
+                    _meta = json.load(_mf)
+                nn_input_size = _meta.get("input_size", nn_input_size)
+                logger.info(f"Model metadata: input_size={nn_input_size}")
+            else:
+                # Infer from checkpoint weights
+                _ckpt = torch.load(model_to_load, map_location="cpu", weights_only=True)
+                if "bn.weight" in _ckpt:
+                    nn_input_size = _ckpt["bn.weight"].shape[0]
+                    logger.info(f"Inferred input_size={nn_input_size} from checkpoint")
+
             nn_model = model_cls(
-                input_size=10,  # will be overridden by checkpoint
+                input_size=nn_input_size,
                 hidden_size=cfg.nn.hidden_size,
                 num_layers=cfg.nn.num_layers,
                 dropout=cfg.nn.dropout,
             )
-            nn_model.load_state_dict(torch.load(model_files[-1], map_location="cpu", weights_only=True))
+            nn_model.load_state_dict(torch.load(model_to_load, map_location="cpu", weights_only=True))
             nn_model.eval()
-            logger.info(f"Loaded NN model from {model_files[-1]}")
+            logger.info(f"Loaded NN model from {model_to_load}")
         else:
             logger.info("No trained NN model found; signals will be TDA-only")
     except Exception as e:
@@ -388,6 +415,13 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     print(f"  IBKR: {'Connected' if ib_connected else 'Not connected'}")
     print(f"  Signal time: {cfg.schedule.signal_time} ET")
     print(f"{'=' * 60}\n")
+
+    if discord_notifier:
+        discord_notifier.send_alert(
+            "Bot Started",
+            f"ATNN v2 {mode_str} mode\n17 symbols, IBKR {'Connected' if ib_connected else 'Not connected'}",
+            color=0x00FF00,
+        )
 
     _last_trading_date = None
     _days_since_retrain = 0
@@ -770,6 +804,10 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 # Notify kill switch of the fill (M-2)
                                 if kill_switch:
                                     kill_switch.on_fill(0.0)  # PnL unknown for new entries
+
+                                # Discord trade alert
+                                if discord_notifier:
+                                    discord_notifier.send_trade_alert(ps.ticker, ps.direction, qty, last_price)
                     except Exception as e:
                         logger.error(f"Trade execution failed for {ps.ticker}: {e}")
             elif dry_run:
@@ -786,9 +824,10 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                 try:
                     risk_result = await risk_monitor.check_risk()
                     logger.info(f"Risk check: {risk_result}")
-                    if hasattr(risk_result, "should_flatten") and risk_result.should_flatten:
-                        logger.warning("Risk monitor triggered flatten!")
-                        await risk_monitor.trigger_kill_switch("Risk limit breach")
+                    if risk_result.action_taken == "KILL_SWITCH":
+                        logger.warning("Risk monitor kill switch was triggered during check_risk()")
+                        if discord_notifier:
+                            discord_notifier.send_kill_switch_alert(f"Risk monitor: {risk_result.action_taken}")
                 except Exception as e:
                     logger.warning(f"Risk monitor failed: {e}")
 
@@ -883,8 +922,16 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                             daily_pnl_check = await portfolio_mgr.get_daily_pnl()
                             pnl_pct = daily_pnl_check / intraday_nav * 100 if intraday_nav > 0 else 0.0
                             if pnl_pct <= -cfg.risk.daily_loss_flatten_pct * 100:
-                                logger.warning("INTRADAY KILL SWITCH: Daily loss %.1f%%. Flattening.", pnl_pct)
+                                logger.critical("INTRADAY KILL SWITCH: Daily loss %.1f%%. Flattening + disabling.", pnl_pct)
                                 await equity_trader.flatten_all()
+                                equity_trader.disable()
+                                if option_trader:
+                                    option_trader.disable()
+                                if kill_switch:
+                                    kill_switch.engage(f"Intraday daily loss {pnl_pct:.1f}%")
+                                if discord_notifier:
+                                    discord_notifier.send_kill_switch_alert(f"Intraday daily loss {pnl_pct:.1f}%")
+                                break  # Exit intraday loop
                         except Exception as e:
                             logger.warning("Intraday kill switch check failed: %s", e)
 
@@ -947,6 +994,12 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                             signals_actionable=len(actionable) if not actionable.empty else 0,
                         )
                         reporter.log_report(report)
+                        # Send daily report to Discord
+                        if discord_notifier:
+                            try:
+                                discord_notifier.send_daily_report(report)
+                            except Exception as disc_e:
+                                logger.warning("Discord daily report failed (non-fatal): %s", disc_e)
                     except Exception as e:
                         logger.warning("Daily report generation failed (non-fatal): %s", e)
             else:
@@ -963,8 +1016,11 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
             # if rolling_accuracy < _min_accuracy_threshold: needs_retrain = True
 
             if needs_retrain and market_data:
-                logger.info("=== Triggering periodic NN retrain ===")
-                _run_retrain_inline(cfg, price_df, volume_df, tda_features)
+                logger.info("=== Triggering periodic NN retrain (in thread pool) ===")
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None, _run_retrain_inline, cfg, price_df, volume_df, tda_features
+                )
                 _days_since_retrain = 0
                 # Reload model
                 new_files = sorted(model_dir.glob("*.pt")) + sorted(model_dir.glob("*.pth"))

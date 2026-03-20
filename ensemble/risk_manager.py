@@ -233,8 +233,9 @@ class EnsembleRiskManager:
         # Dollar value
         position_value = portfolio_value * position_pct / 100.0
 
-        # Small account constraints ($5,444)
-        if portfolio_value < 2000:
+        # Small account constraints — always apply dollar caps
+        # These caps protect against oversized positions regardless of account size
+        if portfolio_value < 10000:
             if position_value > self.max_equity_position:
                 position_value = self.max_equity_position
                 position_pct = (position_value / portfolio_value) * 100 if portfolio_value > 0 else 0.0

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import signal
 import sys
@@ -96,6 +97,70 @@ def _parse_time(t: str) -> dt_time:
     """Parse 'HH:MM' to a time object."""
     h, m = t.split(":")
     return dt_time(int(h), int(m))
+
+
+# ---------------------------------------------------------------------------
+# PDT (Pattern Day Trade) tracker — prevents >3 day trades in 5 rolling days
+# A "day trade" = opening AND closing the same security in the same day.
+# ---------------------------------------------------------------------------
+
+class _PDTTracker:
+    """Persistent PDT tracker using a JSON file."""
+
+    PDT_LIMIT = 3  # max day trades per rolling 5 business days
+    WINDOW_DAYS = 5
+
+    def __init__(self, data_dir: str = "/app/data"):
+        self._path = Path(data_dir) / "pdt_trades.json"
+        self._trades: list = []  # list of {"date": "YYYY-MM-DD", "ticker": str}
+        self._load()
+
+    def _load(self):
+        if self._path.exists():
+            try:
+                self._trades = json.loads(self._path.read_text())
+            except Exception:
+                self._trades = []
+
+    def _save(self):
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(self._trades, indent=2))
+
+    def _prune(self):
+        """Remove entries older than 5 business days."""
+        cutoff = date.today()
+        bdays = 0
+        while bdays < self.WINDOW_DAYS:
+            from datetime import timedelta as _td
+            cutoff = cutoff - _td(days=1)
+            if cutoff.weekday() < 5:  # Mon-Fri
+                bdays += 1
+        cutoff_str = cutoff.isoformat()
+        self._trades = [t for t in self._trades if t["date"] >= cutoff_str]
+
+    def count_recent(self) -> int:
+        """Day trades in the rolling 5-business-day window."""
+        self._prune()
+        return len(self._trades)
+
+    def can_day_trade(self) -> bool:
+        return self.count_recent() < self.PDT_LIMIT
+
+    def record_day_trade(self, ticker: str):
+        """Record a day trade (call when a same-day open+close occurs)."""
+        self._trades.append({"date": date.today().isoformat(), "ticker": ticker})
+        self._save()
+        remaining = self.PDT_LIMIT - self.count_recent()
+        logger.info(f"PDT: recorded day trade for {ticker}. {remaining} day trades remaining in window.")
+
+    def record_new_entry(self, ticker: str):
+        """Record a new position entry (potential day trade if closed today).
+        We conservatively count EVERY new entry as a potential day trade
+        since bracket orders may fill same-day."""
+        self._trades.append({"date": date.today().isoformat(), "ticker": ticker})
+        self._save()
+        remaining = self.PDT_LIMIT - self.count_recent()
+        logger.info(f"PDT: new entry {ticker}. {remaining} day trades remaining in window.")
 
 
 def _now_et():
@@ -393,6 +458,11 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     equities_enabled = cfg.equities.enabled and not dry_run
     shorting_enabled = getattr(cfg.equities, 'allow_shorting', False)
 
+    # PDT tracker (prevents >3 day trades per 5 rolling business days on margin accounts <$25K)
+    pdt_tracker = _PDTTracker(data_dir=cfg.system.data_dir)
+    pdt_remaining = pdt_tracker.PDT_LIMIT - pdt_tracker.count_recent()
+    logger.info(f"PDT tracker: {pdt_remaining} day trades remaining in 5-day window")
+
     mode_str = "DRY-RUN" if dry_run else ("LIVE" if cfg.system.mode == "live" else "PAPER")
     print(f"\n{'=' * 60}")
     print(f"  ATNN v2 — {mode_str} MODE (CONTINUOUS)")
@@ -404,6 +474,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     print(f"  Shorting: {'ENABLED (margin)' if shorting_enabled else 'DISABLED (cash account)'}")
     print(f"  IBKR: {'Connected' if ib_connected else 'Not connected'}")
     print(f"  Brackets: ATR-based dynamic")
+    print(f"  PDT remaining: {pdt_tracker.PDT_LIMIT - pdt_tracker.count_recent()}/{pdt_tracker.PDT_LIMIT} day trades")
     print(f"{'=' * 60}\n")
 
     _last_trading_date = None
@@ -815,6 +886,14 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                     logger.info(f"Skipping {ps.ticker} SHORT: shorting disabled (cash account)")
                                     continue
 
+                                # PDT gate: prevent violations on margin accounts <$25K
+                                if not pdt_tracker.can_day_trade():
+                                    logger.warning(
+                                        f"PDT LIMIT: skipping {ps.ticker} — {pdt_tracker.count_recent()}/{pdt_tracker.PDT_LIMIT} "
+                                        f"day trades used in rolling 5-day window"
+                                    )
+                                    continue
+
                                 action = "BUY" if ps.direction == "LONG" else "SELL"
 
                                 # --- ATR-BASED DYNAMIC BRACKETS ---
@@ -838,6 +917,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                         )
                                         _held_tickers.add(ps.ticker)
                                         _daily_trades_executed += 1
+                                        pdt_tracker.record_new_entry(ps.ticker)
                                         logger.info(
                                             "BRACKET %s %d %s entry~$%.2f TP=$%.2f (%.1f%%) SL=$%.2f (%.1f%%) ATR=$%.2f [%s]",
                                             action, qty, ps.ticker, last_price,
@@ -852,6 +932,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                         )
                                         _held_tickers.add(ps.ticker)
                                         _daily_trades_executed += 1
+                                        pdt_tracker.record_new_entry(ps.ticker)
                                         logger.info(f"MKT Order: {action} {qty} {ps.ticker} @ ~${last_price:.2f} → {order_result}")
 
                                 elif action == "SELL" and shorting_enabled:
@@ -875,6 +956,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                         )
                                         _held_tickers.add(ps.ticker)
                                         _daily_trades_executed += 1
+                                        pdt_tracker.record_new_entry(ps.ticker)
                                         logger.info(
                                             "SHORT BRACKET %d %s entry~$%.2f TP=$%.2f SL=$%.2f [%s]",
                                             qty, ps.ticker, last_price,

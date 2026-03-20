@@ -107,4 +107,4 @@ schedule:
   timezone: "America/New_York"
   signal_time: "09:45"        # First cycle starts 15 min after open
   reconciliation_time: "15:45"
-  cycle_interval_minutes: 15   # Rolling signal cycle every 15 min
+  cycle_interval_minutes: 2    # Near-continuous scanning (~2 min between cycles)

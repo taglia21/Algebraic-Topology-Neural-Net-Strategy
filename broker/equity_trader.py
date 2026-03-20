@@ -135,21 +135,41 @@ class EquityTrader:
                             quantity, "STP", stop_price=stop_loss, status="SIMULATED", timestamp=ts, simulated=True),
             ]
 
-        bracket = BracketOrder(action, quantity, limit_price, take_profit, stop_loss)
-        results = []
-        for order in bracket:
-            trade = self.ib.placeOrder(contract, order)
-            results.append(OrderResult(
-                order_id=trade.order.orderId,
-                symbol=symbol,
-                action=order.action,
-                quantity=quantity,
-                order_type=order.orderType,
-                limit_price=getattr(order, "lmtPrice", None),
-                stop_price=getattr(order, "auxPrice", None),
-                status="SUBMITTED",
-                timestamp=datetime.now().isoformat(),
-            ))
+        # Build bracket manually: parent LMT + take-profit LMT + stop-loss STP
+        # BracketOrder() in ib_async is a NamedTuple(parent, takeProfit, stopLoss)
+        # that expects pre-built Order objects, not raw parameters.
+        parent = LimitOrder(action, quantity, limit_price)
+        parent.transmit = False  # hold until children are placed
+
+        exit_action = "SELL" if action == "BUY" else "BUY"
+        tp_order = LimitOrder(exit_action, quantity, take_profit)
+        tp_order.parentId = 0  # will be set after parent is placed
+        tp_order.transmit = False
+
+        sl_order = StopOrder(exit_action, quantity, stop_loss)
+        sl_order.parentId = 0
+        sl_order.transmit = True  # last child transmits the whole group
+
+        # Place parent first to get its orderId
+        parent_trade = self.ib.placeOrder(contract, parent)
+        parent_id = parent_trade.order.orderId
+
+        # Link children to parent
+        tp_order.parentId = parent_id
+        sl_order.parentId = parent_id
+
+        tp_trade = self.ib.placeOrder(contract, tp_order)
+        sl_trade = self.ib.placeOrder(contract, sl_order)
+
+        ts = datetime.now().isoformat()
+        results = [
+            OrderResult(parent_id, symbol, action, quantity, "LMT",
+                        limit_price=limit_price, status="SUBMITTED", timestamp=ts),
+            OrderResult(tp_trade.order.orderId, symbol, exit_action, quantity, "LMT",
+                        limit_price=take_profit, status="SUBMITTED", timestamp=ts),
+            OrderResult(sl_trade.order.orderId, symbol, exit_action, quantity, "STP",
+                        stop_price=stop_loss, status="SUBMITTED", timestamp=ts),
+        ]
         return results
 
     # --- Order Management ---

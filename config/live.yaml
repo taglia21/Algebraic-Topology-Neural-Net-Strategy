@@ -61,7 +61,7 @@ nn:
 ensemble:
   default_tda_weight: 0.5
   default_nn_weight: 0.5
-  min_signal_strength: 0.3
+  min_signal_strength: 0.15    # Lowered from 0.3 — let more signals through, brackets manage risk
   agreement_bonus: 0.2
   disagreement_penalty: 0.3
 
@@ -69,7 +69,7 @@ risk:
   max_position_pct: 0.15        # 15% of NAV per position
   max_sector_pct: 0.50          # 50% sector cap
   max_long_exposure: 1.0
-  max_short_exposure: 0.0       # No shorting on cash account
+  max_short_exposure: 0.30      # Allow up to 30% short exposure (requires margin account)
   max_gross_exposure: 1.0       # Max 100% invested (no leverage)
   kelly_fraction: 0.5
   daily_loss_reduce_pct: 0.03
@@ -89,6 +89,7 @@ options:
 equities:
   enabled: true           # LIVE — authorized by board
   fractional_shares: false  # IBKR TWS API does NOT support fractional shares
+  allow_shorting: false     # Set to true AFTER upgrading IBKR to margin account
 
 backtest:
   initial_capital: 6043.0
@@ -104,5 +105,6 @@ schedule:
   market_open: "09:30"
   market_close: "16:00"
   timezone: "America/New_York"
-  signal_time: "09:45"
+  signal_time: "09:45"        # First cycle starts 15 min after open
   reconciliation_time: "15:45"
+  cycle_interval_minutes: 15   # Rolling signal cycle every 15 min

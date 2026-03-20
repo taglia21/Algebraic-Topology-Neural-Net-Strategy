@@ -89,7 +89,7 @@ options:
 equities:
   enabled: true           # LIVE — authorized by board
   fractional_shares: false  # IBKR TWS API does NOT support fractional shares
-  allow_shorting: false     # Set to true AFTER upgrading IBKR to margin account
+  allow_shorting: true      # Margin account confirmed — short selling enabled
 
 backtest:
   initial_capital: 6043.0

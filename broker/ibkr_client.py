@@ -134,25 +134,31 @@ class IBKRClient:
                 cb()
             except Exception:
                 pass
+        # Guard against re-entrant disconnect (N-02 fix)
+        if getattr(self, '_reconnecting', False):
+            logger.warning("Auto-reconnect already in progress, skipping duplicate")
+            return
         # Schedule async reconnect (fire-and-forget from sync callback)
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._auto_reconnect())
-            else:
-                logger.error("Event loop not running, cannot auto-reconnect")
+            loop = asyncio.get_running_loop()  # N-01 fix: use get_running_loop()
+            loop.create_task(self._auto_reconnect())
+        except RuntimeError:
+            logger.error("No running event loop, cannot auto-reconnect")
         except Exception as e:
             logger.error(f"Auto-reconnect scheduling failed: {e}")
 
     async def _auto_reconnect(self) -> None:
         """Auto-reconnect with exponential backoff after unexpected disconnect."""
-        logger.info("Auto-reconnect: waiting 5s before first attempt...")
-        await asyncio.sleep(5)
+        self._reconnecting = True  # N-02 re-entrancy guard
         try:
+            logger.info("Auto-reconnect: waiting 5s before first attempt...")
+            await asyncio.sleep(5)
             await self.reconnect()
             logger.info("Auto-reconnect successful")
         except ConnectionError:
             logger.critical("Auto-reconnect FAILED after all attempts — bot needs manual restart")
+        finally:
+            self._reconnecting = False
 
     # --- Properties ---
 

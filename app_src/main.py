@@ -325,7 +325,8 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     _shutdown_event = asyncio.Event()
 
     def _handle_signal(signum, frame):
-        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        # NOTE: No logger call here — logger.info() can deadlock if signal
+        # arrives while the logging lock is held (C-06 audit fix)
         _shutdown_event.set()
 
     signal.signal(signal.SIGINT, _handle_signal)
@@ -1143,14 +1144,12 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                             bracket.atr_value, current_regime,
                                         )
                                     except Exception as bracket_err:
-                                        logger.warning("Bracket order failed (%s), falling back to market order", bracket_err)
-                                        order_result = await equity_trader.place_market_order(
-                                            symbol=ps.ticker, quantity=qty, action=action,
+                                        # C-02 fix: Do NOT fall back to naked market order.
+                                        # A position without stop-loss is unacceptable.
+                                        logger.warning(
+                                            "Bracket order FAILED for %s (%s) — SKIPPING trade (no naked positions)",
+                                            ps.ticker, bracket_err,
                                         )
-                                        _held_tickers.add(ps.ticker)
-                                        _daily_trades_executed += 1
-                                        pdt_tracker.record_new_entry(ps.ticker)
-                                        logger.info(f"MKT Order: {action} {qty} {ps.ticker} @ ~${last_price:.2f} → {order_result}")
 
                                 elif action == "SELL" and shorting_enabled:
                                     # SHORT entry with inverted brackets
@@ -1197,7 +1196,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                         logger.warning("Trade journal record failed (non-fatal): %s", e)
 
                                 if kill_switch:
-                                    kill_switch.on_fill(0.0)
+                                    kill_switch.on_fill(0.0)  # TODO: pass actual fill P&L
 
                     except Exception as e:
                         logger.error(f"Trade execution failed for {ps.ticker}: {e}")
@@ -1223,10 +1222,10 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
 
                         change_pct = (current_price - avg_cost) / avg_cost
 
-                        # Emergency stop: -5% from entry (backup to bracket SL)
+                        # === EMERGENCY STOP: LONG positions down -5% ===
                         if change_pct <= -0.05 and pos_qty > 0:
                             logger.warning(
-                                "EMERGENCY STOP: %s down %.1f%% ($%.2f → $%.2f). Selling.",
+                                "EMERGENCY STOP LONG: %s down %.1f%% ($%.2f → $%.2f). Selling.",
                                 symbol, change_pct * 100, avg_cost, current_price,
                             )
                             try:
@@ -1243,11 +1242,31 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                             except Exception as e:
                                 logger.error("Emergency sell failed for %s: %s", symbol, e)
 
-                        # Partial profit: +4% from entry, sell half
+                        # === EMERGENCY STOP: SHORT positions up +5% (C-11 fix) ===
+                        elif change_pct >= 0.05 and pos_qty < 0:
+                            logger.warning(
+                                "EMERGENCY STOP SHORT: %s up %.1f%% against us ($%.2f → $%.2f). Covering.",
+                                symbol, change_pct * 100, avg_cost, current_price,
+                            )
+                            try:
+                                result = await equity_trader.place_market_order(
+                                    symbol=symbol, quantity=abs(pos_qty), action="BUY",
+                                )
+                                _held_tickers.discard(symbol)
+                                if trade_journal:
+                                    trade_journal.record_trade(
+                                        ticker=symbol, action="BUY", quantity=abs(pos_qty),
+                                        price=current_price, fill_price=current_price,
+                                        strategy_source="EMERGENCY_STOP_SHORT", regime=current_regime,
+                                    )
+                            except Exception as e:
+                                logger.error("Emergency short cover failed for %s: %s", symbol, e)
+
+                        # === PARTIAL PROFIT: LONG positions up +4% ===
                         elif change_pct >= 0.04 and pos_qty > 1:
                             sell_qty = max(1, int(pos_qty / 2))
                             logger.info(
-                                "PARTIAL PROFIT: %s up %.1f%%. Selling %d of %d shares.",
+                                "PARTIAL PROFIT LONG: %s up %.1f%%. Selling %d of %d shares.",
                                 symbol, change_pct * 100, sell_qty, int(pos_qty),
                             )
                             try:
@@ -1262,6 +1281,26 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                     )
                             except Exception as e:
                                 logger.error("Partial profit sell failed for %s: %s", symbol, e)
+
+                        # === PARTIAL PROFIT: SHORT positions down -4% (cover half) ===
+                        elif change_pct <= -0.04 and pos_qty < -1:
+                            cover_qty = max(1, int(abs(pos_qty) / 2))
+                            logger.info(
+                                "PARTIAL PROFIT SHORT: %s down %.1f%% in our favor. Covering %d of %d shares.",
+                                symbol, change_pct * 100, cover_qty, int(abs(pos_qty)),
+                            )
+                            try:
+                                result = await equity_trader.place_market_order(
+                                    symbol=symbol, quantity=cover_qty, action="BUY",
+                                )
+                                if trade_journal:
+                                    trade_journal.record_trade(
+                                        ticker=symbol, action="BUY", quantity=cover_qty,
+                                        price=current_price, fill_price=current_price,
+                                        strategy_source="PARTIAL_PROFIT_SHORT", regime=current_regime,
+                                    )
+                            except Exception as e:
+                                logger.error("Partial profit short cover failed for %s: %s", symbol, e)
 
                     # NAV cache update
                     intraday_nav = await portfolio_mgr.get_nav()

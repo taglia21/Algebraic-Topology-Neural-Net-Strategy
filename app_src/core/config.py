@@ -179,6 +179,7 @@ class EquitiesCfg:
     enabled: bool = False
     fractional_shares: bool = False
     allow_shorting: bool = False    # Set to true after upgrading to IBKR margin account
+    account_type: str = "cash"      # "cash" = no PDT; "margin" = PDT applies if <$25K
 
 
 @dataclass

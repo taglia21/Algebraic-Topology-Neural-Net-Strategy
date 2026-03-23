@@ -154,13 +154,18 @@ class _PDTTracker:
         logger.info(f"PDT: recorded day trade for {ticker}. {remaining} day trades remaining in window.")
 
     def record_new_entry(self, ticker: str):
-        """Record a new position entry (potential day trade if closed today).
-        We conservatively count EVERY new entry as a potential day trade
-        since bracket orders may fill same-day."""
-        self._trades.append({"date": date.today().isoformat(), "ticker": ticker})
+        """Record a new position entry.
+
+        With wider swing-trade brackets (2-8% TP/SL), most positions will NOT
+        close same-day, so entries alone don't burn PDT slots. We track entries
+        but only count them toward PDT if they're closed the same day.
+
+        For safety: still count as potential PDT since we can't predict fills.
+        """
+        self._trades.append({"date": date.today().isoformat(), "ticker": ticker, "type": "entry"})
         self._save()
         remaining = self.PDT_LIMIT - self.count_recent()
-        logger.info(f"PDT: new entry {ticker}. {remaining} day trades remaining in window.")
+        logger.info(f"PDT: new entry {ticker}. {remaining} potential day trades in window.")
 
 
 def _now_et():
@@ -512,10 +517,15 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     equities_enabled = cfg.equities.enabled and not dry_run
     shorting_enabled = getattr(cfg.equities, 'allow_shorting', False)
 
-    # PDT tracker (prevents >3 day trades per 5 rolling business days on margin accounts <$25K)
+    # PDT tracker — only active for margin accounts <$25K
+    _account_type = getattr(cfg.equities, 'account_type', 'margin')
+    _pdt_active = (_account_type == 'margin')  # Cash accounts have NO PDT restrictions
     pdt_tracker = _PDTTracker(data_dir=cfg.system.data_dir)
-    pdt_remaining = pdt_tracker.PDT_LIMIT - pdt_tracker.count_recent()
-    logger.info(f"PDT tracker: {pdt_remaining} day trades remaining in 5-day window")
+    if _pdt_active:
+        pdt_remaining = pdt_tracker.PDT_LIMIT - pdt_tracker.count_recent()
+        logger.info(f"PDT tracker: {pdt_remaining} day trades remaining (margin account)")
+    else:
+        logger.info("PDT tracker: DISABLED (cash account — unlimited day trades, T+1 settlement)")
 
     mode_str = "DRY-RUN" if dry_run else ("LIVE" if cfg.system.mode == "live" else "PAPER")
     print(f"\n{'=' * 60}")
@@ -528,7 +538,11 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     print(f"  Shorting: {'ENABLED (margin)' if shorting_enabled else 'DISABLED (cash account)'}")
     print(f"  IBKR: {'Connected' if ib_connected else 'Not connected'}")
     print(f"  Brackets: ATR-based dynamic")
-    print(f"  PDT remaining: {pdt_tracker.PDT_LIMIT - pdt_tracker.count_recent()}/{pdt_tracker.PDT_LIMIT} day trades")
+    if _pdt_active:
+        print(f"  PDT remaining: {pdt_tracker.PDT_LIMIT - pdt_tracker.count_recent()}/{pdt_tracker.PDT_LIMIT} day trades (margin)")
+    else:
+        print(f"  PDT: DISABLED (cash account — unlimited day trades)")
+    print(f"  Account type: {_account_type.upper()}")
     sleeves_status = []
     if momentum_strategy: sleeves_status.append("Momentum")
     if mean_rev_strategy: sleeves_status.append("MeanRev")
@@ -1069,6 +1083,14 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                     logger.warning("Failed to build PortfolioState: %s", e)
 
             if sized_signals and not dry_run:
+                # Smart signal ranking: sort by conviction (position_pct descending)
+                # so we spend limited trade slots on highest-conviction signals first
+                sized_signals.sort(key=lambda ps: getattr(ps, 'position_pct', 0), reverse=True)
+                logger.info(
+                    "Executing %d signals (ranked by conviction): %s",
+                    len(sized_signals),
+                    [(ps.ticker, ps.direction, f"${ps.position_value:.0f}") for ps in sized_signals[:5]],
+                )
                 for ps in sized_signals:
                     try:
                         # Kill switch pre-order check
@@ -1104,8 +1126,8 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                     logger.info(f"Skipping {ps.ticker} SHORT: shorting disabled (cash account)")
                                     continue
 
-                                # PDT gate: prevent violations on margin accounts <$25K
-                                if not pdt_tracker.can_day_trade():
+                                # PDT gate: only active for margin accounts <$25K
+                                if _pdt_active and not pdt_tracker.can_day_trade():
                                     logger.warning(
                                         f"PDT LIMIT: skipping {ps.ticker} — {pdt_tracker.count_recent()}/{pdt_tracker.PDT_LIMIT} "
                                         f"day trades used in rolling 5-day window"
@@ -1135,7 +1157,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                         )
                                         _held_tickers.add(ps.ticker)
                                         _daily_trades_executed += 1
-                                        pdt_tracker.record_new_entry(ps.ticker)
+                                        if _pdt_active: pdt_tracker.record_new_entry(ps.ticker)
                                         logger.info(
                                             "BRACKET %s %d %s entry~$%.2f TP=$%.2f (%.1f%%) SL=$%.2f (%.1f%%) ATR=$%.2f [%s]",
                                             action, qty, ps.ticker, last_price,
@@ -1172,7 +1194,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                         )
                                         _held_tickers.add(ps.ticker)
                                         _daily_trades_executed += 1
-                                        pdt_tracker.record_new_entry(ps.ticker)
+                                        if _pdt_active: pdt_tracker.record_new_entry(ps.ticker)
                                         logger.info(
                                             "SHORT BRACKET %d %s entry~$%.2f TP=$%.2f SL=$%.2f [%s]",
                                             qty, ps.ticker, last_price,
@@ -1223,7 +1245,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                         change_pct = (current_price - avg_cost) / avg_cost
 
                         # === EMERGENCY STOP: LONG positions down -5% ===
-                        if change_pct <= -0.05 and pos_qty > 0:
+                        if change_pct <= -0.08 and pos_qty > 0:
                             logger.warning(
                                 "EMERGENCY STOP LONG: %s down %.1f%% ($%.2f → $%.2f). Selling.",
                                 symbol, change_pct * 100, avg_cost, current_price,
@@ -1243,7 +1265,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 logger.error("Emergency sell failed for %s: %s", symbol, e)
 
                         # === EMERGENCY STOP: SHORT positions up +5% (C-11 fix) ===
-                        elif change_pct >= 0.05 and pos_qty < 0:
+                        elif change_pct >= 0.08 and pos_qty < 0:
                             logger.warning(
                                 "EMERGENCY STOP SHORT: %s up %.1f%% against us ($%.2f → $%.2f). Covering.",
                                 symbol, change_pct * 100, avg_cost, current_price,
@@ -1263,7 +1285,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 logger.error("Emergency short cover failed for %s: %s", symbol, e)
 
                         # === PARTIAL PROFIT: LONG positions up +4% ===
-                        elif change_pct >= 0.04 and pos_qty > 1:
+                        elif change_pct >= 0.06 and pos_qty > 1:
                             sell_qty = max(1, int(pos_qty / 2))
                             logger.info(
                                 "PARTIAL PROFIT LONG: %s up %.1f%%. Selling %d of %d shares.",
@@ -1283,7 +1305,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 logger.error("Partial profit sell failed for %s: %s", symbol, e)
 
                         # === PARTIAL PROFIT: SHORT positions down -4% (cover half) ===
-                        elif change_pct <= -0.04 and pos_qty < -1:
+                        elif change_pct <= -0.06 and pos_qty < -1:
                             cover_qty = max(1, int(abs(pos_qty) / 2))
                             logger.info(
                                 "PARTIAL PROFIT SHORT: %s down %.1f%% in our favor. Covering %d of %d shares.",

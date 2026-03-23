@@ -135,7 +135,13 @@ class EquityTrader:
                             quantity, "STP", stop_price=stop_loss, status="SIMULATED", timestamp=ts, simulated=True),
             ]
 
-        bracket = BracketOrder(action, quantity, limit_price, take_profit, stop_loss)
+        # Build 3 pre-built Order objects (ib_async BracketOrder is a NamedTuple)
+        reverse_action = "SELL" if action == "BUY" else "BUY"
+        parent = LimitOrder(action, quantity, limit_price, transmit=False)
+        tp_order = LimitOrder(reverse_action, quantity, take_profit, transmit=False)
+        sl_order = StopOrder(reverse_action, quantity, stop_loss)
+
+        bracket = BracketOrder(parent, tp_order, sl_order)
         results = []
         submitted_orders = []
         try:

@@ -78,10 +78,10 @@ risk:
   max_equity_position: 1200.0
   small_account:
     enabled: true
-    max_risk_per_trade: 400     # Max $400 risk per trade (~7% of $6K)
-    max_concurrent_positions: 5
+    max_risk_per_trade: 500     # Max $500 risk per trade (~8% of $6K)
+    max_concurrent_positions: 8  # Increased from 5 — more positions = more diversified alpha
     max_option_premium: 200
-    max_equity_position: 1000   # Max $1000 per equity position (~16% of $6K)
+    max_equity_position: 1200   # Max $1200 per equity position (~20% of $6K)
 
 options:
   enabled: false          # DORMANT — do NOT enable until authorized
@@ -90,6 +90,9 @@ equities:
   enabled: true           # LIVE — authorized by board
   fractional_shares: false  # IBKR TWS API does NOT support fractional shares
   allow_shorting: true      # Margin account confirmed — short selling enabled
+  account_type: "margin"    # Keep margin for short selling capability
+                            # PDT applies (3 day trades per 5 rolling days if <$25K)
+                            # Bot uses swing-hold strategy to minimize PDT burn
 
 backtest:
   initial_capital: 6043.0

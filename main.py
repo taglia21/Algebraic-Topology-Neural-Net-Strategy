@@ -454,6 +454,22 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Ensemble init failed: {e}")
 
+    # --- Alpha sleeves (independent signal sources) ---
+    momentum_strategy = None
+    mean_rev_strategy = None
+    stat_arb_strategy = None
+    try:
+        from ensemble.strategy_momentum import MomentumStrategy
+        from ensemble.strategy_mean_reversion import MeanReversionStrategy
+        from ensemble.strategy_stat_arb import StatArbStrategy
+
+        momentum_strategy = MomentumStrategy(fast_window=5, slow_window=20, top_n=5)
+        mean_rev_strategy = MeanReversionStrategy(bb_window=20, bb_std=2.0)
+        stat_arb_strategy = StatArbStrategy(spread_window=30, z_threshold=1.5)
+        logger.info("Alpha sleeves initialized (momentum, mean-reversion, stat-arb)")
+    except Exception as e:
+        logger.warning(f"Alpha sleeves init failed (non-fatal): {e}")
+
     # --- ORIA components ---
     oria_orthogonalizer = None
     oria_allocator = None
@@ -512,6 +528,11 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     print(f"  IBKR: {'Connected' if ib_connected else 'Not connected'}")
     print(f"  Brackets: ATR-based dynamic")
     print(f"  PDT remaining: {pdt_tracker.PDT_LIMIT - pdt_tracker.count_recent()}/{pdt_tracker.PDT_LIMIT} day trades")
+    sleeves_status = []
+    if momentum_strategy: sleeves_status.append("Momentum")
+    if mean_rev_strategy: sleeves_status.append("MeanRev")
+    if stat_arb_strategy: sleeves_status.append("StatArb")
+    print(f"  Alpha sleeves: {', '.join(sleeves_status) if sleeves_status else 'NONE'}")
     oria_status = "ENABLED" if oria_orthogonalizer else "DISABLED"
     print(f"  ORIA pipeline: {oria_status}")
     if oria_orthogonalizer:
@@ -735,6 +756,59 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                     logger.info(f"NN signals: {len(nn_signals)}")
                 except Exception as e:
                     logger.warning(f"NN prediction failed: {e}")
+
+            # ===========================================================
+            # 4b. Alpha Sleeves: Momentum, Mean-Reversion, Stat-Arb
+            # ===========================================================
+            sleeve_signals = pd.DataFrame(columns=["ticker", "direction", "strength", "regime", "timestamp"])
+            _sleeve_count = 0
+
+            if momentum_strategy:
+                try:
+                    mom_sigs = momentum_strategy.generate_signals(price_df, volume_df, current_regime)
+                    if not mom_sigs.empty:
+                        sleeve_signals = pd.concat([sleeve_signals, mom_sigs], ignore_index=True)
+                        _sleeve_count += len(mom_sigs)
+                except Exception as e:
+                    logger.warning(f"Momentum strategy failed: {e}")
+
+            if mean_rev_strategy:
+                try:
+                    mr_sigs = mean_rev_strategy.generate_signals(price_df, volume_df, current_regime)
+                    if not mr_sigs.empty:
+                        sleeve_signals = pd.concat([sleeve_signals, mr_sigs], ignore_index=True)
+                        _sleeve_count += len(mr_sigs)
+                except Exception as e:
+                    logger.warning(f"Mean-reversion strategy failed: {e}")
+
+            if stat_arb_strategy:
+                try:
+                    sa_sigs = stat_arb_strategy.generate_signals(price_df, returns_df, current_regime)
+                    if not sa_sigs.empty:
+                        sleeve_signals = pd.concat([sleeve_signals, sa_sigs], ignore_index=True)
+                        _sleeve_count += len(sa_sigs)
+                except Exception as e:
+                    logger.warning(f"Stat-arb strategy failed: {e}")
+
+            if _sleeve_count > 0:
+                logger.info(f"Alpha sleeves: {_sleeve_count} additional signals")
+
+                # Merge sleeve signals into TDA signals (they share the same format)
+                # The aggregator will combine them with NN signals
+                if not tda_signals.empty:
+                    tda_signals = pd.concat([tda_signals, sleeve_signals], ignore_index=True)
+                else:
+                    tda_signals = sleeve_signals
+
+                # Deduplicate: if multiple sleeves signal the same ticker,
+                # keep the one with highest strength
+                if not tda_signals.empty and "ticker" in tda_signals.columns:
+                    tda_signals = (
+                        tda_signals.sort_values("strength", ascending=False)
+                        .drop_duplicates(subset=["ticker"], keep="first")
+                        .reset_index(drop=True)
+                    )
+                    logger.info(f"Combined TDA + sleeves: {len(tda_signals)} unique signals")
 
             # ===========================================================
             # 5. ORIA Pipeline: Orthogonalize → Allocate → Aggregate → Filter → Size → RiskBox

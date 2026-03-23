@@ -454,6 +454,43 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Ensemble init failed: {e}")
 
+    # --- ORIA components ---
+    oria_orthogonalizer = None
+    oria_allocator = None
+    oria_risk_box = None
+    oria_governor = None
+    try:
+        from core.orthogonalizer import SignalOrthogonalizer
+        from core.dynamic_allocator import DynamicAllocator
+        from core.risk_box import RiskBox, RiskBoxConfig
+        from core.execution_governor import ExecutionGovernor, GovernorConfig
+
+        # Factor symbols for orthogonalization: market + style factors
+        oria_orthogonalizer = SignalOrthogonalizer(
+            factor_symbols=["SPY", "IWM", "GLD", "TLT"],
+            lookback=60,
+        )
+        oria_allocator = DynamicAllocator(
+            base_tda_weight=cfg.ensemble.default_tda_weight,
+            base_nn_weight=cfg.ensemble.default_nn_weight,
+            sensitivity=0.30,
+        )
+        oria_risk_box = RiskBox(
+            config=RiskBoxConfig(
+                target_annual_vol=0.15,
+                max_gross_exposure=1.0,
+                max_net_exposure=0.50,
+                max_single_position=cfg.risk.max_position_pct,
+                max_concurrent_positions=getattr(cfg.risk.small_account, 'max_concurrent_positions', 8),
+                stress_lambda=2.0,
+            ),
+            nav=cfg.backtest.initial_capital,
+        )
+        oria_governor = ExecutionGovernor(GovernorConfig())
+        logger.info("ORIA components initialized (orthogonalizer, allocator, risk box, governor)")
+    except Exception as e:
+        logger.warning(f"ORIA init failed (non-fatal, using legacy pipeline): {e}")
+
     options_enabled = cfg.options.enabled and not dry_run
     equities_enabled = cfg.equities.enabled and not dry_run
     shorting_enabled = getattr(cfg.equities, 'allow_shorting', False)
@@ -475,6 +512,13 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
     print(f"  IBKR: {'Connected' if ib_connected else 'Not connected'}")
     print(f"  Brackets: ATR-based dynamic")
     print(f"  PDT remaining: {pdt_tracker.PDT_LIMIT - pdt_tracker.count_recent()}/{pdt_tracker.PDT_LIMIT} day trades")
+    oria_status = "ENABLED" if oria_orthogonalizer else "DISABLED"
+    print(f"  ORIA pipeline: {oria_status}")
+    if oria_orthogonalizer:
+        print(f"    Orthogonalization: factors={oria_orthogonalizer.factor_symbols}")
+        print(f"    Dynamic Allocator: sensitivity={oria_allocator.sensitivity if oria_allocator else 'N/A'}")
+        print(f"    Risk Box: target_vol={oria_risk_box.config.target_annual_vol:.0%}" if oria_risk_box else "")
+        print(f"    Execution Governor: max_participation={oria_governor.config.max_participation_pct:.0%}" if oria_governor else "")
     print(f"{'=' * 60}\n")
 
     _last_trading_date = None
@@ -693,12 +737,39 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                     logger.warning(f"NN prediction failed: {e}")
 
             # ===========================================================
-            # 5. Ensemble: allocate → aggregate → filter → size
+            # 5. ORIA Pipeline: Orthogonalize → Allocate → Aggregate → Filter → Size → RiskBox
             # ===========================================================
             if signal_aggregator and (not tda_signals.empty or not nn_signals.empty):
                 try:
-                    # Meta-allocator weights
-                    if meta_allocator:
+                    # --- 5a. ORIA Orthogonalization: remove factor exposure ---
+                    if oria_orthogonalizer and not tda_signals.empty:
+                        try:
+                            tda_signals = oria_orthogonalizer.orthogonalize_signals(
+                                tda_signals, returns_df,
+                            )
+                        except Exception as e:
+                            logger.warning(f"TDA orthogonalization failed (non-fatal): {e}")
+
+                    if oria_orthogonalizer and not nn_signals.empty:
+                        try:
+                            nn_signals = oria_orthogonalizer.orthogonalize_signals(
+                                nn_signals, returns_df,
+                            )
+                        except Exception as e:
+                            logger.warning(f"NN orthogonalization failed (non-fatal): {e}")
+
+                    # --- 5b. ORIA Dynamic Allocation (replaces static 50/50) ---
+                    if oria_allocator:
+                        alloc = oria_allocator.allocate(
+                            price_df=price_df,
+                            returns_df=returns_df,
+                            regime=current_regime,
+                            benchmark="SPY",
+                        )
+                        tda_w = alloc.tda_weight
+                        nn_w = alloc.nn_weight
+                        logger.info(f"Allocation: TDA={tda_w:.2f} NN={nn_w:.2f} — {alloc.reasoning}")
+                    elif meta_allocator:
                         alloc = meta_allocator.allocate(
                             tda_signals=tda_signals,
                             nn_signals=nn_signals,
@@ -710,7 +781,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                     else:
                         tda_w, nn_w = 0.5, 0.5
 
-                    # Aggregate
+                    # --- 5c. Aggregate signals ---
                     combined = signal_aggregator.aggregate(
                         tda_signals=tda_signals if not tda_signals.empty else pd.DataFrame(
                             columns=["ticker", "direction", "strength"]
@@ -827,6 +898,78 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 )
                 except Exception as e:
                     logger.warning(f"Ensemble aggregation failed: {e}")
+
+            # ===========================================================
+            # 5f. ORIA Risk Box: apply constraints and stress scaling
+            # ===========================================================
+            if oria_risk_box and sized_signals:
+                try:
+                    # Update Risk Box with current NAV
+                    oria_risk_box.update_nav(nav)
+
+                    # Build current positions dict
+                    current_pos_dict = {}
+                    if portfolio_mgr and ib_connected:
+                        try:
+                            eq_pos = list(portfolio_mgr.get_equity_positions())
+                            for pos in eq_pos:
+                                sym = pos.contract.symbol if hasattr(pos, 'contract') else None
+                                if sym:
+                                    current_pos_dict[sym] = {
+                                        "value": abs(pos.marketValue) if hasattr(pos, 'marketValue') else 0,
+                                        "direction": "LONG" if pos.position > 0 else "SHORT",
+                                    }
+                        except Exception:
+                            pass
+                    oria_risk_box.update_positions(current_pos_dict)
+
+                    # Compute stress indicator from regime
+                    _stress = {"NORMAL": 0.0, "STRESSED": 0.5, "CRASH": 1.0}.get(current_regime, 0.0)
+
+                    # Compute realized vol from returns
+                    _realized_vol = 0.15
+                    if returns_df is not None and "SPY" in returns_df.columns:
+                        _rv = returns_df["SPY"].tail(20).std() * (252 ** 0.5)
+                        if _rv > 0:
+                            _realized_vol = _rv
+
+                    # Convert sized_signals to dicts for Risk Box
+                    signal_dicts = []
+                    for ps in sized_signals:
+                        signal_dicts.append({
+                            "ticker": ps.ticker,
+                            "direction": ps.direction,
+                            "position_value": ps.position_value,
+                            "position_pct": ps.position_pct,
+                            "signal_strength": getattr(ps, 'signal_strength', 0.5),
+                        })
+
+                    rb_result = oria_risk_box.process_signals(
+                        signal_dicts, _realized_vol, _stress,
+                    )
+
+                    logger.info(
+                        "RiskBox: %d approved, %d rejected, scalar=%.2f, gross=%.1f%%, positions=%d",
+                        len(rb_result.approved_signals), len(rb_result.rejected_signals),
+                        rb_result.risk_scalar, rb_result.gross_exposure_pct, rb_result.position_count,
+                    )
+                    if rb_result.violations:
+                        logger.info("RiskBox violations: %s", rb_result.violations[:3])
+
+                    # Replace sized_signals with approved-only (re-pack as PortfolioState-like objects)
+                    approved_sized = []
+                    for sig_dict in rb_result.approved_signals:
+                        # Find the original PortfolioState object and update its value
+                        for ps in sized_signals:
+                            if ps.ticker == sig_dict["ticker"]:
+                                ps.position_value = sig_dict["position_value"]
+                                ps.position_pct = sig_dict["position_pct"]
+                                approved_sized.append(ps)
+                                break
+                    sized_signals = approved_sized
+
+                except Exception as e:
+                    logger.warning(f"ORIA Risk Box failed (using unfiltered signals): {e}")
 
             # ===========================================================
             # 6. Execute trades with ATR-based brackets

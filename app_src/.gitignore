@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Logs (keep structure, ignore contents)
+logs/*.jsonl
+logs/*.log
+
+# Model artifacts (large binaries)
+models/**/*.pkl
+models/**/*.joblib
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data cache
+data/cache/
+*.parquet
+*.h5
+
+# Backtest result snapshots
+backtest_results*.json
+
+# pytest cache
+.pytest_cache/

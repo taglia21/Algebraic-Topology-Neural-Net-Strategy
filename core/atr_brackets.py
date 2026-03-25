@@ -23,25 +23,24 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Regime multipliers for bracket width
-# Wider brackets = swing-trade friendly (avoids PDT on margin accounts <$25K)
-# Positions should survive intraday noise and hold 1-3 days for full P&L capture
+# Tightened for faster profit capture and higher trade frequency
+# Target: positions resolve within 1-2 days for active turnover
 _REGIME_SL_MULT = {
-    "NORMAL": 2.5,    # Widened from 1.5 → 2.5 for swing-trade holds
-    "STRESSED": 2.0,  # Widened from 1.2 → 2.0
-    "CRASH": 1.5,     # Widened from 1.0 → 1.5
+    "NORMAL": 2.0,    # Balanced: wide enough to survive noise, tight enough to cut losses
+    "STRESSED": 1.5,
+    "CRASH": 1.2,
 }
 _REGIME_TP_MULT = {
-    "NORMAL": 3.5,    # Widened from 2.0 → 3.5 for larger profit targets
-    "STRESSED": 3.0,  # Widened from 1.8 → 3.0
-    "CRASH": 2.5,     # Widened from 1.5 → 2.5
+    "NORMAL": 1.5,    # Tightened from 3.5 → 1.5 for faster profit taking
+    "STRESSED": 1.2,
+    "CRASH": 1.0,
 }
 
 # Absolute floor/ceiling for bracket percentages
-# Widened floors to ensure positions don't trigger same-day (PDT avoidance)
-_MIN_SL_PCT = 0.02    # 2% minimum stop (was 0.8% — too tight, triggered same-day)
-_MAX_SL_PCT = 0.08    # 8% maximum stop (was 5%)
-_MIN_TP_PCT = 0.03    # 3% minimum TP (was 1.2% — too tight, triggered same-day)
-_MAX_TP_PCT = 0.12    # 12% maximum TP (was 8%)
+_MIN_SL_PCT = 0.015   # 1.5% minimum stop
+_MAX_SL_PCT = 0.05    # 5% maximum stop
+_MIN_TP_PCT = 0.012   # 1.2% minimum TP — captures quick moves
+_MAX_TP_PCT = 0.04    # 4% maximum TP
 
 
 @dataclass

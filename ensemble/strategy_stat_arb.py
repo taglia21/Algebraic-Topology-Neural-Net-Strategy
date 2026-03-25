@@ -27,15 +27,42 @@ logger = logging.getLogger(__name__)
 
 _REGIME_DISCOUNT = {"NORMAL": 1.0, "STRESSED": 0.80, "CRASH": 0.50}
 
-# Predefined pairs with strong fundamental linkage
+# Predefined pairs with strong fundamental linkage (expanded for 50-symbol universe)
 _PAIRS = [
-    ("AAPL", "MSFT"),   # Big tech
-    ("AMZN", "GOOGL"),  # Mega-cap internet
-    ("NVDA", "META"),    # AI/semiconductor/platform
-    ("XLF", "XLI"),     # Cyclical sectors
-    ("GLD", "TLT"),     # Safe havens
-    ("SPY", "QQQ"),     # Broad vs tech
-    ("XLE", "XLI"),     # Energy vs industrials
+    # Big tech peers
+    ("AAPL", "MSFT"),
+    ("AMZN", "GOOGL"),
+    ("NVDA", "AMD"),     # GPU rivals
+    ("META", "NFLX"),    # Digital media
+    ("AVGO", "INTC"),    # Semiconductor
+    ("CRM", "ORCL"),     # Enterprise software
+    ("ADBE", "CRM"),     # SaaS
+    # Finance pairs
+    ("JPM", "BAC"),      # Big banks
+    ("GS", "JPM"),       # Investment banks
+    ("V", "MA"),          # Payments
+    ("XLF", "JPM"),      # Sector vs leader
+    # Healthcare pairs
+    ("JNJ", "PFE"),      # Pharma
+    ("UNH", "ABBV"),     # Healthcare giants
+    ("MRK", "PFE"),      # Pharma competitors
+    # Consumer pairs
+    ("WMT", "COST"),     # Retail
+    ("HD", "WMT"),       # Consumer spend
+    ("MCD", "SBUX"),     # Quick service
+    ("NKE", "DIS"),      # Consumer brands
+    # Energy pairs
+    ("XOM", "CVX"),      # Oil majors
+    ("COP", "XOM"),      # E&P vs integrated
+    ("XLE", "XOM"),      # Sector vs leader
+    # Industrials
+    ("CAT", "BA"),       # Industrial giants
+    ("UPS", "BA"),       # Transport/industrial
+    # Cross-asset
+    ("GLD", "TLT"),      # Safe havens
+    ("SPY", "QQQ"),      # Broad vs tech
+    ("XLE", "XLI"),      # Cyclical sectors
+    ("IWM", "SPY"),      # Small vs large cap
 ]
 
 

@@ -45,15 +45,35 @@ class RiskBoxConfig:
     event_filter_enabled: bool = True      # Filter around earnings/FOMC
 
 
-# Simple sector mapping for our universe
+# Sector mapping for 50-symbol universe
 _SECTOR_MAP = {
+    # Indices/ETFs
     "SPY": "INDEX", "QQQ": "INDEX", "IWM": "INDEX",
-    "AAPL": "TECH", "MSFT": "TECH", "NVDA": "TECH",
-    "AMZN": "CONSUMER", "META": "TECH", "GOOGL": "TECH",
-    "TSLA": "CONSUMER",
+    "GLD": "COMMODITIES", "TLT": "BONDS",
     "XLF": "FINANCIALS", "XLE": "ENERGY", "XLK": "TECH",
     "XLV": "HEALTHCARE", "XLI": "INDUSTRIALS",
-    "GLD": "COMMODITIES", "TLT": "BONDS",
+    # Mega-cap Tech
+    "AAPL": "TECH", "MSFT": "TECH", "NVDA": "TECH",
+    "META": "TECH", "GOOGL": "TECH", "NFLX": "TECH",
+    # Tech/Semi
+    "AMD": "TECH", "CRM": "TECH", "INTC": "TECH",
+    "AVGO": "TECH", "ADBE": "TECH", "ORCL": "TECH",
+    # Finance
+    "JPM": "FINANCIALS", "BAC": "FINANCIALS", "GS": "FINANCIALS",
+    "V": "FINANCIALS", "MA": "FINANCIALS",
+    # Healthcare
+    "JNJ": "HEALTHCARE", "UNH": "HEALTHCARE", "PFE": "HEALTHCARE",
+    "ABBV": "HEALTHCARE", "MRK": "HEALTHCARE",
+    # Consumer
+    "AMZN": "CONSUMER", "TSLA": "CONSUMER", "WMT": "CONSUMER",
+    "COST": "CONSUMER", "HD": "CONSUMER", "MCD": "CONSUMER",
+    "NKE": "CONSUMER", "SBUX": "CONSUMER", "DIS": "CONSUMER",
+    # Energy
+    "XOM": "ENERGY", "CVX": "ENERGY", "COP": "ENERGY",
+    # Industrials
+    "CAT": "INDUSTRIALS", "BA": "INDUSTRIALS", "UPS": "INDUSTRIALS",
+    # Other
+    "UBER": "TECH", "LIN": "MATERIALS", "NEE": "UTILITIES", "O": "REALESTATE",
 }
 
 

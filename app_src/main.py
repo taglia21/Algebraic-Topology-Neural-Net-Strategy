@@ -1105,21 +1105,27 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                         if equities_enabled and equity_trader:
                             last_price = price_df[ps.ticker].iloc[-1] if ps.ticker in price_df.columns else None
                             if last_price and last_price > 0:
-                                qty = int(ps.position_value / last_price)
+                                # Smart position sizing: target 8-12% of NAV per position
+                                target_value = nav * 0.10  # 10% of NAV
+                                qty = max(1, int(target_value / last_price))
 
-                                # Small account floor: at least 1 share if affordable
-                                if qty < 1 and last_price <= nav * 0.50:
-                                    qty = 1
-                                    logger.info(
-                                        f"Small account floor: bumping {ps.ticker} to 1 share "
-                                        f"(${last_price:.2f}, {last_price/nav*100:.1f}% of NAV)"
-                                    )
-                                elif qty < 1:
+                                # Cap at max_equity_position from config
+                                max_pos = getattr(cfg.risk.small_account, 'max_equity_position', 900)
+                                if qty * last_price > max_pos:
+                                    qty = max(1, int(max_pos / last_price))
+
+                                # Skip if 1 share exceeds 20% of NAV (too expensive for our account)
+                                if last_price > nav * 0.20:
                                     logger.info(
                                         f"Skipping {ps.ticker}: 1 share @ ${last_price:.2f} "
-                                        f"exceeds 50% of NAV (${nav:.2f})"
+                                        f"exceeds 20% of NAV (${nav:.2f})"
                                     )
                                     continue
+
+                                logger.info(
+                                    f"Sizing: {qty} shares of {ps.ticker} @ ${last_price:.2f} "
+                                    f"= ${qty*last_price:.0f} ({qty*last_price/nav*100:.1f}% of NAV)"
+                                )
 
                                 # Short selling gate
                                 if ps.direction == "SHORT" and not shorting_enabled:
@@ -1157,7 +1163,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                         )
                                         _held_tickers.add(ps.ticker)
                                         _daily_trades_executed += 1
-                                        if _pdt_active: pdt_tracker.record_new_entry(ps.ticker)
+                                        # PDT: tracking moved to fill confirmation (not order submission)
                                         logger.info(
                                             "BRACKET %s %d %s entry~$%.2f TP=$%.2f (%.1f%%) SL=$%.2f (%.1f%%) ATR=$%.2f [%s]",
                                             action, qty, ps.ticker, last_price,
@@ -1194,7 +1200,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                         )
                                         _held_tickers.add(ps.ticker)
                                         _daily_trades_executed += 1
-                                        if _pdt_active: pdt_tracker.record_new_entry(ps.ticker)
+                                        # PDT: tracking moved to fill confirmation (not order submission)
                                         logger.info(
                                             "SHORT BRACKET %d %s entry~$%.2f TP=$%.2f SL=$%.2f [%s]",
                                             qty, ps.ticker, last_price,
@@ -1245,7 +1251,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                         change_pct = (current_price - avg_cost) / avg_cost
 
                         # === EMERGENCY STOP: LONG positions down -5% ===
-                        if change_pct <= -0.08 and pos_qty > 0:
+                        if change_pct <= -0.05 and pos_qty > 0:
                             logger.warning(
                                 "EMERGENCY STOP LONG: %s down %.1f%% ($%.2f → $%.2f). Selling.",
                                 symbol, change_pct * 100, avg_cost, current_price,
@@ -1265,7 +1271,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 logger.error("Emergency sell failed for %s: %s", symbol, e)
 
                         # === EMERGENCY STOP: SHORT positions up +5% (C-11 fix) ===
-                        elif change_pct >= 0.08 and pos_qty < 0:
+                        elif change_pct >= 0.05 and pos_qty < 0:
                             logger.warning(
                                 "EMERGENCY STOP SHORT: %s up %.1f%% against us ($%.2f → $%.2f). Covering.",
                                 symbol, change_pct * 100, avg_cost, current_price,
@@ -1285,7 +1291,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 logger.error("Emergency short cover failed for %s: %s", symbol, e)
 
                         # === PARTIAL PROFIT: LONG positions up +4% ===
-                        elif change_pct >= 0.06 and pos_qty > 1:
+                        elif change_pct >= 0.03 and pos_qty > 1:
                             sell_qty = max(1, int(pos_qty / 2))
                             logger.info(
                                 "PARTIAL PROFIT LONG: %s up %.1f%%. Selling %d of %d shares.",
@@ -1305,7 +1311,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 logger.error("Partial profit sell failed for %s: %s", symbol, e)
 
                         # === PARTIAL PROFIT: SHORT positions down -4% (cover half) ===
-                        elif change_pct <= -0.06 and pos_qty < -1:
+                        elif change_pct <= -0.03 and pos_qty < -1:
                             cover_qty = max(1, int(abs(pos_qty) / 2))
                             logger.info(
                                 "PARTIAL PROFIT SHORT: %s down %.1f%% in our favor. Covering %d of %d shares.",

@@ -759,8 +759,19 @@ class RegimeDetector:
         if not Path(filepath).exists():
             raise FileNotFoundError(f"No saved RegimeDetector found at {filepath!r}")
 
+        import hashlib
         with open(filepath, "rb") as fh:
-            payload = pickle.load(fh)
+            raw = fh.read()
+        # CRITICAL-03 FIX: Use restricted unpickler to prevent arbitrary code execution
+        import io
+        import pickle as _pkl
+        class _RestrictedUnpickler(_pkl.Unpickler):
+            _SAFE_MODULES = {'builtins', 'collections', 'numpy', 'numpy.core', 'numpy.core.multiarray'}
+            def find_class(self, module, name):
+                if module.split('.')[0] in self._SAFE_MODULES:
+                    return super().find_class(module, name)
+                raise _pkl.UnpicklingError(f"Blocked: {module}.{name}")
+        payload = _RestrictedUnpickler(io.BytesIO(raw)).load()
 
         detector = cls(
             n_states=payload["n_states"],

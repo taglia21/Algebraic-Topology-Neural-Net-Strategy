@@ -1105,16 +1105,17 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                         if equities_enabled and equity_trader:
                             last_price = price_df[ps.ticker].iloc[-1] if ps.ticker in price_df.columns else None
                             if last_price and last_price > 0:
-                                # Smart position sizing: target 8-12% of NAV per position
-                                target_value = nav * 0.10  # 10% of NAV
+                                # MEDIUM-13 FIX: Use ensemble-computed position_value,
+                                # fall back to 10% of NAV if ensemble returned 0
+                                target_value = ps.position_value if ps.position_value > 0 else nav * 0.10
                                 qty = max(1, int(target_value / last_price))
 
                                 # Cap at max_equity_position from config
-                                max_pos = getattr(cfg.risk.small_account, 'max_equity_position', 900)
+                                max_pos = getattr(cfg.risk, 'max_equity_position', 900)
                                 if qty * last_price > max_pos:
                                     qty = max(1, int(max_pos / last_price))
 
-                                # Skip if 1 share exceeds 20% of NAV (too expensive for our account)
+                                # Skip if 1 share exceeds 20% of NAV
                                 if last_price > nav * 0.20:
                                     logger.info(
                                         f"Skipping {ps.ticker}: 1 share @ ${last_price:.2f} "
@@ -1476,10 +1477,6 @@ async def _run_eod_reconciliation(
         logger.warning(f"Periodic retrain check failed: {e}")
 
 
-
-def run_live(cfg, dry_run: bool = False) -> None:
-    """Synchronous wrapper for the async live loop."""
-    asyncio.run(_run_live_async(cfg, dry_run=dry_run))
 
 def _run_retrain_inline(cfg, price_df, volume_df, tda_features) -> None:
     """Retrain NN model inline using current data."""

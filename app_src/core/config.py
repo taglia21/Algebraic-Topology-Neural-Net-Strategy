@@ -160,6 +160,15 @@ class RiskCfg:
     daily_loss_reduce_pct: float = 0.03  # 3% — reduce exposure trigger
     daily_loss_flatten_pct: float = 0.05 # 5% — flatten all trigger
     max_drawdown_halt_pct: float = 0.15  # 15% — full system halt
+    max_equity_position: float = 900.0    # Max $ per equity position
+    # --- CRITICAL-02 FIX: attributes referenced by core/risk_manager.py ---
+    correlation_lookback: int = 60
+    max_correlation: float = 0.85
+    max_drawdown_halt: float = 0.15       # alias for max_drawdown_halt_pct
+    max_drawdown_reduce: float = 0.10     # reduce exposure at 10% drawdown
+    daily_loss_limit: float = 0.05        # alias for daily_loss_flatten_pct
+    vol_target: float = 0.15              # 15% annual target volatility
+    max_short_position_pct: float = 0.15  # max single short as fraction of NAV
     small_account: SmallAccountCfg = field(default_factory=SmallAccountCfg)
 
 
@@ -184,7 +193,7 @@ class EquitiesCfg:
 
 @dataclass
 class BacktestCfg:
-    initial_capital: float = 444.0
+    initial_capital: float = 6000.0  # CRITICAL-06 fix: was 444 (old test account value)
     train_window: int = 756
     test_window: int = 21
     purge_gap: int = 5

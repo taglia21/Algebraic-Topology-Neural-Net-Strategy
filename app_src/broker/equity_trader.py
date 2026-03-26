@@ -135,30 +135,66 @@ class EquityTrader:
                             quantity, "STP", stop_price=stop_loss, status="SIMULATED", timestamp=ts, simulated=True),
             ]
 
-        # Build 3 pre-built Order objects (ib_async BracketOrder is a NamedTuple)
+        # CRITICAL-01 FIX: Build bracket with proper parentId + OCA linkage
+        # Step 1: Place parent order first to get orderId
+        # Step 2: Set parentId on children before submitting them
+        # Step 3: Use OCA group to ensure TP/SL cancel each other
         reverse_action = "SELL" if action == "BUY" else "BUY"
         parent = LimitOrder(action, quantity, limit_price, transmit=False)
-        tp_order = LimitOrder(reverse_action, quantity, take_profit, transmit=False)
-        sl_order = StopOrder(reverse_action, quantity, stop_loss)
 
-        bracket = BracketOrder(parent, tp_order, sl_order)
         results = []
         submitted_orders = []
         try:
-            for order in bracket:
-                trade = self.ib.placeOrder(contract, order)
-                submitted_orders.append(trade)
-                results.append(OrderResult(
-                    order_id=trade.order.orderId,
-                    symbol=symbol,
-                    action=order.action,
-                    quantity=quantity,
-                    order_type=order.orderType,
-                    limit_price=getattr(order, "lmtPrice", None),
-                    stop_price=getattr(order, "auxPrice", None),
-                    status="SUBMITTED",
-                    timestamp=datetime.now().isoformat(),
-                ))
+            # Submit parent first
+            parent_trade = self.ib.placeOrder(contract, parent)
+            submitted_orders.append(parent_trade)
+            parent_id = parent_trade.order.orderId
+
+            results.append(OrderResult(
+                order_id=parent_id, symbol=symbol, action=action, quantity=quantity,
+                order_type="LMT", limit_price=limit_price, status="SUBMITTED",
+                timestamp=datetime.now().isoformat(),
+            ))
+
+            # OCA group name (unique per bracket)
+            oca_group = str(parent_trade.order.permId or parent_id)
+
+            # Build TP order linked to parent
+            tp_order = LimitOrder(reverse_action, quantity, take_profit)
+            tp_order.parentId = parent_id
+            tp_order.ocaGroup = oca_group
+            tp_order.ocaType = 3  # Reduce remaining on fill
+            tp_order.transmit = False
+
+            tp_trade = self.ib.placeOrder(contract, tp_order)
+            submitted_orders.append(tp_trade)
+            results.append(OrderResult(
+                order_id=tp_trade.order.orderId, symbol=symbol, action=reverse_action,
+                quantity=quantity, order_type="LMT", limit_price=take_profit,
+                status="SUBMITTED", timestamp=datetime.now().isoformat(),
+            ))
+
+            # Build SL order linked to parent (transmit=True triggers all)
+            sl_order = StopOrder(reverse_action, quantity, stop_loss)
+            sl_order.parentId = parent_id
+            sl_order.ocaGroup = oca_group
+            sl_order.ocaType = 3
+            sl_order.transmit = True  # This transmits the entire bracket
+
+            sl_trade = self.ib.placeOrder(contract, sl_order)
+            submitted_orders.append(sl_trade)
+            results.append(OrderResult(
+                order_id=sl_trade.order.orderId, symbol=symbol, action=reverse_action,
+                quantity=quantity, order_type="STP", stop_price=stop_loss,
+                status="SUBMITTED", timestamp=datetime.now().isoformat(),
+            ))
+
+            logger.info(
+                "Bracket %s %d %s: parent=%d, TP=%d, SL=%d, OCA=%s",
+                action, quantity, symbol, parent_id,
+                tp_trade.order.orderId, sl_trade.order.orderId, oca_group,
+            )
+
         except Exception as partial_err:
             # C-09 fix: If any leg fails, cancel all previously submitted legs
             logger.error(
@@ -170,7 +206,7 @@ class EquityTrader:
                     self.ib.cancelOrder(prev_trade.order)
                 except Exception:
                     pass
-            raise  # Re-raise so caller knows the bracket failed
+            raise
         return results
 
     # --- Order Management ---

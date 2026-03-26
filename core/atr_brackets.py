@@ -183,7 +183,7 @@ def calculate_brackets(
         take_profit_price = round(entry_price * (1 + tp_pct), 2)
     else:  # SHORT
         stop_loss_price = round(entry_price * (1 + sl_pct), 2)
-        take_profit_price = round(entry_price * (1 - tp_pct), 2)
+        take_profit_price = max(0.01, round(entry_price * (1 - tp_pct), 2))  # L-09: floor at $0.01
 
     logger.info(
         "ATR brackets %s %s: ATR=$%.2f (%.1f%%), SL=%.1f%% ($%.2f), TP=%.1f%% ($%.2f) [%s]",

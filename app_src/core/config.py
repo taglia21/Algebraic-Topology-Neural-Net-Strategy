@@ -160,7 +160,7 @@ class RiskCfg:
     daily_loss_reduce_pct: float = 0.03  # 3% — reduce exposure trigger
     daily_loss_flatten_pct: float = 0.05 # 5% — flatten all trigger
     max_drawdown_halt_pct: float = 0.15  # 15% — full system halt
-    max_equity_position: float = 900.0    # Max $ per equity position
+    max_equity_position: float = 600.0    # Max $ per equity position (10% of $6K)
     # --- CRITICAL-02 FIX: attributes referenced by core/risk_manager.py ---
     correlation_lookback: int = 60
     max_correlation: float = 0.85

@@ -179,21 +179,37 @@ class TradeJournal:
 
         return trade
 
-    def _close_matching_buy(
-        self, ticker: str, exit_price: float, quantity: float
+    def _close_matching_trade(
+        self, ticker: str, exit_price: float, quantity: float, exit_action: str = "SELL"
     ) -> None:
-        """Match a sell with the oldest open buy for the same ticker."""
+        """Match an exit with the oldest open entry for the same ticker.
+
+        MEDIUM-02 FIX: Handles both LONG (BUY→SELL) and SHORT (SELL→BUY) trades.
+        """
+        # Determine which entry action to match
+        if exit_action == "SELL":
+            entry_action = "BUY"   # Closing a long
+        else:
+            entry_action = "SELL"  # Covering a short
+
         for trade in self._trades:
             if (
                 trade.ticker == ticker
-                and trade.action == "BUY"
+                and trade.action == entry_action
                 and not trade.closed
             ):
                 trade.exit_price = exit_price
                 trade.exit_timestamp = datetime.now().isoformat()
-                trade.pnl = (exit_price - trade.fill_price) * trade.quantity
+
+                if entry_action == "BUY":
+                    # Long trade: profit = exit - entry
+                    trade.pnl = (exit_price - trade.fill_price) * trade.quantity
+                else:
+                    # Short trade: profit = entry - exit (inverted)
+                    trade.pnl = (trade.fill_price - exit_price) * trade.quantity
+
                 trade.pnl_pct = (
-                    (exit_price - trade.fill_price) / trade.fill_price
+                    trade.pnl / (trade.fill_price * trade.quantity)
                     if trade.fill_price > 0
                     else 0.0
                 )
@@ -203,13 +219,18 @@ class TradeJournal:
                 )
                 trade.closed = True
                 logger.info(
-                    "Closed trade %s: P&L=$%.2f (%.2f%%) held %.0f min",
+                    "Closed %s trade %s: P&L=$%.2f (%.2f%%) held %.0f min",
+                    "LONG" if entry_action == "BUY" else "SHORT",
                     trade.trade_id, trade.pnl, trade.pnl_pct * 100,
                     trade.hold_minutes,
                 )
                 break
 
         self._rewrite_trades()
+
+    # Backward-compatible alias
+    def _close_matching_buy(self, ticker, exit_price, quantity):
+        return self._close_matching_trade(ticker, exit_price, quantity, "SELL")
 
     def record_daily_stats(
         self,

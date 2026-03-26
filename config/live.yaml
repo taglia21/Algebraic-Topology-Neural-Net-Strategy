@@ -117,13 +117,13 @@ risk:
   daily_loss_reduce_pct: 0.03
   daily_loss_flatten_pct: 0.05
   max_drawdown_halt_pct: 0.15
-  max_equity_position: 900.0    # Max $900 per position (more positions, less concentration)
+  max_equity_position: 600.0    # Max $600 per position (10 × $600 = $6K = 100% deployed)
   small_account:
     enabled: true
-    max_risk_per_trade: 600     # Max $600 risk per trade (~10% of $6K)
-    max_concurrent_positions: 10 # More positions = more diversified alpha
+    max_risk_per_trade: 400     # Max $400 risk per trade (~6.7% of $6K)
+    max_concurrent_positions: 10 # 10 positions × $600 max = $6K total
     max_option_premium: 200
-    max_equity_position: 900    # Max $900 per equity position (~15% of $6K)
+    max_equity_position: 600    # Max $600 per equity position (10% of $6K)
 
 options:
   enabled: false          # DORMANT — do NOT enable until authorized

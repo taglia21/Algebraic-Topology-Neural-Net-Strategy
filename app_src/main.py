@@ -658,6 +658,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
         price_df = None
         volume_df = None
         tda_features = None
+        nav = nav_cache.load(cfg.backtest.initial_capital) if nav_cache else cfg.backtest.initial_capital  # L-02: ensure nav always defined
 
         try:
             # ===========================================================
@@ -1225,7 +1226,9 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                         logger.warning("Trade journal record failed (non-fatal): %s", e)
 
                                 if kill_switch:
-                                    kill_switch.on_fill(0.0)  # TODO: pass actual fill P&L
+                                    # H-01: Pass estimated commission as entry cost
+                                    # Real P&L is unknown until exit; -1.0 accounts for ~$1 IBKR commission
+                                    kill_switch.on_fill(-1.0)
 
                     except Exception as e:
                         logger.error(f"Trade execution failed for {ps.ticker}: {e}")

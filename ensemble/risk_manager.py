@@ -232,6 +232,10 @@ class EnsembleRiskManager:
 
         # Dollar value
         position_value = portfolio_value * position_pct / 100.0
+        logger.debug(
+            "size_position %s: kelly=%.4f half=%.4f str=%.4f pct=%.2f val=$%.2f headroom=%.1f",
+            ticker, raw_kelly, half_kelly, strength, position_pct, position_value, headroom,
+        )
 
         # Apply max equity position cap (always enforced, not just small accounts)
         if position_value > self.max_equity_position:

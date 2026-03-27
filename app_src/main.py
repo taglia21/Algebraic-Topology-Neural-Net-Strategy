@@ -962,6 +962,15 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                             logger.info(f"Max concurrent positions ({max_concurrent}) reached — no new entries this cycle")
                             actionable = actionable.iloc[0:0]  # empty it
 
+                        # Debug: log top 3 signals for sizing visibility
+                        if not actionable.empty:
+                            top3 = actionable.nlargest(3, 'final_strength')
+                            for _, s in top3.iterrows():
+                                logger.info(
+                                    "  Signal: %s %s strength=%.4f",
+                                    s['ticker'], s['direction'], s['final_strength'],
+                                )
+
                         for _, sig in actionable.iterrows():
                             if slots_available <= 0:
                                 break
@@ -978,6 +987,15 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 avg_win=kelly_params["avg_win"],
                                 avg_loss=kelly_params["avg_loss"],
                             )
+                            # Floor: if Kelly produces tiny size, use $600 target (10% of NAV)
+                            if ps.position_value < 50 and sig["final_strength"] > 0:
+                                max_pos = getattr(cfg.risk, 'max_equity_position', 600)
+                                ps.position_value = min(max_pos, nav * 0.10)
+                                ps.position_pct = round(ps.position_value / nav * 100, 2) if nav > 0 else 0
+                                logger.info(
+                                    "  Kelly floor: %s sized to $%.0f (strength=%.3f, kelly was $%.2f)",
+                                    ps.ticker, ps.position_value, sig['final_strength'], 0,
+                                )
                             if ps.position_value > 0:
                                 sized_signals.append(ps)
                                 slots_available -= 1

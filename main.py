@@ -678,18 +678,35 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                     logger.warning(f"Position sync failed: {e}")
 
             # ===========================================================
-            # 2. Fetch market data
+            # 2. Fetch market data (DUAL TIMEFRAME)
+            #    - Daily bars (1Y): for TDA topology, NN features, regime detection
+            #    - 5-min bars (1D): for intraday alpha sleeves (momentum, mean-rev, stat-arb)
             # ===========================================================
+            intraday_data = None
+
             if data_feed and ib_connected:
+                # 2a. Daily bars (fetch once at cycle start, cached across cycles)
+                if _cycle_count <= 1 or not market_data:
+                    try:
+                        market_data = await data_feed.get_historical_bars_multi(
+                            symbols=cfg.universe.symbols,
+                            duration="1 Y",
+                            bar_size="1 day",
+                        )
+                        logger.info(f"Daily bars: {len(market_data)} symbols")
+                    except Exception as e:
+                        logger.error(f"Daily data fetch failed: {e}")
+
+                # 2b. Intraday 5-min bars (fetch every cycle — THIS IS THE KEY CHANGE)
                 try:
-                    market_data = await data_feed.get_historical_bars_multi(
+                    intraday_data = await data_feed.get_historical_bars_multi(
                         symbols=cfg.universe.symbols,
-                        duration="1 Y",
-                        bar_size="1 day",
+                        duration="1 D",
+                        bar_size="5 mins",
                     )
-                    logger.info(f"Fetched data for {len(market_data)} symbols")
+                    logger.info(f"Intraday bars: {len(intraday_data)} symbols")
                 except Exception as e:
-                    logger.error(f"Data fetch failed: {e}")
+                    logger.warning(f"Intraday data fetch failed (using daily only): {e}")
 
             if data_cache and market_data:
                 try:
@@ -702,7 +719,7 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                 await _interruptible_sleep(cycle_interval, _shutdown_event)
                 continue
 
-            # Build price/volume DataFrames
+            # Build DAILY price/volume DataFrames (for TDA, NN, regime)
             closes = {}
             volumes = {}
             for sym, df in market_data.items():
@@ -729,8 +746,32 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                 except Exception as e:
                     logger.warning("Data cache save_combined failed (non-fatal): %s", e)
 
+            # Build INTRADAY price/volume DataFrames (for alpha sleeves)
+            intraday_price_df = None
+            intraday_volume_df = None
+            intraday_returns_df = None
+            if intraday_data:
+                intra_closes = {}
+                intra_volumes = {}
+                for sym, df in intraday_data.items():
+                    if df is not None and len(df) > 0:
+                        close_col = next((c for c in df.columns if c.lower() == "close"), None)
+                        vol_col = next((c for c in df.columns if c.lower() == "volume"), None)
+                        if close_col:
+                            intra_closes[sym] = df[close_col]
+                        if vol_col:
+                            intra_volumes[sym] = df[vol_col]
+                if intra_closes:
+                    intraday_price_df = pd.DataFrame(intra_closes)
+                    intraday_volume_df = pd.DataFrame(intra_volumes) if intra_volumes else None
+                    intraday_returns_df = intraday_price_df.pct_change().dropna()
+                    logger.info(
+                        "Intraday data: %d bars x %d symbols",
+                        len(intraday_price_df), len(intraday_price_df.columns),
+                    )
+
             # ===========================================================
-            # 3. TDA features → TDA signals
+            # 3. TDA features → TDA signals (uses DAILY data for topology)
             # ===========================================================
             if tda_extractor and tda_strategy:
                 try:
@@ -781,7 +822,10 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
 
             if momentum_strategy:
                 try:
-                    mom_sigs = momentum_strategy.generate_signals(price_df, volume_df, current_regime)
+                    # Use intraday data for momentum (signals change every 5 min)
+                    _mom_prices = intraday_price_df if intraday_price_df is not None else price_df
+                    _mom_vols = intraday_volume_df if intraday_volume_df is not None else volume_df
+                    mom_sigs = momentum_strategy.generate_signals(_mom_prices, _mom_vols, current_regime)
                     if not mom_sigs.empty:
                         sleeve_signals = pd.concat([sleeve_signals, mom_sigs], ignore_index=True)
                         _sleeve_count += len(mom_sigs)
@@ -790,7 +834,10 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
 
             if mean_rev_strategy:
                 try:
-                    mr_sigs = mean_rev_strategy.generate_signals(price_df, volume_df, current_regime)
+                    # Use intraday data for mean-reversion (BB/RSI on 5-min bars)
+                    _mr_prices = intraday_price_df if intraday_price_df is not None else price_df
+                    _mr_vols = intraday_volume_df if intraday_volume_df is not None else volume_df
+                    mr_sigs = mean_rev_strategy.generate_signals(_mr_prices, _mr_vols, current_regime)
                     if not mr_sigs.empty:
                         sleeve_signals = pd.concat([sleeve_signals, mr_sigs], ignore_index=True)
                         _sleeve_count += len(mr_sigs)
@@ -799,7 +846,10 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
 
             if stat_arb_strategy:
                 try:
-                    sa_sigs = stat_arb_strategy.generate_signals(price_df, returns_df, current_regime)
+                    # Use intraday data for stat-arb (pair spreads on 5-min bars)
+                    _sa_prices = intraday_price_df if intraday_price_df is not None else price_df
+                    _sa_returns = intraday_returns_df if intraday_returns_df is not None else returns_df
+                    sa_sigs = stat_arb_strategy.generate_signals(_sa_prices, _sa_returns, current_regime)
                     if not sa_sigs.empty:
                         sleeve_signals = pd.concat([sleeve_signals, sa_sigs], ignore_index=True)
                         _sleeve_count += len(sa_sigs)
@@ -987,14 +1037,18 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                                 avg_win=kelly_params["avg_win"],
                                 avg_loss=kelly_params["avg_loss"],
                             )
-                            # Floor: if Kelly produces tiny size, use $600 target (10% of NAV)
-                            if ps.position_value < 50 and sig["final_strength"] > 0:
-                                max_pos = getattr(cfg.risk, 'max_equity_position', 600)
-                                ps.position_value = min(max_pos, nav * 0.10)
+                            # Signal-proportional sizing: strength directly drives allocation
+                            # This replaces the broken Kelly pipeline with a direct approach
+                            max_pos = getattr(cfg.risk, 'max_equity_position', 600)
+                            strength = sig["final_strength"]
+                            if ps.position_value < 50 and strength > 0:
+                                # Scale: strength 0.15 → $200, strength 0.5 → $450, strength 1.0 → $600
+                                scaled_value = min(max_pos, max_pos * min(1.0, strength * 1.5))
+                                ps.position_value = max(100.0, scaled_value)  # $100 minimum
                                 ps.position_pct = round(ps.position_value / nav * 100, 2) if nav > 0 else 0
                                 logger.info(
-                                    "  Kelly floor: %s sized to $%.0f (strength=%.3f, kelly was $%.2f)",
-                                    ps.ticker, ps.position_value, sig['final_strength'], 0,
+                                    "  Sized: %s $%.0f (strength=%.3f → %.1f%% NAV)",
+                                    ps.ticker, ps.position_value, strength, ps.position_pct,
                                 )
                             if ps.position_value > 0:
                                 sized_signals.append(ps)
@@ -1124,13 +1178,12 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                         if equities_enabled and equity_trader:
                             last_price = price_df[ps.ticker].iloc[-1] if ps.ticker in price_df.columns else None
                             if last_price and last_price > 0:
-                                # MEDIUM-13 FIX: Use ensemble-computed position_value,
-                                # fall back to 10% of NAV if ensemble returned 0
-                                target_value = ps.position_value if ps.position_value > 0 else nav * 0.10
+                                # Use signal-proportional position value from sizing step
+                                target_value = ps.position_value if ps.position_value > 0 else nav * 0.08
                                 qty = max(1, int(target_value / last_price))
 
                                 # Cap at max_equity_position from config
-                                max_pos = getattr(cfg.risk, 'max_equity_position', 900)
+                                max_pos = getattr(cfg.risk, 'max_equity_position', 600)
                                 if qty * last_price > max_pos:
                                     qty = max(1, int(max_pos / last_price))
 
@@ -1256,8 +1309,53 @@ async def _run_live_async(cfg, dry_run: bool = False) -> None:
                 logger.info("No new signals this cycle")
 
             # ===========================================================
-            # 7. Monitor existing positions (emergency stops)
+            # 7. Signal-based exits + Monitor existing positions
             # ===========================================================
+            # 7a. Active signal-based exits: if signal FLIPPED, exit the position
+            if portfolio_mgr and ib_connected and equity_trader and not actionable.empty:
+                try:
+                    eq_pos = list(portfolio_mgr.get_equity_positions())
+                    # Build current signal direction map
+                    signal_dir_map = {}
+                    if not actionable.empty:
+                        for _, sig in actionable.iterrows():
+                            signal_dir_map[sig["ticker"]] = sig["direction"]
+
+                    for pos in eq_pos:
+                        sym = pos.contract.symbol if hasattr(pos, 'contract') else None
+                        pos_qty = pos.position if hasattr(pos, 'position') else 0
+                        if not sym or pos_qty == 0:
+                            continue
+
+                        current_dir = "LONG" if pos_qty > 0 else "SHORT"
+                        signal_dir = signal_dir_map.get(sym)
+
+                        # Signal flipped: we're LONG but signal says SHORT (or vice versa)
+                        if signal_dir and signal_dir != current_dir and signal_dir != "NEUTRAL":
+                            exit_action = "SELL" if pos_qty > 0 else "BUY"
+                            exit_qty = abs(pos_qty)
+                            logger.warning(
+                                "SIGNAL FLIP EXIT: %s was %s, signal now %s — closing %d shares",
+                                sym, current_dir, signal_dir, exit_qty,
+                            )
+                            try:
+                                await equity_trader.place_market_order(
+                                    symbol=sym, quantity=exit_qty, action=exit_action,
+                                )
+                                _held_tickers.discard(sym)
+                                if trade_journal:
+                                    trade_journal.record_trade(
+                                        ticker=sym, action=exit_action, quantity=exit_qty,
+                                        price=pos.marketPrice if hasattr(pos, 'marketPrice') else 0,
+                                        fill_price=pos.marketPrice if hasattr(pos, 'marketPrice') else 0,
+                                        strategy_source="SIGNAL_FLIP_EXIT", regime=current_regime,
+                                    )
+                            except Exception as e:
+                                logger.error(f"Signal flip exit failed for {sym}: {e}")
+                except Exception as e:
+                    logger.warning(f"Signal-based exit check failed: {e}")
+
+            # 7b. Emergency stops and partial profit
             if portfolio_mgr and ib_connected and equity_trader:
                 try:
                     equity_positions = list(portfolio_mgr.get_equity_positions())

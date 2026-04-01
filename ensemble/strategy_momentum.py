@@ -45,8 +45,8 @@ class MomentumStrategy:
 
     def __init__(
         self,
-        fast_window: int = 5,
-        slow_window: int = 20,
+        fast_window: int = 12,    # ~1 hour on 5-min bars (12 bars)
+        slow_window: int = 78,    # ~1 trading day on 5-min bars (78 bars)
         top_n: int = 5,
         volume_confirm: bool = True,
     ):

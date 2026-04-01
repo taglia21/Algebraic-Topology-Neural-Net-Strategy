@@ -63,9 +63,9 @@ class MeanReversionStrategy:
 
     def __init__(
         self,
-        bb_window: int = 20,
+        bb_window: int = 78,     # ~1 trading day on 5-min bars
         bb_std: float = 2.0,
-        rsi_window: int = 14,
+        rsi_window: int = 42,    # ~3.5 hours on 5-min bars
         rsi_oversold: float = 30.0,
         rsi_overbought: float = 70.0,
     ):

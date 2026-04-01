@@ -19,7 +19,13 @@ broker:
   max_reconnect_attempts: 10
 
 universe:
-  symbols: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "TSLA"]
+  symbols: [
+    "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "TSLA",
+    "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV", "XLI", "XLP", "XLU", "GLD", "SLV", "TLT", "HYG", "EEM",
+    "AMD", "NFLX", "CRM", "ADBE", "AVGO", "INTC", "PYPL", "SQ", "SHOP", "UBER", "COIN",
+    "JPM", "BAC", "GS", "WFC", "XOM", "CVX", "JNJ", "UNH", "PFE", "MRK",
+    "MARA", "RIOT", "PLTR", "SOFI", "HOOD", "ARKK"
+  ]
   benchmark: "SPY"
 
 tda:
@@ -69,10 +75,10 @@ options:
 
 equities:
   enabled: true           # LIVE — authorized by board
-  fractional_shares: true # IBKR supports fractional US equities
+  fractional_shares: false # IBKR TWS API does NOT support fractional shares
 
 backtest:
-  initial_capital: 444.0
+  initial_capital: 6003.0
   train_window: 756
   test_window: 21
   purge_gap: 5

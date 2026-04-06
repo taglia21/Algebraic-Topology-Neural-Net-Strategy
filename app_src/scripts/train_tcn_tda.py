@@ -45,7 +45,7 @@ TDA_WINDOW    = 40       # rolling window for TDA
 SEQ_LEN       = 30       # LSTM/TCN sequence length
 TRAIN_WINDOW  = 504      # ~2 years training bars
 TEST_WINDOW   = 63       # ~3 months test
-PURGE         = 5        # purge gap (no-man's-land between train/test)
+PURGE         = 10       # FIXED: must be >= 2*forward_bars (5) to prevent label leakage
 EPOCHS        = 50
 PATIENCE      = 8
 LR            = 1e-3
@@ -276,7 +276,7 @@ def main():
 
     while cursor + PURGE + TEST_WINDOW <= n_dates:
         train_dates = set(unique_dates[max(0, cursor - TRAIN_WINDOW):cursor])
-        test_start  = cursor + PURGE
+        test_start  = cursor + PURGE  # now 10 bars, covering the 5-bar label horizon
         test_end    = min(test_start + TEST_WINDOW, n_dates)
         test_dates  = set(unique_dates[test_start:test_end])
 

@@ -37,7 +37,7 @@ import torch
 
 from tda.extractor import TDAFeatureExtractor
 from nn.models.tcn_predictor import TCNPredictor
-from nn.regime_labeler import regime_to_contracts, regime_name, label_regimes
+from nn.regime_labeler import regime_to_contracts, regime_name, label_regimes, smooth_regimes, heuristic_regime, HEURISTIC_THRESHOLDS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -246,33 +246,16 @@ def compute_tcn_regime(spy_df: pd.DataFrame) -> tuple[int, float]:
 
 
 def _heuristic_regime(tda: pd.DataFrame, close: pd.Series) -> tuple[int, float]:
-    """Heuristic regime from TDA + price. Used before first model is trained."""
-    last = tda.iloc[-1]
+    """Calibrated heuristic regime from TDA + price. Uses data-driven thresholds."""
+    last     = tda.iloc[-1]
     beta_1   = float(last.get("beta_1", 0))
     wass     = float(last.get("wasserstein_dist", 0))
     spec_gap = float(last.get("spectral_gap", 0.5))
+    mom_5    = float(close.pct_change(5).iloc[-1]) if len(close) >= 5 else 0
+    log_ret  = np.log(close / close.shift(1))
+    vol      = float(log_ret.rolling(10).std().iloc[-1]) if len(close) >= 10 else 0.015
 
-    mom_5 = float(close.pct_change(5).iloc[-1]) if len(close) >= 5 else 0
-    log_ret = np.log(close / close.shift(1))
-    vol = float(log_ret.rolling(10).std().iloc[-1]) if len(close) >= 10 else 0.02
-
-    # High wasserstein → regime transition in progress
-    if wass > 0.5:
-        return 3, 0.60   # volatile / transition
-
-    # Low spectral gap → correlated, trending market
-    if spec_gap < 0.3:
-        return (0, 0.58) if mom_5 > 0.01 else (1, 0.58) if mom_5 < -0.01 else (2, 0.50)
-
-    # High beta_1 → many loops in topology = oscillating / mean-reverting
-    if beta_1 > 3.0:
-        return 2, 0.62
-
-    # High vol
-    if vol > 0.025:
-        return 3, 0.60
-
-    return 2, 0.48   # default
+    return heuristic_regime(spec_gap, beta_1, wass, mom_5, vol)
 
 
 # ─── IBKR Execution ───────────────────────────────────────────────────────────
@@ -336,6 +319,45 @@ async def trade_mes(ib, action: str, qty: int, dry_run: bool = False) -> bool:
 
 # ─── Main Cycle ───────────────────────────────────────────────────────────────
 
+async def place_stop_loss(ib, symbol: str, qty: int, spy_raw: pd.DataFrame, state: dict):
+    """Place a protective stop-loss order for MES position.
+
+    Stop placed at 2×ATR below entry price.
+    Cancels any existing stop first to avoid duplicates.
+    """
+    try:
+        from ib_async import Future, StopOrder
+
+        close = spy_raw["Close"].squeeze()
+        atr   = float((close - close.shift(1)).abs().rolling(14).mean().iloc[-1])
+        spx_level = float(close.iloc[-1]) * 10  # SPY to SPX proxy
+        atr_spx   = atr * 10
+
+        entry_price = state.get("last_entry_price", spx_level)
+        stop_price  = round(entry_price - 2.0 * atr_spx, 2)
+
+        contract = Future(symbol, exchange="CME", currency="USD")
+        qualified = await ib.qualifyContractsAsync(contract)
+        if not qualified:
+            return
+        contract = qualified[0]
+
+        # Cancel existing stop orders for this contract
+        for trade in ib.trades():
+            if (trade.contract.symbol == symbol and
+                    trade.order.orderType == "STP" and
+                    not trade.isDone()):
+                ib.cancelOrder(trade.order)
+
+        # Place new stop
+        stop_order = StopOrder("SELL", qty, stop_price)
+        ib.placeOrder(contract, stop_order)
+        log.info("Stop-loss placed: SELL %d %s @ %.2f (2×ATR below %.2f)",
+                 qty, symbol, stop_price, entry_price)
+    except Exception as e:
+        log.warning("Stop-loss placement failed: %s", e)
+
+
 async def run_cycle(dry_run: bool = False):
     state = load_state()
     state["day"] = state.get("day", 0) + 1
@@ -365,6 +387,18 @@ async def run_cycle(dry_run: bool = False):
 
     log.info("Computing TDA + TCN regime...")
     regime, confidence = compute_tcn_regime(spy_raw)
+    # Apply 3-bar smoothing to prevent single-day regime flips
+    # (regime flips every 2.2 days avg without smoothing → excess turnover)
+    state.setdefault("recent_regimes", [])
+    state["recent_regimes"].append(regime)
+    state["recent_regimes"] = state["recent_regimes"][-3:]
+    if len(state["recent_regimes"]) >= 2:
+        from collections import Counter
+        smoothed_regime = Counter(state["recent_regimes"]).most_common(1)[0][0]
+        if smoothed_regime != regime:
+            log.info("Regime smoothed: %s → %s", regime_name(regime), regime_name(smoothed_regime))
+            regime = smoothed_regime
+
     log.info("Regime: %s (confidence=%.3f, min=%.2f)", regime_name(regime),
              confidence, MIN_CONFIDENCE)
 
@@ -432,6 +466,9 @@ async def run_cycle(dry_run: bool = False):
             success = await trade_mes(ib, "BUY", delta, dry_run=dry_run)
             if not success and not dry_run:
                 log.error("BUY order failed")
+            else:
+                # Track entry price for stop-loss calculation
+                state["last_entry_price"] = float(spy_raw["Close"].squeeze().iloc[-1]) * 10
         elif target_qty < current_mes:
             delta = current_mes - target_qty
             success = await trade_mes(ib, "SELL", delta, dry_run=dry_run)
@@ -439,6 +476,10 @@ async def run_cycle(dry_run: bool = False):
                 log.error("SELL order failed")
         else:
             log.info("No position change needed")
+
+        # 5b. Place stop-loss order for open position (CRITICAL safety)
+        if target_qty > 0 and not dry_run:
+            await place_stop_loss(ib, MES_SYMBOL, target_qty, spy_raw, state)
 
         # 6. Update state
         state["regime_history"].append({

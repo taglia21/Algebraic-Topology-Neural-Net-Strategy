@@ -43,30 +43,56 @@ def _delay_embedding(
 ) -> np.ndarray:
     """
     Build a delay-embedding point cloud from a 1D time series.
-
-    For prices [p1, p2, ..., pN], with dim=3, delay=1:
-    Returns point cloud where each row is [p_i, p_{i+1}, p_{i+2}].
-
-    This transforms the time series into a geometric object whose
-    topology reflects market structure.
+    Classic Takens embedding: [p_i, p_{i+delay}, p_{i+2*delay}, ...]
     """
-    # Ensure strictly 1D float64
     prices = np.array(prices, dtype=np.float64).ravel()
     n = len(prices)
     max_start = n - (dim - 1) * delay
     if max_start <= 0:
         raise ValueError(f"Not enough data: need {(dim-1)*delay + 1} points, got {n}")
-
-    # Efficient column-stack implementation
     cloud = np.column_stack([
         prices[d * delay: max_start + d * delay]
         for d in range(dim)
     ])
-
-    # Normalize to unit cube
     cloud_range = cloud.max(axis=0) - cloud.min(axis=0)
     cloud_range[cloud_range == 0] = 1.0
-    cloud = (cloud - cloud.min(axis=0)) / cloud_range
+    return (cloud - cloud.min(axis=0)) / cloud_range
+
+
+def _multi_lag_embedding(
+    returns: np.ndarray,
+    lags: list[int] = None,
+) -> np.ndarray:
+    """
+    Build a multi-lag returns embedding point cloud.
+
+    Research (Gidea & Katz 2018, Baitinger & Flegel 2021):
+    Using economically-motivated lags [1, 5, 20, 60] captures multi-timeframe
+    market structure more effectively than uniform Takens delay embedding.
+
+    Each row = (r_{t-1}, r_{t-5}, r_{t-20}, r_{t-60}) where r = log return.
+    """
+    if lags is None:
+        lags = [1, 5, 20, 60]
+
+    returns = np.array(returns, dtype=np.float64).ravel()
+    max_lag  = max(lags)
+    n        = len(returns)
+
+    if n < max_lag + 5:
+        raise ValueError(f"Not enough returns: need {max_lag + 5}, got {n}")
+
+    cloud = np.column_stack([
+        returns[max_lag - lag: n - lag]
+        for lag in lags
+    ])
+
+    # Robust normalization (use IQR to handle outliers)
+    p25 = np.percentile(cloud, 25, axis=0)
+    p75 = np.percentile(cloud, 75, axis=0)
+    iqr = p75 - p25
+    iqr[iqr == 0] = 1.0
+    cloud = (cloud - np.median(cloud, axis=0)) / iqr
 
     return cloud
 

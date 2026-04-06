@@ -46,8 +46,11 @@ SEQ_LEN       = 30       # LSTM/TCN sequence length
 TRAIN_WINDOW  = 504      # ~2 years training bars
 TEST_WINDOW   = 63       # ~3 months test
 PURGE         = 10       # FIXED: must be >= 2*forward_bars (5) to prevent label leakage
-EPOCHS        = 50
-PATIENCE      = 8
+# Architecture: research says 3-4 layers, 16-32 filters for <2000 bars
+# Previous [64,64,32] was severe overfitting on 16K rows
+TCN_CHANNELS  = [16, 16, 8]  # FIXED: much smaller for our dataset size
+EPOCHS        = 80
+PATIENCE      = 15   # more patience since model is smaller and easier to fit
 LR            = 1e-3
 BATCH         = 64
 DROPOUT       = 0.2
@@ -187,7 +190,16 @@ def train_fold(model: TCNPredictor, X_tr, y_tr, X_val, y_val,
         model.eval()
         with torch.no_grad():
             preds = model(X_v).argmax(1)
-            acc   = float((preds == y_v).float().mean())
+            # Use balanced accuracy (mean per-class recall) instead of raw accuracy.
+            # With class weights, raw accuracy is still biased toward majority class.
+            per_class_recall = []
+            for c in range(4):
+                mask = (y_v == c)
+                if mask.sum() > 0:
+                    per_class_recall.append(
+                        float((preds[mask] == y_v[mask]).float().mean())
+                    )
+            acc = float(np.mean(per_class_recall)) if per_class_recall else 0.0
 
         if acc > best_val:
             best_val   = acc
@@ -301,7 +313,7 @@ def main():
 
         model = TCNPredictor(
             input_size=n_features,
-            num_channels=[64, 64, 32],
+            num_channels=TCN_CHANNELS,   # [16,16,8] — research-optimal for <2K bars
             kernel_size=3,
             dropout=DROPOUT,
             num_classes=4,
@@ -341,12 +353,13 @@ def main():
                 "state_dict": model.state_dict(),
                 "n_features": n_features,
                 "feature_names": available,
+                "num_channels": TCN_CHANNELS,  # save architecture for inference
                 "val_acc": val_acc,
                 "fold": fold,
-                "feat_mean": feat_mean,   # CRITICAL: save for consistent inference
-                "feat_std": feat_std,     # CRITICAL: save for consistent inference
+                "feat_mean": feat_mean,
+                "feat_std": feat_std,
             }, str(MODEL_DIR / "tcn_tda_model.pt"))
-            log.info("  ★ New best model (acc=%.4f)", best_acc)
+            log.info("  ★ New best model (balanced_acc=%.4f)", best_acc)
 
         cursor += TEST_WINDOW
         fold   += 1
@@ -377,6 +390,24 @@ def main():
     }
     with open(str(RESULT_DIR / "training_results.json"), "w") as f:
         json.dump(result, f, indent=2)
+
+    # Training completion alert
+    status = "SUCCESS" if best_acc > 0 else "FAILED"
+    try:
+        import subprocess
+        msg = (f"TCN Training {status}: "
+               f"best_balanced_acc={best_acc:.4f} | folds={len(fold_metrics)} | "
+               f"architecture={TCN_CHANNELS} | model={best_model}")
+        subprocess.run([
+            "curl", "-s", "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-H", "User-Agent: curl/7.68.0",
+            "-d", json.dumps({"content": f"**ATNN Training**: {msg}"}),
+            "https://discord.com/api/webhooks/1482171912724545638/"
+            "EiV03Fa7qhBj4VRXw9ItpR0w9l1-b6rI1kOwxPmeTM3ddDmf4g_uAghDRWtCW9SRF4M1"
+        ], capture_output=True, timeout=10)
+    except Exception:
+        pass
 
     log.info("Training complete.")
 

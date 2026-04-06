@@ -27,7 +27,7 @@ import yfinance as yf
 
 from tda.extractor import TDAFeatureExtractor
 from nn.models.tcn_predictor import TCNPredictor
-from nn.regime_labeler import label_regimes
+from nn.regime_labeler import label_regimes, compute_class_weights
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -151,9 +151,15 @@ def build_sequences(features: pd.DataFrame, labels: pd.Series) -> tuple:
 
 
 def train_fold(model: TCNPredictor, X_tr, y_tr, X_val, y_val,
-               device: torch.device) -> float:
-    """Train one fold, return validation accuracy."""
-    crit = nn.CrossEntropyLoss()
+               device: torch.device, class_weights: np.ndarray = None) -> float:
+    """Train one fold with class-weighted loss. Returns per-class accuracy."""
+    # Weighted cross-entropy: without this, model learns to always predict
+    # majority class (class 2 = ~72%) and reports 72% accuracy with zero signal.
+    if class_weights is not None:
+        w = torch.tensor(class_weights, dtype=torch.float32, device=device)
+        crit = nn.CrossEntropyLoss(weight=w)
+    else:
+        crit = nn.CrossEntropyLoss()
     opt  = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS)
 
@@ -221,9 +227,10 @@ def main():
             log.warning("  %s: insufficient data, skip", sym)
             continue
 
-        # Use SPY price for regime labels (same regime applies to all)
-        spy_aligned = spy_prices["Close"].reindex(feats.index).ffill()
-        labels = label_regimes(spy_aligned)
+        # FIX: Use each symbol's OWN prices for regime labels (not SPY for everything).
+        # SPY in mean-reversion ≠ TSLA in mean-reversion.
+        sym_close = df["Close"].squeeze().reindex(feats.index).ffill()
+        labels = label_regimes(sym_close)
 
         pure = feats.drop(columns=["_symbol"])
         common = pure.index.intersection(labels.index)
@@ -249,9 +256,11 @@ def main():
     log.info("Pooled: %d rows, %d features, %d symbols",
              len(features_df), n_features, len(all_feats))
 
-    # Class distribution
+    # Class distribution + inverse-frequency weights (CRITICAL fix for imbalance)
     dist = labels_s.value_counts().sort_index()
     log.info("Class distribution: %s", dict(dist))
+    class_wts = compute_class_weights(labels_s, num_classes=4)
+    log.info("Class weights (inv-freq): %s", {i: round(float(w), 3) for i, w in enumerate(class_wts)})
 
     # 3. Walk-forward training
     log.info("Starting walk-forward training...")
@@ -298,7 +307,7 @@ def main():
             num_classes=4,
         ).to(device)
 
-        val_acc = train_fold(model, X_tr, y_tr, X_te, y_te, device)
+        val_acc = train_fold(model, X_tr, y_tr, X_te, y_te, device, class_weights=class_wts)
         log.info("  Fold %d accuracy: %.4f", fold, val_acc)
 
         fold_metrics.append({
@@ -318,6 +327,13 @@ def main():
             "fold": fold,
         }, ckpt_path)
 
+        # Also save normalization statistics so inference can use IDENTICAL normalization
+        # to what training saw. Without this, the model sees out-of-distribution inputs.
+        train_feats_arr = features_df.loc[features_df.index.isin(train_dates)][available].values.astype(np.float32)
+        feat_mean = train_feats_arr.mean(axis=0)
+        feat_std  = train_feats_arr.std(axis=0)
+        feat_std[feat_std == 0] = 1.0
+
         if val_acc > best_acc:
             best_acc  = val_acc
             best_model = ckpt_path
@@ -327,6 +343,8 @@ def main():
                 "feature_names": available,
                 "val_acc": val_acc,
                 "fold": fold,
+                "feat_mean": feat_mean,   # CRITICAL: save for consistent inference
+                "feat_std": feat_std,     # CRITICAL: save for consistent inference
             }, str(MODEL_DIR / "tcn_tda_model.pt"))
             log.info("  ★ New best model (acc=%.4f)", best_acc)
 

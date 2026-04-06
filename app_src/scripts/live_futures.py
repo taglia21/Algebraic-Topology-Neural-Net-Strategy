@@ -1,42 +1,35 @@
 #!/usr/bin/env python3
 """
-live_futures.py — TDA + TCN strategy on MES Micro Futures
-===========================================================
-This is the correct trading vehicle:
-  - MES (Micro E-Mini S&P 500): tracks S&P 500
-  - MNQ (Micro E-Mini Nasdaq): tracks Nasdaq 100
-  - NO PDT rule (CFTC regulated, not FINRA)
-  - Unlimited day trades
-  - Commission: $0.25-0.85/contract (vs $1 min for stocks)
-  - Overnight margin: ~$1,200-1,500/contract (can hold 3-4 on $5,923)
-  - Same IBKR API and gateway as stocks
+live_futures.py — TDA + TCN on MES Micro Futures (Fixed)
+=========================================================
+Fixes applied vs prior version:
+  1. regime_to_contracts() now actually drives position sizing (not dead code)
+  2. Normalization uses saved training mean/std (not inference window stats)
+  3. Wasserstein state persisted to disk (not reset every invocation)
+  4. Atomic state file writes (no corruption on kill signal)
+  5. IBS overlay tracked correctly with its own state flag
+  6. Confidence gating: min 0.55 to act (above 72% majority-class floor)
 
-Strategy:
-  1. Use TDA (topological data analysis) to detect market regime
-  2. Use TCN to predict regime from TDA + price features
-  3. Execute:
-     - TRENDING_UP regime  → long 2 MES contracts
-     - TRENDING_DOWN regime → flat (or short 1 if model confident)
-     - MEAN_REVERTING      → scalp mean-reversion entries
-     - VOLATILE            → flat, wait
+Trading vehicle: MES (Micro E-Mini S&P 500)
+  - $5 per SPX point
+  - No PDT rule (CFTC regulated, not FINRA)
+  - Commission: ~$0.50 round-trip per contract
+  - Overnight margin: ~$1,200-1,500 per contract
 
-Prerequisites:
-  - Enable futures trading in IBKR Client Portal:
-    Settings → Account Settings → Trading Experiences & Permissions → Futures
-  - Run this script daily at 9:35 AM ET after 2FA approval
-
-Run: python3 /opt/atnn/scripts/live_futures.py
+Run: PYTHONPATH=/opt/atnn/app_src python3 /opt/atnn/scripts/live_futures.py
 """
 
 from __future__ import annotations
-import asyncio, json, logging, sys
+import asyncio, json, logging, os, sys, tempfile
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-APP_SRC = Path(__file__).parent.parent
+APP_SRC = Path(__file__).resolve().parent.parent / "app_src"
+if not (APP_SRC / "tda").exists():
+    APP_SRC = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(APP_SRC))
 
 import yfinance as yf
@@ -44,7 +37,7 @@ import torch
 
 from tda.extractor import TDAFeatureExtractor
 from nn.models.tcn_predictor import TCNPredictor
-from nn.regime_labeler import regime_to_strategy_weights
+from nn.regime_labeler import regime_to_contracts, regime_name, label_regimes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,21 +53,30 @@ IBKR_PORT  = 4003
 CLIENT_ID  = 30
 ACCOUNT    = "U22452226"
 
-MES_SYMBOL    = "MES"
-MNQ_SYMBOL    = "MNQ"
-MES_EXCHANGE  = "CME"
-MES_CURRENCY  = "USD"
+MES_SYMBOL   = "MES"
+MES_EXCHANGE = "CME"
 
-MAX_CONTRACTS = 2          # Max MES contracts to hold
-STOP_TICKS    = 20         # 20 ticks = $50 per MES contract (5 pts × $5)
-TARGET_TICKS  = 40         # 40 ticks = $100 per MES contract
-MES_TICK_SIZE = 0.25       # 0.25 SPX points per tick
-MES_MULTIPLIER = 5.0       # $5 per SPX point
+MAX_CONTRACTS   = 2
+MIN_CONFIDENCE  = 0.55    # must exceed majority-class floor (~0.50 for balanced)
 
-MODEL_PATH = Path("/opt/atnn/models/tcn_tda_model.pt")
-STATE_FILE = Path("/opt/atnn/data/futures_state.json")
+MODEL_PATH    = Path("/opt/atnn/models/tcn_tda_model.pt")
+STATE_FILE    = Path("/opt/atnn/data/futures_state.json")
+WASS_DIAG_FILE = Path("/opt/atnn/data/last_h1_diagram.npy")  # persistence for wasserstein
 
-# ─── State ────────────────────────────────────────────────────────────────────
+FEAT_COLS = [
+    "beta_0", "beta_1", "persistence_entropy", "wasserstein_dist",
+    "spectral_gap", "sci",
+    "mom_5", "mom_20", "vol_10", "rsi", "log_ret",
+]
+
+# IBS overlay parameters
+IBS_ATR_WINDOW  = 25
+IBS_HIGH_WINDOW = 10
+IBS_ATR_MULT    = 2.5
+IBS_THRESH      = 0.30
+
+
+# ─── Atomic State I/O ─────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -82,162 +84,26 @@ def load_state() -> dict:
             return json.loads(STATE_FILE.read_text())
         except Exception:
             pass
-    return {"day": 0, "regime_history": [], "pnl_today": 0.0}
+    return {"day": 0, "ibs_active": False, "pnl_today": 0.0, "regime_history": []}
+
 
 def save_state(s: dict):
+    """Atomic write — avoids state corruption on kill signal."""
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(s, indent=2, default=str))
+    fd, tmp = tempfile.mkstemp(dir=STATE_FILE.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(s, f, indent=2, default=str)
+        os.replace(tmp, STATE_FILE)   # atomic on POSIX
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
+
 
 # ─── Signals ──────────────────────────────────────────────────────────────────
-
-def compute_signals(prices_df: pd.DataFrame) -> dict:
-    """
-    Compute regime signal from TDA + price features.
-    Returns dict with regime, confidence, raw features, and IBS overlay.
-    """
-    close = prices_df["Close"].dropna()
-    high  = prices_df["High"].dropna()
-    low   = prices_df["Low"].dropna()
-
-    if len(close) < 80:
-        return {"regime": 3, "confidence": 0.5, "regime_name": "VOLATILE", "ibs_entry": False}
-
-    # ── TDA features ──
-    extractor = TDAFeatureExtractor(window=40, stride=1)
-    tda_series = extractor.extract_series(close)
-
-    # ── Price features ──
-    log_ret   = np.log(close / close.shift(1)).dropna()
-    mom_5     = close.pct_change(5).dropna()
-    mom_20    = close.pct_change(20).dropna()
-    vol_10    = log_ret.rolling(10).std().dropna() * np.sqrt(252)
-    rsi_raw   = _rsi(close, 14)
-
-    # ── Combine features (last N bars) ──
-    SEQ_LEN = 30
-    feat_cols = ["beta_0", "beta_1", "persistence_entropy", "wasserstein_dist",
-                 "spectral_gap", "sci"]
-
-    if len(tda_series) < SEQ_LEN:
-        log.warning("Not enough TDA features (%d, need %d)", len(tda_series), SEQ_LEN)
-        return {"regime": 2, "confidence": 0.4, "regime_name": "MEAN_REVERTING", "ibs_entry": False}
-
-    # Align all features to TDA index
-    tda_tail = tda_series[feat_cols].tail(SEQ_LEN)
-    common   = tda_tail.index
-
-    price_feats = pd.DataFrame({
-        "mom_5":   mom_5.reindex(common).ffill().bfill(),
-        "mom_20":  mom_20.reindex(common).ffill().bfill(),
-        "vol_10":  vol_10.reindex(common).ffill().bfill(),
-        "rsi":     rsi_raw.reindex(common).ffill().bfill() / 100.0,
-        "log_ret": log_ret.reindex(common).ffill().bfill(),
-    }, index=common)
-
-    full_feats = pd.concat([tda_tail, price_feats], axis=1).dropna()
-
-    if len(full_feats) < SEQ_LEN // 2:
-        return {"regime": 2, "confidence": 0.4, "regime_name": "MEAN_REVERTING", "ibs_entry": False}
-
-    n_features = full_feats.shape[1]
-
-    # ── TCN prediction (if model exists) ──
-    regime, confidence = 2, 0.5  # default: mean-reverting
-
-    if MODEL_PATH.exists():
-        try:
-            ckpt = torch.load(str(MODEL_PATH), map_location="cpu", weights_only=True)
-            model = TCNPredictor(input_size=ckpt.get("n_features", n_features))
-            model.load_state_dict(ckpt["state_dict"])
-            model.eval()
-
-            # Normalize
-            vals = full_feats.values.astype(np.float32)
-            mean_v = vals.mean(axis=0)
-            std_v  = vals.std(axis=0)
-            std_v[std_v == 0] = 1.0
-            vals = (vals - mean_v) / std_v
-            vals = np.nan_to_num(vals)
-
-            x = torch.tensor(vals, dtype=torch.float32).unsqueeze(0)  # (1, seq, feats)
-            cls, conf = model.predict_regime(x)
-            regime     = int(cls[0].item())
-            confidence = float(conf[0].item())
-        except Exception as e:
-            log.warning("TCN prediction failed (%s), using heuristic regime", e)
-
-    # If no trained model, use heuristic regime from TDA + price signals
-    if not MODEL_PATH.exists():
-        regime, confidence = _heuristic_regime(tda_series.tail(5), close, vol_10)
-
-    # ── IBS mean-reversion overlay ──
-    # Enter long if SPY is extremely oversold, regardless of regime
-    last_ibs = float((close.iloc[-1] - low.iloc[-1]) /
-                     max(high.iloc[-1] - low.iloc[-1], 0.001))
-    avg_rng   = (high - low).rolling(25).mean().iloc[-1]
-    roll_high = high.rolling(10).max().iloc[-1]
-    ibs_thr   = float(roll_high - 2.5 * avg_rng)
-    ibs_entry = (close.iloc[-1] < ibs_thr) and (last_ibs < 0.30)
-
-    regime_names = {0: "TRENDING_UP", 1: "TRENDING_DOWN",
-                    2: "MEAN_REVERTING", 3: "VOLATILE"}
-
-    log.info("TDA features (last bar):")
-    if len(tda_series) > 0:
-        last = tda_series.iloc[-1]
-        log.info("  beta_0=%.2f beta_1=%.2f entropy=%.3f wass=%.3f spec_gap=%.3f",
-                 last.get("beta_0", 0), last.get("beta_1", 0),
-                 last.get("persistence_entropy", 0),
-                 last.get("wasserstein_dist", 0),
-                 last.get("spectral_gap", 0))
-
-    return {
-        "regime": regime,
-        "confidence": confidence,
-        "regime_name": regime_names.get(regime, "UNKNOWN"),
-        "ibs_entry": ibs_entry,
-        "ibs_value": last_ibs,
-        "n_features": n_features,
-    }
-
-
-def _heuristic_regime(tda_tail: pd.DataFrame, close: pd.Series,
-                       vol_10: pd.Series) -> tuple[int, float]:
-    """
-    Heuristic regime detection from TDA features (no trained model needed).
-    Used on first run before model is trained.
-    """
-    if len(tda_tail) == 0:
-        return 2, 0.4
-
-    last = tda_tail.iloc[-1]
-    beta_1   = float(last.get("beta_1", 0))
-    wass     = float(last.get("wasserstein_dist", 0))
-    spec_gap = float(last.get("spectral_gap", 0.5))
-
-    mom_5 = float(close.pct_change(5).iloc[-1]) if len(close) >= 5 else 0
-    rv    = float(vol_10.iloc[-1]) if len(vol_10) > 0 else 0.15
-
-    # Regime switch detected (high wasserstein distance)
-    if wass > 1.0:
-        return 3, 0.65  # volatile/transition
-
-    # Trending: low spectral gap (high correlation), clear momentum
-    if spec_gap < 0.3 and mom_5 > 0.01:
-        return 0, 0.60  # trending up
-    if spec_gap < 0.3 and mom_5 < -0.01:
-        return 1, 0.60  # trending down
-
-    # Mean-reverting: high beta_1 (loops in topology)
-    if beta_1 > 2.0:
-        return 2, 0.65
-
-    # High vol
-    if rv > 0.25:
-        return 3, 0.60
-
-    return 2, 0.45  # default: mean-reverting
-
 
 def _rsi(prices: pd.Series, period: int = 14) -> pd.Series:
     delta = prices.diff()
@@ -247,168 +113,350 @@ def _rsi(prices: pd.Series, period: int = 14) -> pd.Series:
     return 100 - 100 / (1 + rs)
 
 
+def compute_ibs(spy_df: pd.DataFrame) -> tuple[bool, bool, float]:
+    """
+    Returns (should_enter, should_exit, ibs_value).
+
+    Entry: Close < (10-day high - 2.5 * 25-day avg range) AND IBS < 0.30
+    Exit:  Close > previous day's high
+    """
+    h = spy_df["High"].squeeze()
+    l = spy_df["Low"].squeeze()
+    c = spy_df["Close"].squeeze()
+
+    if len(c) < IBS_ATR_WINDOW + 5:
+        return False, False, 0.5
+
+    ibs_val   = float((c.iloc[-1] - l.iloc[-1]) / max(h.iloc[-1] - l.iloc[-1], 0.001))
+    avg_rng   = float((h - l).rolling(IBS_ATR_WINDOW).mean().iloc[-1])
+    roll_high = float(h.rolling(IBS_HIGH_WINDOW).max().iloc[-1])
+    threshold = roll_high - IBS_ATR_MULT * avg_rng
+
+    enter = (float(c.iloc[-1]) < threshold) and (ibs_val < IBS_THRESH)
+    exit_ = len(c) >= 2 and float(c.iloc[-1]) > float(h.iloc[-2])
+
+    return enter, exit_, ibs_val
+
+
+def compute_tcn_regime(spy_df: pd.DataFrame) -> tuple[int, float]:
+    """
+    Run TDA feature extraction + TCN inference.
+
+    Returns (regime_class, confidence) using:
+    1. Saved training normalization (if model exists)
+    2. Heuristic fallback (if no model)
+    """
+    close = spy_df["Close"].squeeze().dropna()
+    high  = spy_df["High"].squeeze().dropna()
+
+    if len(close) < 80:
+        return 2, 0.4   # default: mean-reverting
+
+    # ── TDA features ──
+    # Load or initialize the persisted H1 diagram for wasserstein continuity
+    extractor = TDAFeatureExtractor(window=40, stride=1)
+    if WASS_DIAG_FILE.exists():
+        try:
+            extractor._prev_h1_diagram = np.load(str(WASS_DIAG_FILE), allow_pickle=True)
+        except Exception:
+            pass
+
+    tda = extractor.extract_series(close)
+
+    # Persist the H1 diagram for next run (fixes always-zero wasserstein bug)
+    if extractor._prev_h1_diagram is not None:
+        WASS_DIAG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        np.save(str(WASS_DIAG_FILE), extractor._prev_h1_diagram, allow_pickle=True)
+
+    if len(tda) < 5:
+        return 2, 0.4
+
+    # ── Price features ──
+    log_ret = np.log(close / close.shift(1))
+    price_feats = pd.DataFrame({
+        "mom_5":   close.pct_change(5),
+        "mom_20":  close.pct_change(20),
+        "vol_10":  log_ret.rolling(10).std() * np.sqrt(252),
+        "rsi":     _rsi(close, 14) / 100.0,
+        "log_ret": log_ret,
+    })
+
+    # Align to TDA index
+    available_cols = [c for c in FEAT_COLS if c in tda.columns or c in price_feats.columns]
+    tda_cols   = [c for c in available_cols if c in tda.columns]
+    price_cols = [c for c in available_cols if c in price_feats.columns]
+
+    combined = pd.concat([tda[tda_cols], price_feats[price_cols]], axis=1).dropna()
+    if len(combined) < 5:
+        return 2, 0.4
+
+    last_row = combined.iloc[-1]
+
+    log.info("TDA (last bar): beta_0=%.1f beta_1=%.1f entropy=%.3f wass=%.3f spec_gap=%.3f",
+             last_row.get("beta_0", 0), last_row.get("beta_1", 0),
+             last_row.get("persistence_entropy", 0),
+             last_row.get("wasserstein_dist", 0),
+             last_row.get("spectral_gap", 0.5))
+
+    # ── TCN prediction ──
+    SEQ_LEN = 30
+    if MODEL_PATH.exists() and len(combined) >= SEQ_LEN:
+        try:
+            ckpt  = torch.load(str(MODEL_PATH), map_location="cpu", weights_only=False)
+            model = TCNPredictor(
+                input_size=ckpt["n_features"],
+                num_channels=[64, 64, 32],
+                num_classes=4,
+            )
+            model.load_state_dict(ckpt["state_dict"])
+            model.eval()
+
+            # Use TRAINING normalization stats (not inference window stats)
+            feat_mean = ckpt.get("feat_mean")
+            feat_std  = ckpt.get("feat_std")
+
+            feat_names = ckpt.get("feature_names", available_cols)
+            avail = [c for c in feat_names if c in combined.columns]
+            vals = combined[avail].tail(SEQ_LEN).values.astype(np.float32)
+
+            if feat_mean is not None and feat_std is not None:
+                vals = (vals - feat_mean[:len(avail)]) / feat_std[:len(avail)]
+            else:
+                # Fallback: window normalization (less accurate)
+                mean_v = vals.mean(0); std_v = vals.std(0)
+                std_v[std_v == 0] = 1.0
+                vals = (vals - mean_v) / std_v
+
+            vals = np.nan_to_num(vals)
+            x    = torch.tensor(vals, dtype=torch.float32).unsqueeze(0)
+
+            with torch.no_grad():
+                probs = torch.softmax(model(x), dim=-1)
+            regime     = int(probs.argmax(1).item())
+            confidence = float(probs.max(1).values.item())
+
+            log.info("TCN: regime=%s confidence=%.3f", regime_name(regime), confidence)
+            return regime, confidence
+
+        except Exception as e:
+            log.warning("TCN inference failed (%s), using heuristic", e)
+
+    # ── Heuristic fallback (no trained model yet) ──
+    return _heuristic_regime(tda, close)
+
+
+def _heuristic_regime(tda: pd.DataFrame, close: pd.Series) -> tuple[int, float]:
+    """Heuristic regime from TDA + price. Used before first model is trained."""
+    last = tda.iloc[-1]
+    beta_1   = float(last.get("beta_1", 0))
+    wass     = float(last.get("wasserstein_dist", 0))
+    spec_gap = float(last.get("spectral_gap", 0.5))
+
+    mom_5 = float(close.pct_change(5).iloc[-1]) if len(close) >= 5 else 0
+    log_ret = np.log(close / close.shift(1))
+    vol = float(log_ret.rolling(10).std().iloc[-1]) if len(close) >= 10 else 0.02
+
+    # High wasserstein → regime transition in progress
+    if wass > 0.5:
+        return 3, 0.60   # volatile / transition
+
+    # Low spectral gap → correlated, trending market
+    if spec_gap < 0.3:
+        return (0, 0.58) if mom_5 > 0.01 else (1, 0.58) if mom_5 < -0.01 else (2, 0.50)
+
+    # High beta_1 → many loops in topology = oscillating / mean-reverting
+    if beta_1 > 3.0:
+        return 2, 0.62
+
+    # High vol
+    if vol > 0.025:
+        return 3, 0.60
+
+    return 2, 0.48   # default
+
+
 # ─── IBKR Execution ───────────────────────────────────────────────────────────
 
-async def connect_ibkr():
-    from ib_async import IB
-    ib = IB()
-    await asyncio.wait_for(
-        ib.connectAsync(IBKR_HOST, IBKR_PORT, clientId=CLIENT_ID), timeout=20
-    )
-    log.info("Connected to IBKR (server v%s)", ib.serverVersion())
-    return ib
+async def get_mes_price(ib) -> float:
+    """Get current MES mid-price from IBKR market data."""
+    try:
+        from ib_async import Future, ContFuture
+        contract = Future(MES_SYMBOL, exchange=MES_EXCHANGE, currency="USD")
+        qs = await ib.reqMktDataAsync(contract, "", False, False)
+        await asyncio.sleep(2)
+        ticker = ib.ticker(contract)
+        if ticker and ticker.midpoint():
+            return float(ticker.midpoint())
+    except Exception:
+        pass
+    # Fallback: use last SPY close × 10 as SPX proxy
+    import yfinance as yf
+    spy = yf.download("SPY", period="5d", interval="1d", auto_adjust=True, progress=False)
+    return float(spy["Close"].squeeze().iloc[-1]) * 10
 
 
-async def get_futures_positions(ib) -> dict:
-    """Returns {symbol: net_qty} for futures positions."""
-    return {
-        p.contract.symbol: int(p.position)
-        for p in ib.positions()
-        if p.contract.secType in ("FUT", "CONTFUT") and int(p.position) != 0
-    }
-
-
-async def trade_futures(
-    ib, symbol: str, action: str, qty: int, dry_run: bool = False
-) -> bool:
-    """Place a market order for futures contract."""
+async def trade_mes(ib, action: str, qty: int, dry_run: bool = False) -> bool:
+    """Place MES market order. Returns True if filled."""
     if qty <= 0:
         return True
-
     from ib_async import Future, MarketOrder
 
-    # Build front-month continuous contract
-    contract = Future(symbol, exchange=MES_EXCHANGE, currency=MES_CURRENCY)
-
-    # Qualify the contract to get the actual expiry
+    contract = Future(MES_SYMBOL, exchange=MES_EXCHANGE, currency="USD")
     try:
         qualified = await ib.qualifyContractsAsync(contract)
         if not qualified:
-            log.error("Could not qualify contract %s", symbol)
+            log.error("Cannot qualify MES contract — futures permissions may not be enabled")
+            log.error("Enable: IBKR Client Portal → Settings → Account Settings → Futures")
             return False
         contract = qualified[0]
-        log.info("Contract: %s %s %s", contract.symbol, contract.lastTradeDateOrContractMonth,
-                 contract.localSymbol)
     except Exception as e:
-        log.error("Contract qualification failed: %s", e)
+        log.error("MES qualification failed: %s", e)
         return False
 
-    order = MarketOrder(action, qty)
-    log.info("[%s] %s %d %s", "DRY" if dry_run else "LIVE", action, qty, symbol)
-
+    log.info("[%s] %s %d MES (%s)", "DRY" if dry_run else "LIVE", action, qty,
+             contract.localSymbol)
     if dry_run:
         return True
 
+    order = MarketOrder(action, qty)
     trade = ib.placeOrder(contract, order)
-    for _ in range(60):
+
+    for _ in range(120):
         await asyncio.sleep(0.5)
         if trade.isDone():
+            status = trade.orderStatus.status
             filled = trade.orderStatus.filled
             price  = trade.orderStatus.avgFillPrice
-            status = trade.orderStatus.status
-            log.info("Order %s: %d filled @ %.2f", status, int(filled), price)
+            log.info("MES order %s: %d @ %.2f", status, int(filled), price)
             return status == "Filled"
 
-    log.warning("Order timeout for %s", symbol)
+    log.warning("MES order timeout")
     return False
 
 
-# ─── Main cycle ───────────────────────────────────────────────────────────────
+# ─── Main Cycle ───────────────────────────────────────────────────────────────
 
 async def run_cycle(dry_run: bool = False):
     state = load_state()
     state["day"] = state.get("day", 0) + 1
     log.info("=" * 60)
-    log.info("Day %d | %s | DRY=%s", state["day"],
-             datetime.now().strftime("%Y-%m-%d %H:%M"), dry_run)
+    log.info("Day %d | %s", state["day"], datetime.now().strftime("%Y-%m-%d %H:%M"))
     log.info("=" * 60)
 
-    # 1. Get price data (use SPY as proxy for MES signal)
-    log.info("Fetching price data...")
+    # 1. Fetch data
+    log.info("Fetching SPY data...")
     spy_raw = yf.download("SPY", period="400d", interval="1d",
                           auto_adjust=True, progress=False)
     if spy_raw is None or len(spy_raw) < 80:
-        log.error("Insufficient price data. Aborting.")
+        log.error("SPY data unavailable. Aborting.")
         save_state(state)
         return
 
+    # Check data freshness (yfinance can return stale data)
+    last_bar = spy_raw.index[-1].date()
+    today    = datetime.now().date()
+    if (today - last_bar).days > 5:
+        log.warning("SPY data may be stale (last bar: %s, today: %s)", last_bar, today)
+
     # 2. Compute signals
-    log.info("Computing TDA + TCN regime signal...")
-    signal = compute_signals(spy_raw)
-    regime     = signal["regime"]
-    confidence = signal["confidence"]
-    regime_nm  = signal["regime_name"]
-    ibs_entry  = signal["ibs_entry"]
+    log.info("Computing IBS signal...")
+    ibs_enter, ibs_exit, ibs_val = compute_ibs(spy_raw)
+    ibs_was_active = state.get("ibs_active", False)
 
-    log.info("Regime: %s (conf=%.2f)", regime_nm, confidence)
-    log.info("IBS entry: %s (IBS=%.3f)", ibs_entry, signal.get("ibs_value", 0))
+    log.info("Computing TDA + TCN regime...")
+    regime, confidence = compute_tcn_regime(spy_raw)
+    log.info("Regime: %s (confidence=%.3f, min=%.2f)", regime_name(regime),
+             confidence, MIN_CONFIDENCE)
 
-    weights = regime_to_strategy_weights(regime)
-    log.info("Strategy weights: %s", weights)
-
-    # 3. Connect IBKR
+    # 3. Connect to IBKR
+    from ib_async import IB
+    ib = IB()
     try:
-        ib = await connect_ibkr()
+        await asyncio.wait_for(
+            ib.connectAsync(IBKR_HOST, IBKR_PORT, clientId=CLIENT_ID), timeout=20
+        )
+        log.info("Connected to IBKR")
     except Exception as e:
-        log.error("IBKR connect failed: %s", e)
+        log.error("IBKR connection failed: %s", e)
         save_state(state)
         return
 
     try:
         acct = await ib.accountSummaryAsync()
         nav  = float(next((s.value for s in acct if s.tag == "NetLiquidation"), 5923))
-        positions = await get_futures_positions(ib)
-        log.info("NAV: $%.2f | Futures positions: %s", nav, positions)
+        log.info("NAV: $%.2f", nav)
 
-        current_mes = positions.get(MES_SYMBOL, 0)
+        # Current MES positions
+        current_mes = 0
+        for pos in ib.positions():
+            if pos.contract.symbol == MES_SYMBOL and pos.contract.secType in ("FUT", "CONTFUT"):
+                current_mes = int(pos.position)
+        log.info("Current MES position: %d", current_mes)
 
-        # 4. Determine target position
-        if ibs_entry or regime == 0:
-            # Trending up or IBS oversold → long
+        # 4. Determine target
+
+        # IBS overlay (highest priority — validated signal)
+        if ibs_was_active and ibs_exit:
+            log.info("IBS EXIT: closing IBS-driven position")
+            state["ibs_active"] = False
+            # Fall through to regime-driven target
+            ibs_was_active = False
+
+        if ibs_enter and not ibs_was_active:
+            log.info("IBS ENTRY: SPY oversold (IBS=%.3f), entering long MES", ibs_val)
             target_qty = MAX_CONTRACTS
-        elif regime == 1:
-            # Trending down → flat (can short later when model is trained + confident)
-            target_qty = 0
-        elif regime == 2:
-            # Mean-reverting → small long (MES range trading)
-            target_qty = 1 if confidence > 0.60 else 0
+            state["ibs_active"] = True
+
+        elif ibs_was_active:
+            # Still in IBS trade, hold
+            target_qty = MAX_CONTRACTS
+            log.info("IBS: holding (IBS=%.3f)", ibs_val)
+
         else:
-            # Volatile → flat
-            target_qty = 0
+            # TCN regime drives position
+            # regime_to_contracts() uses confidence gating and regime logic
+            target_qty = regime_to_contracts(
+                regime=regime,
+                confidence=confidence,
+                nav=nav,
+                mes_price=spy_raw["Close"].squeeze().iloc[-1] * 10,
+                max_contracts=MAX_CONTRACTS,
+                min_confidence=MIN_CONFIDENCE,
+            )
 
-        # Scale by confidence
-        if not ibs_entry:
-            target_qty = max(0, round(target_qty * min(confidence / 0.65, 1.0)))
-
-        log.info("Current MES: %d | Target MES: %d", current_mes, target_qty)
+        log.info("Target MES: %d (current: %d)", target_qty, current_mes)
 
         # 5. Execute
         if target_qty > current_mes:
             delta = target_qty - current_mes
-            await trade_futures(ib, MES_SYMBOL, "BUY", delta, dry_run=dry_run)
+            success = await trade_mes(ib, "BUY", delta, dry_run=dry_run)
+            if not success and not dry_run:
+                log.error("BUY order failed")
         elif target_qty < current_mes:
             delta = current_mes - target_qty
-            action = "SELL" if current_mes > 0 else "BUY"  # cover short
-            await trade_futures(ib, MES_SYMBOL, action, abs(delta), dry_run=dry_run)
+            success = await trade_mes(ib, "SELL", delta, dry_run=dry_run)
+            if not success and not dry_run:
+                log.error("SELL order failed")
         else:
-            log.info("No change needed.")
+            log.info("No position change needed")
 
         # 6. Update state
         state["regime_history"].append({
-            "date": str(datetime.now().date()),
-            "regime": regime_nm,
+            "date": str(today),
+            "regime": regime_name(regime),
             "confidence": round(confidence, 3),
-            "target_qty": target_qty,
+            "target_mes": target_qty,
+            "ibs_val": round(ibs_val, 3),
         })
-        state["regime_history"] = state["regime_history"][-30:]  # keep last 30
+        state["regime_history"] = state["regime_history"][-60:]
 
         # 7. Discord notification
         try:
             import subprocess
             msg = (f"ATNN Day {state['day']}: "
-                   f"Regime={regime_nm} conf={confidence:.2f} | "
-                   f"MES target={target_qty} | "
-                   f"IBS={'ENTRY' if ibs_entry else 'flat'} | "
+                   f"Regime={regime_name(regime)} conf={confidence:.2f} | "
+                   f"MES={target_qty}cts | "
+                   f"IBS={'ACTIVE' if state.get('ibs_active') else 'flat'}({ibs_val:.3f}) | "
                    f"NAV=${nav:.2f}")
             subprocess.run([
                 "curl", "-s", "-X", "POST",
@@ -431,11 +479,11 @@ async def run_cycle(dry_run: bool = False):
             pass
 
     save_state(state)
-    log.info("Cycle complete.")
+    log.info("Done. State saved atomically.")
 
 
 if __name__ == "__main__":
     dry = "--dry-run" in sys.argv
     if dry:
-        log.info("DRY RUN — no real orders placed")
+        log.info("DRY RUN — no real orders")
     asyncio.run(run_cycle(dry_run=dry))

@@ -36,6 +36,7 @@ services:
       - READ_ONLY_API=no
     ports:
       - "4001:4001"
+      - "4003:4003"
     logging:
       driver: "json-file"
       options:

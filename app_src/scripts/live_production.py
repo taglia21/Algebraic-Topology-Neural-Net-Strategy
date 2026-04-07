@@ -129,36 +129,26 @@ def save_state(s: dict):
 
 def get_front_month_contract() -> str:
     """
-    Return the current front-month contract YYYYMM string.
+    Return the front-month MES contract as YYYYMM.
     Rolls 8 days before the 3rd Friday of the expiry month.
+    Iterates current year then next year quarterly months,
+    returning the first one whose roll date has not yet passed.
     """
     today = date.today()
 
     def third_friday(year: int, month: int) -> date:
-        """Find the 3rd Friday of a given month."""
-        first_day = date(year, month, 1)
-        day = first_day
-        fridays = 0
-        while True:
-            if day.weekday() == 4:  # Friday
-                fridays += 1
-                if fridays == 3:
-                    return day
-            day += timedelta(days=1)
+        first = date(year, month, 1)
+        days_to_friday = (4 - first.weekday()) % 7
+        first_friday = first + timedelta(days=days_to_friday)
+        return first_friday + timedelta(weeks=2)
 
-    # Quarterly expiry months
-    expiry_months = [3, 6, 9, 12]
+    for year in [today.year, today.year + 1]:
+        for month in [3, 6, 9, 12]:
+            exp = third_friday(year, month)
+            roll_date = exp - timedelta(days=8)
+            if today <= roll_date:
+                return f"{year}{month:02d}"
 
-    for month in expiry_months:
-        year = today.year
-        if month < today.month:
-            year += 1
-        exp = third_friday(year, month)
-        roll_date = exp - timedelta(days=8)
-        if today < roll_date:
-            return f"{year}{month:02d}"
-        # If we're in the roll window, use next quarter
-    # Wrap around to next year
     return f"{today.year + 1}03"
 
 

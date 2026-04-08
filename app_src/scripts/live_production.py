@@ -305,8 +305,8 @@ def compute_ibs_signal(market_data: dict) -> dict:
     rsi21 = float(100 - 100 / (1 + rs).iloc[-1])
     rsi_oversold = rsi21 < IBS_RSI_THRESH
 
-    # Combined entry: all filters must pass
-    enter = ibs_raw_entry and above_200d and vix_elevated and rsi_oversold
+    # Combined entry: core IBS + trend + vol filters (RSI removed — not in 25-year validated strategy)
+    enter = ibs_raw_entry and above_200d and vix_elevated
 
     # Exit: close > previous day's high
     exit_ = len(close) >= 2 and float(close.iloc[-1]) > float(high.iloc[-2])

@@ -37,6 +37,7 @@ sys.path.insert(0, str(APP_SRC))
 
 from tda.extractor import TDAFeatureExtractor
 from nn.regime_labeler import heuristic_regime, regime_name, HEURISTIC_THRESHOLDS
+from tda.composite_scorer import TDACompositeScorer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -233,6 +234,23 @@ def compute_intraday_signal(bars: pd.DataFrame) -> dict:
         regime, conf = 2, 0.45   # NEUTRAL
         action = "HOLD" if True else "WAIT"
 
+    # Also compute composite score for higher-quality signal
+    try:
+        scorer = TDACompositeScorer(train_window=min(60, len(close)-10), forward_bars=3)
+        composite = scorer.score_live(tda, close)
+        if composite >= 0.60:
+            action = "BUY"
+            regime = 0
+            conf = composite
+        elif composite <= 0.35:
+            action = "EXIT"
+            regime = 1
+            conf = 1.0 - composite
+        else:
+            action = "HOLD" if regime == 0 else "WAIT"
+    except Exception as e:
+        composite = 0.5
+
     return {
         "regime": regime,
         "confidence": conf,
@@ -242,7 +260,8 @@ def compute_intraday_signal(bars: pd.DataFrame) -> dict:
         "mom_5bar": mom_5bar,
         "atr": atr,
         "current_price": float(close.iloc[-1]),
-        "reason": f"sg={sg:.4f}(p25={sg_p25:.4f}) mom={mom_5bar:.5f}",
+        "composite_score": composite,
+        "reason": f"composite={composite:.3f} sg={sg:.4f} mom={mom_5bar:.5f}",
     }
 
 

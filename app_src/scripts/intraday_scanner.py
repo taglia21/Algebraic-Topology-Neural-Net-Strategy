@@ -300,8 +300,11 @@ async def close_intraday(ib, contract, qty: int, reason: str = "") -> float:
     """Market-close an intraday position. Returns fill price."""
     from ib_async import MarketOrder
 
-    # Cancel any open bracket children first
-    ib.reqGlobalCancel()
+    # Cancel only INTRADAY orders (clientId=45). Do NOT reqGlobalCancel
+    # because that kills the daily system's stop-loss orders too.
+    for trade in ib.trades():
+        if not trade.isDone() and trade.order.clientId == CLIENT_ID:
+            ib.cancelOrder(trade.order)
     await asyncio.sleep(0.5)
 
     action = "SELL" if qty > 0 else "BUY"
@@ -390,7 +393,11 @@ async def run_scan(dry_run: bool = False):
         log.info("Signal: %s (regime=%s, %s)", action, regime_name(regime), signal["reason"])
 
         # Check flatten time (3:55 PM ET)
-        if now.time() >= FLATTEN_TIME and state["position"] > 0:
+        # Server runs in UTC. Convert to EDT (UTC-4) for flatten time check.
+    from datetime import timezone
+    edt_offset = timezone(timedelta(hours=-4))
+    now_edt = datetime.now(edt_offset)
+    if now_edt.time() >= FLATTEN_TIME and state["position"] > 0:
             log.info("Flatten time reached (3:55 PM). Closing intraday position.")
             fill = await close_intraday(ib, contract, state["position"], "EOD flatten")
             if fill > 0:

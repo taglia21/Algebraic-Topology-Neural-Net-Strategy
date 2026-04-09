@@ -394,10 +394,10 @@ async def run_scan(dry_run: bool = False):
 
         # Check flatten time (3:55 PM ET)
         # Server runs in UTC. Convert to EDT (UTC-4) for flatten time check.
-    from datetime import timezone
-    edt_offset = timezone(timedelta(hours=-4))
-    now_edt = datetime.now(edt_offset)
-    if now_edt.time() >= FLATTEN_TIME and state["position"] > 0:
+        from datetime import timezone as tz_cls
+        edt_offset = tz_cls(timedelta(hours=-4))
+        now_edt = datetime.now(edt_offset)
+        if now_edt.time() >= FLATTEN_TIME and state["position"] > 0:
             log.info("Flatten time reached (3:55 PM). Closing intraday position.")
             fill = await close_intraday(ib, contract, state["position"], "EOD flatten")
             if fill > 0:

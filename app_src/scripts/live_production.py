@@ -72,7 +72,7 @@ CLIENT_ID  = 40
 MES_SYMBOL   = "MES"
 MES_EXCHANGE = "CME"
 MAX_CONTRACTS = 2
-MIN_CONFIDENCE = 0.55
+MIN_CONFIDENCE = 0.50
 
 # IBS parameters — research-optimised
 IBS_THRESH      = 0.20    # tighter: 78% win rate vs 65% at 0.30
@@ -383,48 +383,28 @@ def compute_regime(market_data: dict, state: dict) -> tuple[int, float]:
     m5  = float(last.get("mom_5", 0))
     vol = float(last.get("vol_10", 0.015))
 
-    # TCN if available, heuristic fallback
-    SEQ_LEN = 30
-    if MODEL_PATH.exists() and len(combined) >= SEQ_LEN:
-        try:
-            ckpt  = torch.load(str(MODEL_PATH), map_location="cpu", weights_only=False)
-            model = TCNPredictor(
-                input_size=ckpt["n_features"],
-                num_channels=ckpt.get("num_channels", [16, 16, 8]),
-                num_classes=4,
-            )
-            model.load_state_dict(ckpt["state_dict"])
-            model.eval()
+    # Use TDA features DIRECTLY for regime detection (Gidea & Katz 2018).
+    # TCN model achieved only 29% balanced accuracy (barely above 25% random).
+    # Direct TDA heuristic uses calibrated percentile thresholds on:
+    #   spectral_gap < p25 = trending (high correlation)
+    #   beta_1 > median   = mean-reverting (loops in topology)
+    #   wasserstein > p90  = regime transition (reduce exposure)
+    regime, conf = heuristic_regime(sg, b1, w, m5, vol)
 
-            feat_names = ckpt.get("feature_names", feat_cols)
-            avail  = [c for c in feat_names if c in combined.columns]
-            vals   = combined[avail].tail(SEQ_LEN).values.astype(np.float32)
-            f_mean = ckpt.get("feat_mean")
-            f_std  = ckpt.get("feat_std")
-            if f_mean is not None:
-                vals = (vals - f_mean[:len(avail)]) / f_std[:len(avail)]
-            vals = np.nan_to_num(vals)
-            x = torch.tensor(vals, dtype=torch.float32).unsqueeze(0)
+    # 3-bar smoothing
+    state.setdefault("recent_regimes", [])
+    state["recent_regimes"].append(regime)
+    state["recent_regimes"] = state["recent_regimes"][-3:]
+    if len(state["recent_regimes"]) >= 2:
+        from collections import Counter
+        smoothed = Counter(state["recent_regimes"]).most_common(1)[0][0]
+        if smoothed != regime:
+            log.info("Regime smoothed: %s -> %s", regime_name(regime), regime_name(smoothed))
+            regime = smoothed
 
-            with torch.no_grad():
-                probs = torch.softmax(model(x), dim=-1)
-            regime = int(probs.argmax(1).item())
-            conf   = float(probs.max(1).values.item())
-
-            # 3-bar smoothing
-            state.setdefault("recent_regimes", [])
-            state["recent_regimes"].append(regime)
-            state["recent_regimes"] = state["recent_regimes"][-3:]
-            from collections import Counter
-            if len(state["recent_regimes"]) >= 2:
-                regime = Counter(state["recent_regimes"]).most_common(1)[0][0]
-
-            log.info("TCN regime: %s (conf=%.3f)", regime_name(regime), conf)
-            return regime, conf
-        except Exception as e:
-            log.warning("TCN failed (%s), using heuristic", e)
-
-    return heuristic_regime(sg, b1, w, m5, vol)
+    log.info("TDA regime: %s (conf=%.3f) sg=%.4f b1=%.1f wd=%.4f",
+             regime_name(regime), conf, sg, b1, w)
+    return regime, conf
 
 
 # ─── IBKR Execution ───────────────────────────────────────────────────────────
@@ -591,7 +571,46 @@ async def morning_cycle(dry_run: bool = False):
                 await close_position(ib, contract, current_mes, "regime exit")
                 state["positions"][MES_SYMBOL] = 0
 
-        # 9. Update NAV in state
+        # 9. Regime-driven ENTRY (TDA says trending → go long MES)
+        current_mes = state.get("positions", {}).get(MES_SYMBOL, 0)
+        if not state.get("ibs_active") and current_mes == 0 and not cb.should_halt():
+            from nn.regime_labeler import regime_to_contracts
+            target_qty = regime_to_contracts(
+                regime=regime, confidence=conf, nav=nav,
+                mes_price=float(market_data["spy"]["Close"].squeeze().iloc[-1]) * 10,
+                max_contracts=cb.max_contracts(MAX_CONTRACTS),
+                min_confidence=MIN_CONFIDENCE,
+            )
+            if target_qty > 0:
+                contract = await get_mes_contract(ib)
+                if contract and not dry_run:
+                    # Place bracket order: entry + stop + target
+                    spy_close = float(market_data["spy"]["Close"].squeeze().iloc[-1])
+                    atr14 = float((market_data["spy"]["Close"].squeeze() -
+                                   market_data["spy"]["Close"].squeeze().shift(1)).abs().rolling(14).mean().iloc[-1])
+                    entry_spx = spy_close * 10
+                    stop_pts  = IBS_STOP_MULT * atr14 * 10  # ATR in SPX points
+                    target_pts = stop_pts * 2.0              # 2:1 reward/risk
+
+                    success = await place_bracket_order(
+                        ib, contract, "BUY", target_qty,
+                        stop_pts, target_pts, entry_spx,
+                    )
+                    if success:
+                        state.setdefault("positions", {})[MES_SYMBOL] = target_qty
+                        state["last_entry_price"] = entry_spx
+                        discord_notify(
+                            f"TDA ENTRY: {target_qty} MES (regime={regime_name(regime)}, "
+                            f"conf={conf:.2f}, sg={float(tda.iloc[-1].get('spectral_gap',0)):.4f}). "
+                            f"Stop={entry_spx-stop_pts:.0f} Target={entry_spx+target_pts:.0f}"
+                        )
+                        log.info("REGIME ENTRY: %d MES @ ~%.0f", target_qty, entry_spx)
+                elif contract and dry_run:
+                    log.info("[DRY] Would BUY %d MES (regime=%s conf=%.2f)",
+                             target_qty, regime_name(regime), conf)
+                    discord_notify(f"[DRY] TDA would enter {target_qty} MES ({regime_name(regime)} conf={conf:.2f})")
+
+        # 10. Update NAV in state
         state["nav_at_open"] = nav
 
         msg = (f"Morning: NAV=${nav:.2f} | Regime={regime_name(regime)}({conf:.2f}) | "

@@ -109,7 +109,7 @@ def regime_to_contracts(
 
     if regime not in (0,):  # Only go long on TRENDING_UP for now (validated edge)
         # Mean-reverting: only at very high confidence AND with IBS confirmation
-        if regime == 2 and confidence > 0.75:
+        if regime == 2 and confidence > 0.55:
             return 1
         return 0
 
@@ -142,11 +142,11 @@ def regime_name(regime: int) -> str:
 # beta_1:       mean=0.17, max=2.00
 # wasserstein:  mean=0.12, max=0.46
 HEURISTIC_THRESHOLDS = {
-    "spec_gap_trending_below": 0.043,    # bottom 25%: high correlation → trending
+    "spec_gap_trending_below": 0.08,     # bottom ~35%: high correlation → trending
     "spec_gap_reverting_above": 0.218,   # top 25%: decorrelated → mean-reverting
     "beta_1_reverting_above": 0.50,      # above median loops → mean-reverting
     "wass_volatile_above": 0.35,         # top ~10%: regime transition → volatile
-    "vol_volatile_above": 0.020,         # daily vol > 2% → volatile
+    "vol_volatile_above": 0.30,         # daily vol > 2% → volatile
 }
 
 

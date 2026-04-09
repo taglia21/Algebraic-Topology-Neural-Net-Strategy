@@ -435,14 +435,15 @@ async def place_bracket_order(ib, contract, action: str, qty: int,
         parent.transmit  = False     # don't transmit until children are linked
 
         # Stop loss
-        stop_price = round(entry_price - stop_pts, 2)
+        # MES tick size = 0.25 points. IBKR rejects non-tick-aligned prices.
+        stop_price = round((entry_price - stop_pts) * 4) / 4  # round to 0.25
         stop = StopOrder(close_action, qty, stop_price)
         stop.orderId  = stop_id
         stop.parentId = entry_id
         stop.transmit = False
 
         # Take profit
-        tp_price = round(entry_price + target_pts, 2)
+        tp_price = round((entry_price + target_pts) * 4) / 4  # round to 0.25
         tp = LimitOrder(close_action, qty, tp_price)
         tp.orderId  = target_id
         tp.parentId = entry_id
@@ -588,7 +589,7 @@ async def morning_cycle(dry_run: bool = False):
                     spy_close = float(market_data["spy"]["Close"].squeeze().iloc[-1])
                     atr14 = float((market_data["spy"]["Close"].squeeze() -
                                    market_data["spy"]["Close"].squeeze().shift(1)).abs().rolling(14).mean().iloc[-1])
-                    entry_spx = spy_close * 10
+                    entry_spx = round(spy_close * 10 * 4) / 4  # round to MES tick
                     stop_pts  = IBS_STOP_MULT * atr14 * 10  # ATR in SPX points
                     target_pts = stop_pts * 2.0              # 2:1 reward/risk
 
@@ -601,7 +602,7 @@ async def morning_cycle(dry_run: bool = False):
                         state["last_entry_price"] = entry_spx
                         discord_notify(
                             f"TDA ENTRY: {target_qty} MES (regime={regime_name(regime)}, "
-                            f"conf={conf:.2f}, sg={float(tda.iloc[-1].get('spectral_gap',0)):.4f}). "
+                            f"conf={conf:.2f}, sg={sg:.4f('spectral_gap',0)):.4f}). "
                             f"Stop={entry_spx-stop_pts:.0f} Target={entry_spx+target_pts:.0f}"
                         )
                         log.info("REGIME ENTRY: %d MES @ ~%.0f", target_qty, entry_spx)

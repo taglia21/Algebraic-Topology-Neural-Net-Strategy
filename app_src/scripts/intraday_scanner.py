@@ -379,10 +379,18 @@ async def run_scan(dry_run: bool = False):
     # Connect to IBKR
     from ib_async import IB
     ib = IB()
-    try:
-        await asyncio.wait_for(ib.connectAsync(IBKR_HOST, IBKR_PORT, clientId=CLIENT_ID), 15)
-    except Exception as e:
-        log.error("Connect failed: %s", e)
+    connected = False
+    for attempt in range(3):
+        try:
+            await asyncio.wait_for(ib.connectAsync(IBKR_HOST, IBKR_PORT, clientId=CLIENT_ID), 15)
+            connected = True
+            break
+        except Exception as e:
+            log.warning("Connect attempt %d/3 failed: %s", attempt+1, e)
+            if attempt < 2:
+                await asyncio.sleep(10)
+    if not connected:
+        log.error("All 3 connection attempts failed. Skipping this scan.")
         save_state(state)
         return
 

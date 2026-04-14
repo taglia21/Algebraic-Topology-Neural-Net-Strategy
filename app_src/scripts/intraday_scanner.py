@@ -59,7 +59,7 @@ MAX_INTRADAY_CONTRACTS = 1
 INTRADAY_ATR_STOP_MULT = 1.5    # tighter than daily (2.0)
 INTRADAY_TARGET_MULT   = 2.0    # 2:1 R:R
 INTRADAY_LOSS_LIMIT    = 0.01   # 1% daily intraday loss limit
-FLATTEN_TIME           = dtime(15, 55)  # 3:55 PM ET — flatten before close
+FLATTEN_TIME           = dtime(15, 45)  # flatten before IBS close check at 3:50  # 3:55 PM ET — flatten before close
 
 TDA_WINDOW = 40   # 40 bars × 5 min = 200 minutes = 3.3 hours
 TDA_MIN_BARS = 30  # need at least 30 bars to compute meaningful TDA
@@ -164,7 +164,7 @@ async def get_5min_bars(ib, contract, duration: str = "1 D") -> pd.DataFrame:
     """Pull 5-minute bars from IBKR."""
     bars = await ib.reqHistoricalDataAsync(
         contract, endDateTime="", durationStr=duration,
-        barSizeSetting="5 mins", whatToShow="TRADES",
+        barSizeSetting="5 mins", whatToShow="TRADES",  # 2 days = yesterday + today
         useRTH=True, formatDate=1
     )
     if not bars:
@@ -403,7 +403,7 @@ async def run_scan(dry_run: bool = False):
             return
 
         # Get 5-min bars
-        bars = await get_5min_bars(ib, contract, "1 D")
+        bars = await get_5min_bars(ib, contract, "2 D")
         if len(bars) < TDA_MIN_BARS:
             log.info("Only %d bars available (need %d). Waiting.", len(bars), TDA_MIN_BARS)
             ib.disconnect()

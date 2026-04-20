@@ -46,3 +46,4 @@ backtest_results*.json
 
 # pytest cache
 .pytest_cache/
+new_live_loop.py

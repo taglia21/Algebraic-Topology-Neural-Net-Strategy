@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  atnn-bot:
+    build: .
+    container_name: atnn-bot
+    restart: unless-stopped
+    environment:
+      - IBKR_HOST=ib-gateway
+      - IBKR_PORT=4003
+      - IBKR_ACCOUNT=U22452226
+      - SYSTEM_MODE=live
+    volumes:
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      ib-gateway:
+        condition: service_started
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: ib-gateway
+    restart: unless-stopped
+    environment:
+      - TWS_USERID=${TWS_USERID}
+      - TWS_PASSWORD=${TWS_PASSWORD}
+      - TRADING_MODE=live
+      - TWS_ACCEPT_INCOMING=accept
+      - READ_ONLY_API=no
+    ports:
+      - "4001:4001"
+      - "4003:4003"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"

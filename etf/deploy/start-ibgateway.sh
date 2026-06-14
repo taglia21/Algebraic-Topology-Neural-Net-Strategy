@@ -68,15 +68,25 @@ trap cleanup EXIT INT TERM
 sleep 2
 
 # --- 3. Ensure IBC can find the Gateway install -----------------------------
-# IBC looks for the Gateway jars at  $TWS_PATH/$TWS_MAJOR_VRSN/jars.  The
-# installer lays the Gateway down directly in $IBGW_DIR (jars at $IBGW_DIR/jars),
-# so expose it under the version-named path IBC expects via a sibling symlink.
-# This works for ANY installed version and needs no reinstall.
-GW_PARENT="$(dirname "$IBGW_DIR")"            # e.g. /root/Jts
-GW_VERSIONED="${GW_PARENT}/${TWS_MAJOR_VRSN}" # e.g. /root/Jts/1045
+# IBC (for Gateway) expects the install under  <tws-path>/ibgateway/<version>/
+# and, finding jars there, uses ibgateway.vmoptions from the SAME folder. The
+# IBKR installer laid the files down flat in <tws-path>/ibgateway/ (jars and
+# ibgateway.vmoptions directly inside), so expose that flat install under the
+# version-named subfolder IBC expects. Linking at ibgateway/<version> (NOT
+# <tws-path>/<version>) is what makes IBC pick ibgateway.vmoptions instead of
+# tws.vmoptions. Works for any version; no reinstall needed.
+GW_PARENT="$(dirname "$IBGW_DIR")"            # e.g. /root/Jts  (IBC --tws-path)
+GW_VERSIONED="${IBGW_DIR}/${TWS_MAJOR_VRSN}"  # e.g. /root/Jts/ibgateway/1045
 if [ -d "${IBGW_DIR}/jars" ] && [ ! -e "${GW_VERSIONED}/jars" ]; then
-    echo "[start-ibgateway] Linking ${GW_VERSIONED} -> ${IBGW_DIR} (so IBC finds jars)"
+    echo "[start-ibgateway] Linking ${GW_VERSIONED} -> ${IBGW_DIR} (so IBC finds jars + vmoptions)"
     ln -sfn "${IBGW_DIR}" "${GW_VERSIONED}"
+fi
+# Clean up a stale link from an earlier layout attempt (<tws-path>/<version>),
+# which made IBC fall back to the TWS path and look for tws.vmoptions.
+STALE_VERSIONED="${GW_PARENT}/${TWS_MAJOR_VRSN}"
+if [ -L "${STALE_VERSIONED}" ]; then
+    echo "[start-ibgateway] Removing stale link ${STALE_VERSIONED}"
+    rm -f "${STALE_VERSIONED}"
 fi
 
 # --- 4. Launch IB Gateway under IBC -----------------------------------------
@@ -87,7 +97,7 @@ export TWS_SETTINGS_PATH="$TWS_SETTINGS_DIR"
 export IBC_PATH="$IBC_DIR"
 
 # IBC's gateway start script. --gateway selects Gateway (not full TWS).
-# --tws-path is the PARENT that contains the version-named folder above.
+# --tws-path is the PARENT that contains the ibgateway/<version> folder above.
 exec "${IBC_DIR}/scripts/ibcstart.sh" "${TWS_MAJOR_VRSN}" \
     --gateway \
     "--mode=${IBKR_TRADING_MODE}" \

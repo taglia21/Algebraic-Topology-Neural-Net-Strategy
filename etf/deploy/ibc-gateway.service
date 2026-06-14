@@ -1,0 +1,30 @@
+[Unit]
+Description=IB Gateway (headless, paper) under IBC + Xvfb for the ETF engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/etf-engine
+
+# Credentials + IBC settings come from the root-only env file (chmod 600).
+EnvironmentFile=/root/etf-engine/etf-engine.env
+Environment=PYTHONUNBUFFERED=1
+
+# Renders the IBC config, starts Xvfb, and launches Gateway under IBC.
+ExecStart=/root/etf-engine/etf/deploy/start-ibgateway.sh
+
+# IBKR forces a soft restart daily (configured via IBC AutoRestartTime); if the
+# process ever dies entirely, bring it straight back.
+Restart=always
+RestartSec=30
+
+StandardOutput=journal
+StandardError=journal
+
+# Gateway (Java + JRE) needs headroom; ~1.2G is comfortable on a 4G droplet.
+MemoryMax=1500M
+
+[Install]
+WantedBy=multi-user.target

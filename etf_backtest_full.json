@@ -1,0 +1,63 @@
+{
+  "metrics": {
+    "total_return": 2.6052509589654558,
+    "cagr": 0.06833348582472598,
+    "annual_volatility": 0.10487884687604042,
+    "sharpe": 0.3968559207991227,
+    "sortino": 0.4853268968738983,
+    "max_drawdown": -0.17861750067824744,
+    "calmar": 0.3825688164107641,
+    "win_rate": 0.5459194109224791,
+    "profit_factor": 1.1329113503487716,
+    "var_95": -0.010481423191725181,
+    "cvar_95": -0.016279045209632893,
+    "avg_gross_exposure": 0.7456735293184528,
+    "turnover_annual": 5.485150889454259,
+    "alpha": 0.04147144465829652,
+    "beta": 0.2472890764464602,
+    "n_periods": 4889
+  },
+  "benchmark": {
+    "total_return": 6.318393378779871,
+    "cagr": 0.10804064169273064,
+    "annual_volatility": 0.19645646608524242,
+    "sharpe": 0.46790767244758635,
+    "sortino": 0.5714633177048754,
+    "max_drawdown": -0.5518944851202507,
+    "calmar": 0.19576322033584004,
+    "win_rate": 0.5512374718756392,
+    "profit_factor": 1.1297293901350562,
+    "var_95": -0.018333127652997924,
+    "cvar_95": -0.030193302335573553,
+    "avg_gross_exposure": 0.0,
+    "turnover_annual": 0.0,
+    "alpha": 0.0,
+    "beta": 0.0,
+    "n_periods": 4889
+  },
+  "config": {
+    "universe": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "EFA",
+      "EEM",
+      "XLK",
+      "XLF",
+      "XLE",
+      "XLV",
+      "XLI",
+      "TLT",
+      "IEF",
+      "LQD",
+      "GLD",
+      "DBC"
+    ],
+    "target_vol": 0.1,
+    "top_k": 5,
+    "rebalance_every": 21
+  },
+  "rebalances": 221,
+  "start": "2007-01-03",
+  "end": "2026-06-10"
+}

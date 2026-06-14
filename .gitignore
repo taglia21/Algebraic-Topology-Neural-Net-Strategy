@@ -24,6 +24,15 @@ env/
 .env
 .env.local
 
+# Live credentials / runtime secrets (NEVER commit) — only the *.example template
+# is tracked. The droplet writes the real etf-engine.env inside the repo dir.
+etf-engine.env
+vrp-engine.env
+*.env
+!*.env.example
+# IBC renders this from the template with real credentials at service start.
+config.runtime.ini
+
 # Logs (keep structure, ignore contents)
 logs/*.jsonl
 logs/*.log
@@ -40,6 +49,10 @@ Thumbs.db
 data/cache/
 *.parquet
 *.h5
+
+# ETF engine runtime state / telemetry / cache (machine-local; never commit)
+.etf_telemetry/
+.etf_cache/
 
 # Backtest result snapshots
 backtest_results*.json

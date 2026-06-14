@@ -7,16 +7,28 @@ import os
 import sys
 import traceback
 
-# Make sure we run from the project root
-project_root = "/home/user/workspace/Algebraic-Topology-Neural-Net-Strategy"
+# Make sure we run from the project root. Derive it from THIS file's location
+# (tests/ -> project root) so the script is portable across machines/CI and can
+# never break pytest collection with a hardcoded absolute path.
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(project_root)
 sys.path.insert(0, project_root)
+
+# Detect whether we are being imported by pytest. When pytest collects this
+# module it discovers and runs the ``test_*`` functions itself, so the inline
+# ``check(...)`` calls must NOT eagerly execute them at import time (that ran the
+# legacy validation as a side effect of collection and called ``sys.exit`` at the
+# end, which aborted the entire test session). Under pytest, ``check`` is a no-op
+# registrar; as a standalone script it runs the validation exactly as before.
+_UNDER_PYTEST = "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
 
 PASS = "PASS"
 FAIL = "FAIL"
 results = []
 
 def check(name, fn):
+    if _UNDER_PYTEST:
+        return  # pytest runs the test_* functions directly
     try:
         fn()
         results.append((PASS, name))
@@ -668,16 +680,17 @@ check("Full pipeline: regime → signal → risk approval → order log", test_f
 # ----------------------------------------------------------------
 # Summary
 # ----------------------------------------------------------------
-print("\n" + "="*60)
-passed = sum(1 for r in results if r[0] == PASS)
-failed = sum(1 for r in results if r[0] == FAIL)
-print(f"  Results: {passed} passed / {failed} failed / {len(results)} total")
-if failed:
-    print("\n  FAILED checks:")
-    for status, name in results:
-        if status == FAIL:
-            print(f"    - {name}")
-print("="*60 + "\n")
+if not _UNDER_PYTEST:
+    print("\n" + "="*60)
+    passed = sum(1 for r in results if r[0] == PASS)
+    failed = sum(1 for r in results if r[0] == FAIL)
+    print(f"  Results: {passed} passed / {failed} failed / {len(results)} total")
+    if failed:
+        print("\n  FAILED checks:")
+        for status, name in results:
+            if status == FAIL:
+                print(f"    - {name}")
+    print("="*60 + "\n")
 
-if failed:
-    sys.exit(1)
+    if failed:
+        sys.exit(1)

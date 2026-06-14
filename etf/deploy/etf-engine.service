@@ -1,0 +1,33 @@
+[Unit]
+Description=ETF Tactical-Allocation Engine — Systematic Multi-Sleeve ETF Trading
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/etf-engine
+
+# Market-hours-aware runner. It wakes on a back-off schedule, trades exactly one
+# rebalance cycle only when today is a rebalance day inside the execution window
+# with the cadence elapsed, and otherwise sleeps. --execute makes it submit live
+# (paper) orders; omit --execute for a dry-run shadow loop. Add --live ONLY after
+# >= 20 paper trading days clear the promotion gate (and then also pass
+# --i-understand-the-risk).
+ExecStart=/usr/bin/python3 -m etf.main --mode run --execute
+
+Restart=always
+RestartSec=60
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/root/etf-engine/etf-engine.env
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

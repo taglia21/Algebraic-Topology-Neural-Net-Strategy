@@ -1,0 +1,57 @@
+# ============================================================================
+# IBC configuration TEMPLATE for headless IB Gateway (PAPER trading).
+# ============================================================================
+# This file is a TEMPLATE. Do NOT put real credentials here — they live in
+# /root/etf-engine/etf-engine.env (root-only). At service start,
+# start-ibgateway.sh renders this template into a runtime config (chmod 600)
+# with the __PLACEHOLDER__ values substituted from the environment.
+#
+# IBC (IbcAlpha/IBC) automates Gateway login, dismisses dialogs, and triggers
+# IBKR's daily soft-restart so the session stays alive 24/7 without a human.
+# Reference: https://github.com/IbcAlpha/IBC
+# ============================================================================
+
+# --- Credentials (substituted at runtime from the env file) ------------------
+LoginId=__IBKR_USERNAME__
+Password=__IBKR_PASSWORD__
+
+# Paper trading. NEVER set this to 'live' until the promotion gate is cleared.
+TradingMode=__IBKR_TRADING_MODE__
+
+# --- Session / restart behaviour --------------------------------------------
+# Soft daily restart at a pre-market time (machine-local time; setup-droplet.sh
+# sets the droplet timezone to America/New_York). A soft restart keeps the API
+# session and does NOT require re-entering credentials or 2FA.
+AutoRestartTime=__IBC_RESTART_TIME__
+
+# Do NOT let Gateway auto-close itself; IBC manages the lifecycle.
+IbAutoClosedown=no
+ClosedownAt=
+
+# If a session for this user already exists, take it over (single-session model).
+ExistingSessionDetectedAction=primary
+
+# Reconnect handling.
+ReloginAfterSecondFactorAuthenticationTimeout=yes
+SecondFactorAuthenticationExitInterval=
+
+# --- API settings (so the ETF engine can connect & trade) -------------------
+# Force the API socket port. 4002 = Gateway paper, 4001 = Gateway live.
+OverrideTwsApiPort=__IBKR_PORT__
+# Auto-accept the incoming API connection dialog (no human to click it).
+AcceptIncomingConnectionAction=accept
+# The engine MUST place orders -> read-only API off. (preflight uses readonly
+# at the connection level itself, so this stays 'no'.)
+ReadOnlyApi=no
+# Allow API orders without the "blind trading" precautionary block.
+AllowBlindTrading=yes
+
+# --- Dialog auto-dismissal (headless: nobody to click "OK") -----------------
+AcceptNonBrokerageAccountWarning=yes
+DismissPasswordExpiryWarning=yes
+DismissNSEComplianceNotice=yes
+SuppressInfoMessages=yes
+
+# --- Window / settings persistence ------------------------------------------
+MinimizeMainWindow=yes
+StoreSettingsOnServer=no

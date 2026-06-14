@@ -67,7 +67,19 @@ trap cleanup EXIT INT TERM
 # Give Xvfb a moment to come up.
 sleep 2
 
-# --- 3. Launch IB Gateway under IBC -----------------------------------------
+# --- 3. Ensure IBC can find the Gateway install -----------------------------
+# IBC looks for the Gateway jars at  $TWS_PATH/$TWS_MAJOR_VRSN/jars.  The
+# installer lays the Gateway down directly in $IBGW_DIR (jars at $IBGW_DIR/jars),
+# so expose it under the version-named path IBC expects via a sibling symlink.
+# This works for ANY installed version and needs no reinstall.
+GW_PARENT="$(dirname "$IBGW_DIR")"            # e.g. /root/Jts
+GW_VERSIONED="${GW_PARENT}/${TWS_MAJOR_VRSN}" # e.g. /root/Jts/1045
+if [ -d "${IBGW_DIR}/jars" ] && [ ! -e "${GW_VERSIONED}/jars" ]; then
+    echo "[start-ibgateway] Linking ${GW_VERSIONED} -> ${IBGW_DIR} (so IBC finds jars)"
+    ln -sfn "${IBGW_DIR}" "${GW_VERSIONED}"
+fi
+
+# --- 4. Launch IB Gateway under IBC -----------------------------------------
 echo "[start-ibgateway] Launching IB Gateway (mode=${IBKR_TRADING_MODE}, port=${IBKR_PORT})"
 export TWS_MAJOR_VRSN
 export IBC_INI="$RUNTIME_CONFIG"
@@ -75,10 +87,11 @@ export TWS_SETTINGS_PATH="$TWS_SETTINGS_DIR"
 export IBC_PATH="$IBC_DIR"
 
 # IBC's gateway start script. --gateway selects Gateway (not full TWS).
+# --tws-path is the PARENT that contains the version-named folder above.
 exec "${IBC_DIR}/scripts/ibcstart.sh" "${TWS_MAJOR_VRSN}" \
     --gateway \
     "--mode=${IBKR_TRADING_MODE}" \
     "--ibc-ini=${RUNTIME_CONFIG}" \
     "--ibc-path=${IBC_DIR}" \
-    "--tws-path=${IBGW_DIR}" \
+    "--tws-path=${GW_PARENT}" \
     "--tws-settings-path=${TWS_SETTINGS_DIR}"

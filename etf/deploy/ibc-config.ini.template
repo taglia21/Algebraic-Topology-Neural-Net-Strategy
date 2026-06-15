@@ -12,8 +12,11 @@
 # ============================================================================
 
 # --- Credentials (substituted at runtime from the env file) ------------------
-LoginId=__IBKR_USERNAME__
-Password=__IBKR_PASSWORD__
+# IBC reads these EXACT keys (IbLoginId / IbPassword). Any other names (e.g.
+# LoginId / Password) are silently ignored, IBC then logs in with empty
+# credentials and hangs forever on a disabled Login button.
+IbLoginId=__IBKR_USERNAME__
+IbPassword=__IBKR_PASSWORD__
 
 # Paper trading. NEVER set this to 'live' until the promotion gate is cleared.
 TradingMode=__IBKR_TRADING_MODE__

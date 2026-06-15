@@ -262,16 +262,31 @@ class IBKRETFBroker:
         if not self.is_connected:
             return None
         try:
-            # Use the ASYNC request variants to populate ib_async's caches. The
-            # synchronous accountSummary()/positions() wrappers internally call
-            # ib.run(...) when their cache is empty, which raises "This event loop
-            # is already running" from inside our running async loop and yields no
-            # account data. Awaiting the *Async() forms avoids re-entering the loop.
-            summary_rows = await self._ib.reqAccountSummaryAsync()
+            # Use the high-level ASYNC variants to avoid re-entering the running
+            # event loop. NOTE: ib.reqAccountSummaryAsync() only *starts* the
+            # subscription and resolves to an empty list — the parsed rows live in
+            # ib_async's cache. ib.accountSummaryAsync() both triggers the request
+            # (on demand) AND returns the parsed list, so we use that here.
+            summary_rows = await self._ib.accountSummaryAsync()
             summary = {row.tag: row.value for row in summary_rows}
             equity = float(summary.get("NetLiquidation", 0.0) or 0.0)
             cash = float(summary.get("TotalCashValue", 0.0) or 0.0)
             bp = float(summary.get("BuyingPower", 0.0) or 0.0)
+
+            # Fallback: if the summary is empty (timing/edge cases), derive the
+            # core balances from the account-update stream IBKR pushes during the
+            # initial sync on connect. Only consider USD/base-currency rows.
+            if equity <= 0:
+                for v in self._ib.accountValues():
+                    if v.currency not in ("", "USD", "BASE"):
+                        continue
+                    if v.tag == "NetLiquidation":
+                        equity = float(v.value or 0.0)
+                    elif v.tag == "TotalCashValue":
+                        cash = float(v.value or 0.0)
+                    elif v.tag == "BuyingPower":
+                        bp = float(v.value or 0.0)
+
             positions: Dict[str, float] = {}
             for p in await self._ib.reqPositionsAsync():
                 sym = getattr(p.contract, "symbol", None)

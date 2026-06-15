@@ -237,26 +237,50 @@ class IBKRETFBroker:
         await self._ib.qualifyContractsAsync(contract)
         return contract
 
-    async def get_price(self, symbol: str) -> Optional[float]:
+    async def get_price(self, symbol: str, price_timeout: float = 10.0) -> Optional[float]:
         """Last/mid price for an ETF. Fail-safe returns None on any issue.
 
         Handles both real-time and delayed market data: under delayed data
         (``market_data_type`` 3/4) IBKR populates ``delayedLast``/``delayedBid``/
         ``delayedAsk``/``delayedClose`` instead of the real-time fields, so we
         probe both. Mid (bid/ask) is preferred over last for a tighter mark.
+
+        Polls for a valid quote up to ``price_timeout`` seconds rather than using
+        a single fixed wait: the FIRST snapshot after a quiet period (especially
+        under delayed data) can take several seconds to populate, so a fixed
+        short sleep intermittently yields ``None`` and trips the rebalance
+        fail-safe. Returning as soon as a price appears keeps latency low while
+        tolerating slow first ticks.
         """
         if not self.is_connected:
             return None
+        import time as _time
+        contract = None
         try:
             contract = await self._qualify(symbol)
             ticker = self._ib.reqMktData(contract, "", False, False)
-            await asyncio.sleep(1.5)  # allow a snapshot to populate
-            price = _extract_price(ticker)
-            self._ib.cancelMktData(contract)
+            price = None
+            deadline = _time.monotonic() + max(2.0, price_timeout)
+            while _time.monotonic() < deadline:
+                await self._ib.sleep(0.25)  # process IBKR ticks while waiting
+                price = _extract_price(ticker)
+                if price is not None and price > 0:
+                    break
+            if price is None or price <= 0:
+                logger.warning(
+                    "No price for %s after %.1fs (market-data slow or no "
+                    "subscription/permission).", symbol, price_timeout,
+                )
             return price
         except Exception as exc:
             logger.error("Price fetch failed for %s: %s", symbol, exc)
             return None
+        finally:
+            if contract is not None:
+                try:
+                    self._ib.cancelMktData(contract)
+                except Exception:  # pragma: no cover - defensive
+                    pass
 
     async def get_account(self) -> Optional[AccountSnapshot]:
         if not self.is_connected:

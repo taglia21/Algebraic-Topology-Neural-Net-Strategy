@@ -565,6 +565,18 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
 
         result = await broker.rebalance_to_weights(target, cfg)
         logger.info("Rebalance result: %s", result)
+        # A fail-safe abort (e.g. a missing live price) means NO orders were
+        # submitted. Return non-zero so the scheduler does NOT advance the
+        # rebalance cadence — otherwise an aborted attempt is mistaken for a
+        # completed rebalance and the bot would wait a full cadence before
+        # retrying. Returning here also skips the post-trade slippage/recon
+        # steps, which are meaningless when nothing traded.
+        if result.get("_status") == "aborted_failsafe":
+            logger.warning(
+                "Rebalance aborted by fail-safe (incomplete data); cadence NOT "
+                "advanced — will retry next cycle."
+            )
+            return 4
         # Give submitted orders time to fill before measuring/reconciling — else
         # positions haven't updated yet and reconciliation flags a spurious
         # mismatch that would block the next cycle. No-op in dry-run.

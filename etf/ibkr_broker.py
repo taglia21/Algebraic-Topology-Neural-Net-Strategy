@@ -262,12 +262,18 @@ class IBKRETFBroker:
         if not self.is_connected:
             return None
         try:
-            summary = {row.tag: row.value for row in self._ib.accountSummary()}
+            # Use the ASYNC request variants to populate ib_async's caches. The
+            # synchronous accountSummary()/positions() wrappers internally call
+            # ib.run(...) when their cache is empty, which raises "This event loop
+            # is already running" from inside our running async loop and yields no
+            # account data. Awaiting the *Async() forms avoids re-entering the loop.
+            summary_rows = await self._ib.reqAccountSummaryAsync()
+            summary = {row.tag: row.value for row in summary_rows}
             equity = float(summary.get("NetLiquidation", 0.0) or 0.0)
             cash = float(summary.get("TotalCashValue", 0.0) or 0.0)
             bp = float(summary.get("BuyingPower", 0.0) or 0.0)
             positions: Dict[str, float] = {}
-            for p in self._ib.positions():
+            for p in await self._ib.reqPositionsAsync():
                 sym = getattr(p.contract, "symbol", None)
                 if sym:
                     positions[sym] = positions.get(sym, 0.0) + float(p.position)

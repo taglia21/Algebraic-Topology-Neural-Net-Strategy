@@ -410,13 +410,26 @@ async def _preflight(cfg: ETFConfig, args) -> int:
                 f"{len(account.positions)} positions" if ok_acct else "no account data",
             ))
             # Probe a live price for one target (or the benchmark as a fallback).
+            # A missing quote only indicates a real problem (e.g. data permissions)
+            # when the market is actually OPEN. When the market is closed (nights/
+            # weekends/holidays) a paper account legitimately returns no quote, so we
+            # mark the probe as a non-blocking SKIP rather than failing readiness.
             probe = next(iter(target), cfg.benchmark)
             px = await broker.get_price(probe)
-            checks.append((
-                f"Live price probe ({probe})",
-                px is not None and px > 0,
-                f"${px:.2f}" if px else "no quote (market closed or data perms?)",
-            ))
+            try:
+                from core.market_hours import MarketCalendar
+                market_open = MarketCalendar().is_market_open()
+            except Exception:
+                market_open = False
+            if px is not None and px > 0:
+                probe_ok, probe_detail = True, f"${px:.2f}"
+            elif market_open:
+                probe_ok = False
+                probe_detail = "no quote during market hours (check market-data permissions)"
+            else:
+                probe_ok = None  # advisory: cannot quote while market closed
+                probe_detail = "market closed — live quote check skipped (verifies when open)"
+            checks.append((f"Live price probe ({probe})", probe_ok, probe_detail))
         except Exception as exc:
             checks.append(("Account snapshot", False, str(exc)))
         finally:
@@ -438,8 +451,15 @@ async def _preflight(cfg: ETFConfig, args) -> int:
     print(f"\n{'='*64}\nETF PREFLIGHT — READINESS CHECK\n{'='*64}")
     all_ok = True
     for label, ok, detail in checks:
-        all_ok = all_ok and ok
-        print(f"  [{'PASS' if ok else 'FAIL'}] {label:<32} {detail}")
+        # ok is True -> PASS, False -> FAIL (blocks readiness), None -> SKIP (advisory)
+        if ok is False:
+            all_ok = False
+            tag = "FAIL"
+        elif ok is None:
+            tag = "SKIP"
+        else:
+            tag = "PASS"
+        print(f"  [{tag}] {label:<32} {detail}")
     if target:
         print("\n  Planned (UN-submitted) target book:")
         for sym, w in sorted(target.items(), key=lambda kv: -kv[1]):

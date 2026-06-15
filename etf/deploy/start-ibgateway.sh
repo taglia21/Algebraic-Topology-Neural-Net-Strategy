@@ -38,15 +38,31 @@ if [ "$IBKR_TRADING_MODE" = "live" ]; then
 fi
 
 # --- 1. Render the runtime IBC config (root-only) ---------------------------
+# Use Python for substitution (NOT sed): passwords frequently contain sed-special
+# characters (& / | \ newlines). With sed those silently corrupt the rendered
+# password, so Gateway login hangs forever at "Setting password" with no error.
+# Python does a literal string replace and reads secrets straight from the
+# environment, so nothing sensitive ever lands in argv (visible via `ps`).
 echo "[start-ibgateway] Rendering IBC config -> $RUNTIME_CONFIG"
 mkdir -p "$(dirname "$RUNTIME_CONFIG")"
-sed \
-    -e "s|__IBKR_USERNAME__|${IBKR_USERNAME}|g" \
-    -e "s|__IBKR_PASSWORD__|${IBKR_PASSWORD}|g" \
-    -e "s|__IBKR_TRADING_MODE__|${IBKR_TRADING_MODE}|g" \
-    -e "s|__IBKR_PORT__|${IBKR_PORT}|g" \
-    -e "s|__IBC_RESTART_TIME__|${IBC_RESTART_TIME}|g" \
-    "$TEMPLATE" > "$RUNTIME_CONFIG"
+export IBKR_USERNAME IBKR_PASSWORD IBKR_TRADING_MODE IBKR_PORT IBC_RESTART_TIME
+python3 - "$TEMPLATE" "$RUNTIME_CONFIG" <<'PYEOF'
+import os, sys
+template_path, out_path = sys.argv[1], sys.argv[2]
+with open(template_path, "r") as f:
+    content = f.read()
+replacements = {
+    "__IBKR_USERNAME__": os.environ["IBKR_USERNAME"],
+    "__IBKR_PASSWORD__": os.environ["IBKR_PASSWORD"],
+    "__IBKR_TRADING_MODE__": os.environ.get("IBKR_TRADING_MODE", "paper"),
+    "__IBKR_PORT__": os.environ.get("IBKR_PORT", "4002"),
+    "__IBC_RESTART_TIME__": os.environ.get("IBC_RESTART_TIME", "07:00 AM"),
+}
+for token, value in replacements.items():
+    content = content.replace(token, value)
+with open(out_path, "w") as f:
+    f.write(content)
+PYEOF
 chmod 600 "$RUNTIME_CONFIG"
 
 # --- 2. Start a virtual display ---------------------------------------------

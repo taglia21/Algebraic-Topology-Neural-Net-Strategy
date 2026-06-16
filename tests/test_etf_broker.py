@@ -382,6 +382,56 @@ def test_rebalance_succeeds_via_historical_when_streaming_blocked():
     assert all(v == "dry_run" for v in result.values())
 
 
+def test_get_price_uses_engine_close_when_ibkr_data_fully_unavailable():
+    # Streaming AND historical both unavailable (IBKR Error 162 competing
+    # session) -> get_price uses the engine's own daily-close fallback.
+    fake = _FakeIB(tickers={"DBC": _LiveTicker(0.0, ready_after=999.0)})  # no hist
+    b = _broker_with(fake)
+    px = asyncio.run(b.get_price("DBC", price_timeout=0.1, fallback_price=22.37))
+    assert px == pytest.approx(22.37)
+    assert fake.hist_calls == ["DBC"]  # historical was attempted first
+
+
+def test_rebalance_succeeds_via_engine_close_when_all_ibkr_data_blocked():
+    # The production scenario from 2026-06-16: every IBKR data path blocked, but
+    # the engine passes its own last daily closes -> rebalance proceeds.
+    fake = _FakeIB(
+        tickers={
+            "XLK": _LiveTicker(0.0, ready_after=999.0),
+            "EEM": _LiveTicker(0.0, ready_after=999.0),
+        },
+        hist={},  # historical also blocked
+        rows=[_Row("NetLiquidation", "1000000"), _Row("TotalCashValue", "1000000")],
+        positions=[],
+    )
+    b = _broker_with(fake)
+    cfg = get_default_config()
+    result = asyncio.run(
+        b.rebalance_to_weights(
+            {"XLK": 0.3, "EEM": 0.3}, cfg,
+            fallback_prices={"XLK": 150.0, "EEM": 50.0},
+        )
+    )
+    assert result.get("_status") != "aborted_failsafe"
+    assert set(result) == {"XLK", "EEM"}
+    assert all(v == "dry_run" for v in result.values())
+
+
+def test_rebalance_aborts_when_no_fallback_and_all_ibkr_data_blocked():
+    # Without an engine fallback AND with all IBKR data blocked, the fail-safe
+    # must still engage (never trade blind).
+    fake = _FakeIB(
+        tickers={"XLK": _LiveTicker(0.0, ready_after=999.0)},
+        hist={},
+        rows=[_Row("NetLiquidation", "1000000"), _Row("TotalCashValue", "1000000")],
+        positions=[],
+    )
+    b = _broker_with(fake)
+    cfg = get_default_config()
+    result = asyncio.run(b.rebalance_to_weights({"XLK": 1.0}, cfg))
+    assert result == {"_status": "aborted_failsafe"}
+
+
 def test_rebalance_aborts_failsafe_when_a_price_is_missing():
     # Account is healthy but one symbol never quotes -> plan_rebalance returns
     # None -> rebalance_to_weights reports aborted_failsafe (NOT no_change),

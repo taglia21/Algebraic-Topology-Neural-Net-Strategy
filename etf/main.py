@@ -507,6 +507,20 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
         logger.error("Pre-trade safety: market data is stale or missing — no orders.")
         return 4
 
+    # Engine daily-close fallback marks (symbol -> last close). These let the
+    # broker size orders even when IBKR market data is unavailable (competing
+    # session / no subscription), keeping the system independent of IBKR data.
+    fallback_prices: dict = {}
+    try:
+        last_row = prices.iloc[-1]
+        fallback_prices = {
+            str(sym): float(px)
+            for sym, px in last_row.items()
+            if px == px and float(px) > 0  # skip NaN / non-positive
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not build daily-close fallback prices: %s", exc)
+
     dry_run = not args.execute
     broker = IBKRETFBroker(cfg.ibkr, dry_run=dry_run)
     if not await broker.connect():
@@ -563,7 +577,7 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
                 logger.error("Pre-trade safety blocked this cycle — no orders submitted.")
             return 4
 
-        result = await broker.rebalance_to_weights(target, cfg)
+        result = await broker.rebalance_to_weights(target, cfg, fallback_prices)
         logger.info("Rebalance result: %s", result)
         # A fail-safe abort (e.g. a missing live price) means NO orders were
         # submitted. Return non-zero so the scheduler does NOT advance the
@@ -602,7 +616,7 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
         else:
             logger.info("Slippage telemetry: no realised fills to measure this cycle.")
         # Post-trade reconciliation: verify the live book matches intent.
-        report = await broker.reconcile(target, cfg)
+        report = await broker.reconcile(target, cfg, fallback_prices)
         if report is None:
             logger.warning("Reconciliation skipped (no account/price data).")
         elif report.ok:

@@ -237,13 +237,25 @@ class IBKRETFBroker:
         await self._ib.qualifyContractsAsync(contract)
         return contract
 
-    async def get_price(self, symbol: str, price_timeout: float = 10.0) -> Optional[float]:
+    async def get_price(
+        self,
+        symbol: str,
+        price_timeout: float = 10.0,
+        fallback_price: Optional[float] = None,
+    ) -> Optional[float]:
         """Best available mark for an ETF. Fail-safe returns None on any issue.
 
         Resolution order:
           1. Streaming quote (real-time OR delayed) — mid, then last, then close.
           2. Historical daily close fallback (``_historical_close``) when no
              streaming quote arrives.
+          3. ``fallback_price`` — the engine's own last daily close (from the
+             yfinance history it already loads for signals). This makes sizing
+             fully independent of IBKR market data, so a competing IBKR session
+             (web portal / mobile app, IBKR Error 10197/162) can no longer block
+             a rebalance. For a daily-close strategy with MKT/marketable-limit
+             orders the prior close is a correct sizing mark; the actual fill
+             still happens at the live market price.
 
         The fallback matters because IBKR streams a market-data line in only ONE
         session at a time per user: opening the Client Portal / mobile app / TWS
@@ -289,9 +301,16 @@ class IBKRETFBroker:
             if close is not None and close > 0:
                 logger.info("Using historical close $%.2f for %s.", close, symbol)
                 return close
+            # Final tier: the engine's own last daily close (IBKR-independent).
+            if fallback_price is not None and fallback_price > 0:
+                logger.info(
+                    "Using engine daily-close fallback $%.2f for %s "
+                    "(IBKR market data unavailable).", fallback_price, symbol,
+                )
+                return float(fallback_price)
             logger.warning(
-                "No price for %s (streaming AND historical close unavailable).",
-                symbol,
+                "No price for %s (streaming, historical, AND engine-close all "
+                "unavailable).", symbol,
             )
             return None
         except Exception as exc:
@@ -376,8 +395,13 @@ class IBKRETFBroker:
         self,
         target_weights: Dict[str, float],
         cfg: ETFConfig,
+        fallback_prices: Optional[Dict[str, float]] = None,
     ) -> Optional[List[PlannedOrder]]:
         """Compute the orders required to reach ``target_weights``.
+
+        ``fallback_prices`` (symbol -> last daily close) is used as the final
+        sizing mark when IBKR market data is unavailable for a symbol, so the
+        plan does not abort on a transient IBKR data outage / competing session.
 
         Returns None on any failure (fail-safe: caller must not trade blindly).
         """
@@ -392,7 +416,8 @@ class IBKRETFBroker:
 
         prices: Dict[str, float] = {}
         for sym in symbols:
-            px = await self.get_price(sym)
+            fb = fallback_prices.get(sym) if fallback_prices else None
+            px = await self.get_price(sym, fallback_price=fb)
             if px is None or px <= 0:
                 logger.error("Missing price for %s; aborting rebalance (fail-safe).", sym)
                 return None
@@ -532,10 +557,13 @@ class IBKRETFBroker:
             await asyncio.sleep(poll)
 
     async def rebalance_to_weights(
-        self, target_weights: Dict[str, float], cfg: ETFConfig
+        self,
+        target_weights: Dict[str, float],
+        cfg: ETFConfig,
+        fallback_prices: Optional[Dict[str, float]] = None,
     ) -> Dict[str, str]:
         """End-to-end: plan + execute a rebalance to the target weights."""
-        orders = await self.plan_rebalance(target_weights, cfg)
+        orders = await self.plan_rebalance(target_weights, cfg, fallback_prices)
         if orders is None:
             return {"_status": "aborted_failsafe"}
         if not orders:
@@ -544,7 +572,10 @@ class IBKRETFBroker:
         return await self.execute_orders(orders)
 
     async def reconcile(
-        self, target_weights: Dict[str, float], cfg: ETFConfig
+        self,
+        target_weights: Dict[str, float],
+        cfg: ETFConfig,
+        fallback_prices: Optional[Dict[str, float]] = None,
     ) -> Optional[ReconciliationReport]:
         """Post-trade check: do realised broker weights match the target book?
 
@@ -559,7 +590,8 @@ class IBKRETFBroker:
         symbols = sorted(set(target_weights) | set(account.positions))
         prices: Dict[str, float] = {}
         for sym in symbols:
-            px = await self.get_price(sym)
+            fb = fallback_prices.get(sym) if fallback_prices else None
+            px = await self.get_price(sym, fallback_price=fb)
             if px is None or px <= 0:
                 logger.error("Cannot reconcile: missing price for %s.", sym)
                 return None

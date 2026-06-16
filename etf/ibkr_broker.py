@@ -465,9 +465,9 @@ class IBKRETFBroker:
         if self.dry_run:
             for o in orders:
                 logger.info(
-                    "[DRY-RUN] %s %d %s @ ~%.2f (%.1f%% notional)",
+                    "[DRY-RUN] %s %d %s @ ~%.2f ($%s notional)",
                     o.action, o.quantity, o.symbol, o.est_price,
-                    100 * o.est_notional,
+                    f"{o.est_notional:,.0f}",
                 )
                 results[o.symbol] = "dry_run"
             return results

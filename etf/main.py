@@ -616,8 +616,17 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
         else:
             logger.info("Slippage telemetry: no realised fills to measure this cycle.")
         # Post-trade reconciliation: verify the live book matches intent.
+        # In dry-run NO orders were placed, so the live book is still the prior
+        # book and a "mismatch" vs target is expected and meaningless. Skip
+        # persisting reconciliation state in dry-run so a dry-run test can never
+        # poison the live engine's pre-trade reconciliation gate.
         report = await broker.reconcile(target, cfg, fallback_prices)
-        if report is None:
+        if dry_run:
+            logger.info(
+                "[DRY-RUN] Reconciliation is report-only (no orders placed; "
+                "state NOT persisted)."
+            )
+        elif report is None:
             logger.warning("Reconciliation skipped (no account/price data).")
         elif report.ok:
             logger.info("Reconciliation OK: live book matches target within tolerance.")

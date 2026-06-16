@@ -238,19 +238,24 @@ class IBKRETFBroker:
         return contract
 
     async def get_price(self, symbol: str, price_timeout: float = 10.0) -> Optional[float]:
-        """Last/mid price for an ETF. Fail-safe returns None on any issue.
+        """Best available mark for an ETF. Fail-safe returns None on any issue.
 
-        Handles both real-time and delayed market data: under delayed data
-        (``market_data_type`` 3/4) IBKR populates ``delayedLast``/``delayedBid``/
-        ``delayedAsk``/``delayedClose`` instead of the real-time fields, so we
-        probe both. Mid (bid/ask) is preferred over last for a tighter mark.
+        Resolution order:
+          1. Streaming quote (real-time OR delayed) — mid, then last, then close.
+          2. Historical daily close fallback (``_historical_close``) when no
+             streaming quote arrives.
 
-        Polls for a valid quote up to ``price_timeout`` seconds rather than using
-        a single fixed wait: the FIRST snapshot after a quiet period (especially
-        under delayed data) can take several seconds to populate, so a fixed
-        short sleep intermittently yields ``None`` and trips the rebalance
-        fail-safe. Returning as soon as a price appears keeps latency low while
-        tolerating slow first ticks.
+        The fallback matters because IBKR streams a market-data line in only ONE
+        session at a time per user: opening the Client Portal / mobile app / TWS
+        while the Gateway runs triggers "Error 10197: No market data during
+        competing live session", which would otherwise abort the rebalance. The
+        historical close is subscription-independent and immune to that conflict
+        — and for a daily-close strategy it is the correct mark to trade on, so
+        the fallback is a feature, not a degradation.
+
+        Polls for a valid quote up to ``price_timeout`` seconds: the FIRST
+        snapshot after a quiet period can take several seconds to populate, so a
+        single fixed wait intermittently yields ``None``.
         """
         if not self.is_connected:
             return None
@@ -272,12 +277,23 @@ class IBKRETFBroker:
                 price = _extract_price(ticker)
                 if price is not None and price > 0:
                     break
-            if price is None or price <= 0:
-                logger.warning(
-                    "No price for %s after %.1fs (market-data slow or no "
-                    "subscription/permission).", symbol, price_timeout,
-                )
-            return price
+            if price is not None and price > 0:
+                return price
+            # No streaming quote (slow, no subscription, or competing live
+            # session): fall back to the most recent historical daily close.
+            logger.info(
+                "No streaming quote for %s after %.1fs; trying historical "
+                "daily-close fallback.", symbol, price_timeout,
+            )
+            close = await self._historical_close(contract)
+            if close is not None and close > 0:
+                logger.info("Using historical close $%.2f for %s.", close, symbol)
+                return close
+            logger.warning(
+                "No price for %s (streaming AND historical close unavailable).",
+                symbol,
+            )
+            return None
         except Exception as exc:
             logger.error("Price fetch failed for %s: %s", symbol, exc)
             return None
@@ -287,6 +303,34 @@ class IBKRETFBroker:
                     self._ib.cancelMktData(contract)
                 except Exception:  # pragma: no cover - defensive
                     pass
+
+    async def _historical_close(self, contract) -> Optional[float]:
+        """Most recent daily close via historical data — a subscription-free,
+        competing-session-immune fallback for :meth:`get_price`.
+
+        Requests a short daily window and returns the last bar's close. Uses
+        ``whatToShow='TRADES'`` and ``useRTH=True`` so the mark matches the
+        official session close the strategy was backtested on. Fail-safe: returns
+        None on any error so the caller still aborts rather than trading blind.
+        """
+        try:
+            bars = await self._ib.reqHistoricalDataAsync(
+                contract,
+                endDateTime="",        # "" = up to now
+                durationStr="5 D",      # small window tolerates weekends/holidays
+                barSizeSetting="1 day",
+                whatToShow="TRADES",
+                useRTH=True,
+                formatDate=1,
+                timeout=20,
+            )
+            if not bars:
+                return None
+            return _finite(getattr(bars[-1], "close", None))
+        except Exception as exc:
+            logger.warning("Historical-close fallback failed for %s: %s",
+                           getattr(contract, "symbol", "?"), exc)
+            return None
 
     async def get_account(self) -> Optional[AccountSnapshot]:
         if not self.is_connected:

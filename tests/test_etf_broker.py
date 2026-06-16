@@ -255,11 +255,13 @@ class _Pos:
 
 
 class _FakeIB:
-    def __init__(self, tickers=None, rows=None, positions=None):
+    def __init__(self, tickers=None, rows=None, positions=None, hist=None):
         self._tickers = tickers or {}
         self._rows = rows or []
         self._positions = positions or []
+        self._hist = hist or {}  # symbol -> last close (historical fallback)
         self.cancelled = []
+        self.hist_calls = []
 
     def isConnected(self):
         return True
@@ -275,6 +277,14 @@ class _FakeIB:
 
     def sleep(self, *a, **k):  # pragma: no cover - must never run
         raise RuntimeError("ib.sleep() must not be called inside an async coroutine")
+
+    async def reqHistoricalDataAsync(self, contract, *a, **k):
+        self.hist_calls.append(contract.symbol)
+        close = self._hist.get(contract.symbol)
+        if close is None:
+            return []
+        bar = type("Bar", (), {"close": close})()
+        return [bar]
 
     async def accountSummaryAsync(self, account=""):
         return self._rows
@@ -311,13 +321,65 @@ def test_get_price_polls_until_quote_populates():
 
 
 def test_get_price_returns_none_on_timeout_without_reentry():
-    # Quote never populates -> None (fail-safe), and crucially NO event-loop
-    # reentry: if the code called ib.sleep(), _FakeIB.sleep would raise.
+    # Quote never populates and NO historical fallback available -> None
+    # (fail-safe), and crucially NO event-loop reentry: if the code called
+    # ib.sleep(), _FakeIB.sleep would raise.
     fake = _FakeIB(tickers={"EEM": _LiveTicker(50.0, ready_after=999.0)})
     b = _broker_with(fake)
     px = asyncio.run(b.get_price("EEM", price_timeout=0.1))  # min deadline 2s
     assert px is None
     assert fake.cancelled == ["EEM"]
+
+
+def test_get_price_falls_back_to_historical_close_on_competing_session():
+    # Streaming never populates (simulates IBKR Error 10197 "competing live
+    # session") but a historical daily close is available -> get_price returns
+    # that close instead of aborting. This is the production fix for the
+    # 2026-06-16 zero-trade session.
+    fake = _FakeIB(
+        tickers={"DBC": _LiveTicker(0.0, ready_after=999.0)},  # never streams
+        hist={"DBC": 22.37},
+    )
+    b = _broker_with(fake)
+    px = asyncio.run(b.get_price("DBC", price_timeout=0.1))
+    assert px == pytest.approx(22.37)
+    assert fake.hist_calls == ["DBC"]   # fallback was actually used
+    assert fake.cancelled == ["DBC"]    # streaming subscription still cancelled
+
+
+def test_get_price_prefers_streaming_over_historical():
+    # When a streaming quote IS available it must be used and the historical
+    # fallback must NOT be requested (keeps marks live when data is flowing).
+    fake = _FakeIB(
+        tickers={"XLK": _LiveTicker(150.0, ready_after=0.0)},
+        hist={"XLK": 140.0},
+    )
+    b = _broker_with(fake)
+    px = asyncio.run(b.get_price("XLK"))
+    assert px == pytest.approx(150.0)
+    assert fake.hist_calls == []  # fallback not triggered when streaming works
+
+
+def test_rebalance_succeeds_via_historical_when_streaming_blocked():
+    # End-to-end: streaming blocked for every symbol (competing session) but
+    # historical closes available -> rebalance plans and (dry-run) executes
+    # instead of aborting fail-safe.
+    fake = _FakeIB(
+        tickers={
+            "XLK": _LiveTicker(0.0, ready_after=999.0),
+            "EEM": _LiveTicker(0.0, ready_after=999.0),
+        },
+        hist={"XLK": 150.0, "EEM": 50.0},
+        rows=[_Row("NetLiquidation", "1000000"), _Row("TotalCashValue", "1000000")],
+        positions=[],
+    )
+    b = _broker_with(fake)
+    cfg = get_default_config()
+    result = asyncio.run(b.rebalance_to_weights({"XLK": 0.3, "EEM": 0.3}, cfg))
+    # Dry-run returns per-symbol "dry_run" statuses, NOT aborted_failsafe.
+    assert result.get("_status") != "aborted_failsafe"
+    assert set(result) == {"XLK", "EEM"}
+    assert all(v == "dry_run" for v in result.values())
 
 
 def test_rebalance_aborts_failsafe_when_a_price_is_missing():

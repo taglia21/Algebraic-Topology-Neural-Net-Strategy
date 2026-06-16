@@ -204,3 +204,154 @@ def test_order_is_done_working_states(status):
 
 def test_order_is_done_strips_whitespace():
     assert _order_is_done("  Filled  ") is True
+
+
+# ---------------------------------------------------------------------------
+# Async price/order path — event-loop-reentry regression guards
+# ---------------------------------------------------------------------------
+# These exercise get_price / rebalance_to_weights against a fake IB that runs on
+# the live asyncio loop WITHOUT a broker connection. The fake's ``sleep`` raises
+# if called, guaranteeing the code never uses ``ib.sleep()`` inside a running
+# coroutine (which re-enters the loop -> "This event loop is already running"
+# and was the root cause of the first two zero-trade paper sessions).
+import asyncio
+import time as _time
+
+from etf.config import get_default_config
+from etf.ibkr_broker import IBKRETFBroker
+
+
+class _LiveTicker:
+    """A Ticker whose ``last`` becomes valid only after ``ready_after`` seconds,
+    simulating IBKR's first snapshot taking time to populate."""
+
+    def __init__(self, price: float, ready_after: float = 0.0):
+        self._price = price
+        self._ready_at = _time.monotonic() + ready_after
+        self.bid = NAN
+        self.ask = NAN
+        self.delayedBid = NAN
+        self.delayedAsk = NAN
+        self.delayedLast = NAN
+        self.close = NAN
+        self.delayedClose = NAN
+
+    @property
+    def last(self):
+        return self._price if _time.monotonic() >= self._ready_at else NAN
+
+
+class _Row:
+    def __init__(self, tag, value, currency="USD"):
+        self.tag = tag
+        self.value = value
+        self.currency = currency
+
+
+class _Pos:
+    def __init__(self, symbol, position):
+        self.contract = type("C", (), {"symbol": symbol})()
+        self.position = position
+
+
+class _FakeIB:
+    def __init__(self, tickers=None, rows=None, positions=None):
+        self._tickers = tickers or {}
+        self._rows = rows or []
+        self._positions = positions or []
+        self.cancelled = []
+
+    def isConnected(self):
+        return True
+
+    async def qualifyContractsAsync(self, contract):
+        return [contract]
+
+    def reqMktData(self, contract, *a, **k):
+        return self._tickers.get(contract.symbol)
+
+    def cancelMktData(self, contract):
+        self.cancelled.append(contract.symbol)
+
+    def sleep(self, *a, **k):  # pragma: no cover - must never run
+        raise RuntimeError("ib.sleep() must not be called inside an async coroutine")
+
+    async def accountSummaryAsync(self, account=""):
+        return self._rows
+
+    def accountValues(self, account=""):
+        return []
+
+    async def reqPositionsAsync(self):
+        return self._positions
+
+
+def _broker_with(fake_ib):
+    b = IBKRETFBroker(get_default_config().ibkr, dry_run=True)
+    b._ib = fake_ib
+    b._connected = True
+    return b
+
+
+def test_get_price_returns_immediately_when_quote_ready():
+    fake = _FakeIB(tickers={"XLK": _LiveTicker(123.45, ready_after=0.0)})
+    b = _broker_with(fake)
+    px = asyncio.run(b.get_price("XLK"))
+    assert px == pytest.approx(123.45)
+    assert fake.cancelled == ["XLK"]  # subscription always cancelled
+
+
+def test_get_price_polls_until_quote_populates():
+    # Quote is NaN for the first ~0.4s then valid: the poll loop must wait it out
+    # rather than returning None on the first read (the yesterday-bug).
+    fake = _FakeIB(tickers={"EEM": _LiveTicker(50.0, ready_after=0.4)})
+    b = _broker_with(fake)
+    px = asyncio.run(b.get_price("EEM", price_timeout=5.0))
+    assert px == pytest.approx(50.0)
+
+
+def test_get_price_returns_none_on_timeout_without_reentry():
+    # Quote never populates -> None (fail-safe), and crucially NO event-loop
+    # reentry: if the code called ib.sleep(), _FakeIB.sleep would raise.
+    fake = _FakeIB(tickers={"EEM": _LiveTicker(50.0, ready_after=999.0)})
+    b = _broker_with(fake)
+    px = asyncio.run(b.get_price("EEM", price_timeout=0.1))  # min deadline 2s
+    assert px is None
+    assert fake.cancelled == ["EEM"]
+
+
+def test_rebalance_aborts_failsafe_when_a_price_is_missing():
+    # Account is healthy but one symbol never quotes -> plan_rebalance returns
+    # None -> rebalance_to_weights reports aborted_failsafe (NOT no_change),
+    # which the runner maps to "do not advance cadence".
+    fake = _FakeIB(
+        tickers={
+            "XLK": _LiveTicker(150.0, ready_after=0.0),
+            "EEM": _LiveTicker(50.0, ready_after=999.0),  # never ready
+        },
+        rows=[_Row("NetLiquidation", "1000000"), _Row("TotalCashValue", "1000000")],
+        positions=[],
+    )
+    b = _broker_with(fake)
+    cfg = get_default_config()
+    result = asyncio.run(
+        b.rebalance_to_weights({"XLK": 0.5, "EEM": 0.5}, cfg)
+    )
+    assert result == {"_status": "aborted_failsafe"}
+
+
+def test_get_account_reads_summary_rows():
+    fake = _FakeIB(
+        rows=[
+            _Row("NetLiquidation", "1021473.52"),
+            _Row("TotalCashValue", "1020510.62"),
+            _Row("BuyingPower", "4082042.48"),
+        ],
+        positions=[_Pos("XLK", 100.0)],
+    )
+    b = _broker_with(fake)
+    acct = asyncio.run(b.get_account())
+    assert acct is not None
+    assert acct.equity == pytest.approx(1021473.52)
+    assert acct.cash == pytest.approx(1020510.62)
+    assert acct.positions == {"XLK": 100.0}

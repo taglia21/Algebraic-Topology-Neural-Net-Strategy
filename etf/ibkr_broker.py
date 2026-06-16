@@ -262,7 +262,13 @@ class IBKRETFBroker:
             price = None
             deadline = _time.monotonic() + max(2.0, price_timeout)
             while _time.monotonic() < deadline:
-                await self._ib.sleep(0.25)  # process IBKR ticks while waiting
+                # MUST use asyncio.sleep here, NOT ib.sleep(): ib.sleep() calls
+                # util.run() -> loop.run_until_complete() which re-enters the
+                # already-running event loop ("This event loop is already
+                # running") and aborts the fetch. awaiting asyncio.sleep yields
+                # to the loop, which processes the incoming IBKR ticks and
+                # populates the ticker in the background.
+                await asyncio.sleep(0.25)
                 price = _extract_price(ticker)
                 if price is not None and price > 0:
                     break
@@ -477,13 +483,9 @@ class IBKRETFBroker:
                     timeout, len(working), working,
                 )
                 return False
-            try:
-                if self._ib is not None:
-                    await self._ib.sleep(poll)  # process IBKR events while waiting
-                else:  # pragma: no cover - defensive
-                    await asyncio.sleep(poll)
-            except Exception:  # pragma: no cover - defensive
-                await asyncio.sleep(poll)
+            # asyncio.sleep (NOT ib.sleep) — yields to the running loop so ib_async
+            # processes order-status updates without re-entering the loop.
+            await asyncio.sleep(poll)
 
     async def rebalance_to_weights(
         self, target_weights: Dict[str, float], cfg: ETFConfig

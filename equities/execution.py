@@ -916,6 +916,7 @@ class ExecutionManager:
                 equity=portfolio_state.equity,
                 peak_equity=portfolio_state.peak_equity,
                 today_pnl=today_pnl,
+                sod_equity=sod_equity,
                 positions={
                     sym: pos.market_value
                     for sym, pos in portfolio_state.positions.items()

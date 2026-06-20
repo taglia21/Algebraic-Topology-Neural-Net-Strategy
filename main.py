@@ -459,6 +459,25 @@ class SystemOrchestrator:
             f"MaxDD={_s(max_dd, pct=True)}\n"
         )
 
+        # ML OOD telemetry (if ML pipeline was enabled and telemetry exists)
+        t = result.ml_ood_telemetry if isinstance(result.ml_ood_telemetry, dict) else None
+        if t is not None:
+            checks = int(t.get("ood_checks", 0) or 0)
+            blocks = int(t.get("ood_blocks", 0) or 0)
+            rate = float(t.get("ood_block_rate", 0.0) or 0.0)
+            action = str(t.get("ood_action", "unknown"))
+            print("  OOD telemetry:")
+            print(
+                f"    action={action} | checks={checks} | "
+                f"blocks={blocks} | block_rate={rate:.2%}"
+            )
+
+            top_outliers = t.get("top_outlier_features", [])
+            if isinstance(top_outliers, list) and len(top_outliers) > 0:
+                preview = ", ".join(str(x) for x in top_outliers[:5])
+                print(f"    top_outlier_features={preview}")
+            print()
+
 
 # ---------------------------------------------------------------------------
 # CLI entry point

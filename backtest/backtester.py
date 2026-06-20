@@ -724,6 +724,14 @@ class Backtester:
         except Exception:
             config_dict = {"error": "config serialisation failed"}
 
+        # Collect OOD telemetry from ML pipeline if available
+        ml_ood_telemetry = None
+        if self.ml_pipeline is not None:
+            try:
+                ml_ood_telemetry = self.ml_pipeline.get_ood_telemetry()
+            except Exception:
+                pass  # If telemetry fails, continue without it
+
         return BacktestResult(
             equity_curve=equity_curve,
             daily_returns=daily_returns,
@@ -735,6 +743,7 @@ class Backtester:
             start_date=start_date,
             end_date=end_date,
             symbols=list(symbols),
+            ml_ood_telemetry=ml_ood_telemetry,
         )
 
     # ------------------------------------------------------------------

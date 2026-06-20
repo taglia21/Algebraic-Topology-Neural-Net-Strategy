@@ -96,6 +96,11 @@ def main() -> None:
             if isinstance(v, (int, float, str, bool)):
                 output[k] = v
 
+    # Persist ML OOD telemetry for auditability and calibration analysis.
+    t = result.ml_ood_telemetry
+    if isinstance(t, dict):
+        output["ml_ood_telemetry"] = t
+
     out_path = "backtest_results.json"
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2, default=str)

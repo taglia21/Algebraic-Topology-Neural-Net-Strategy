@@ -106,6 +106,7 @@ class BacktestResult:
     start_date: str
     end_date: str
     symbols: List[str]
+    ml_ood_telemetry: Dict[str, Any] = None  # ML OOD gating telemetry from predict() calls
 
     # Convenience properties ------------------------------------------------
 

@@ -66,6 +66,7 @@ Usage
 
 from __future__ import annotations
 
+from collections import defaultdict
 import hashlib
 import logging
 import math
@@ -124,6 +125,16 @@ _MAX_META_FEATURES: int = 10
 
 # Feature pruning: drop features with zero importance across all horizons
 _MIN_IMPORTANCE_THRESHOLD: float = 0.0
+
+# OOD guardrails for prediction-time feature vectors.
+# We classify the latest feature row as out-of-distribution when too many
+# features are outside the training quantile envelope, or when one feature is
+# extremely far outside it.
+_OOD_LOWER_Q: float = 0.01
+_OOD_UPPER_Q: float = 0.99
+_OOD_MIN_FEATURES_CHECKED: int = 10
+_OOD_FRACTION_THRESHOLD: float = 0.25
+_OOD_EXTREME_SCORE_THRESHOLD: float = 6.0
 
 
 # ===========================================================================
@@ -290,6 +301,18 @@ class MLPipeline:
 
         # Timestamps
         self._last_train_time: Optional[float] = None
+
+        # OOD policy + telemetry (prediction-time).
+        self._ood_action: str = self._resolve_ood_action()
+        self._ood_checks: int = 0
+        self._ood_blocks: int = 0
+        self._ood_last_detail: Dict[str, float] = {}
+        self._ood_checks_by_symbol: Dict[str, int] = defaultdict(int)
+        self._ood_blocks_by_symbol: Dict[str, int] = defaultdict(int)
+        self._ood_checks_by_regime: Dict[str, int] = defaultdict(int)
+        self._ood_blocks_by_regime: Dict[str, int] = defaultdict(int)
+        self._ood_checks_by_day: Dict[str, int] = defaultdict(int)
+        self._ood_blocks_by_day: Dict[str, int] = defaultdict(int)
 
     # ------------------------------------------------------------------
     # Training
@@ -680,6 +703,41 @@ class MLPipeline:
         if features.empty:
             return {}
 
+        # Build telemetry dimensions from the latest feature timestamp.
+        latest_ts = features.index[-1] if len(features.index) > 0 else None
+        day_key = "unknown"
+        if latest_ts is not None:
+            try:
+                day_key = str(pd.Timestamp(latest_ts).date())
+            except Exception:
+                day_key = "unknown"
+
+        symbol_key = symbol or "default"
+        regime_key = self._regime_label(regime_state)
+
+        self._ood_checks += 1
+        self._ood_checks_by_symbol[symbol_key] += 1
+        self._ood_checks_by_regime[regime_key] += 1
+        self._ood_checks_by_day[day_key] += 1
+
+        # Prediction-time OOD check: refuse to score on feature vectors that
+        # are far outside the training distribution to avoid fragile extrapolation.
+        in_dist, ood_detail = self._is_in_distribution(features)
+        if not in_dist:
+            self._ood_blocks += 1
+            self._ood_blocks_by_symbol[symbol_key] += 1
+            self._ood_blocks_by_regime[regime_key] += 1
+            self._ood_blocks_by_day[day_key] += 1
+            self._ood_last_detail = dict(ood_detail)
+            logger.warning(
+                "MLPipeline.predict: OOD feature vector detected for %s; "
+                "action=%s details=%s",
+                symbol or "default",
+                self._ood_action,
+                ood_detail,
+            )
+            return self._handle_ood_prediction(symbol)
+
         # Use the last complete row
         last_row_full = features.dropna(how="all").iloc[[-1]]
         if last_row_full.empty:
@@ -775,6 +833,52 @@ class MLPipeline:
             }
         }
 
+    def get_ood_telemetry(self) -> Dict[str, Any]:
+        """Return prediction-time OOD telemetry for monitoring/tuning."""
+        checks_int = int(self._ood_checks)
+        blocks_int = int(self._ood_blocks)
+        checks = float(checks_int)
+        blocks = float(blocks_int)
+        block_rate = (blocks / checks) if checks > 0 else 0.0
+        detail = dict(self._ood_last_detail)
+
+        top_outlier_features: List[str] = []
+        outlier_items: List[Tuple[str, float]] = []
+        for k, v in detail.items():
+            if not k.startswith("outlier_"):
+                continue
+            if k in {"outlier_count", "outlier_fraction"}:
+                continue
+            feat_name = k.replace("outlier_", "", 1)
+            try:
+                outlier_items.append((feat_name, float(v)))
+            except Exception:
+                continue
+        if outlier_items:
+            outlier_items.sort(key=lambda kv: abs(kv[1]), reverse=True)
+            top_outlier_features = [name for name, _ in outlier_items[:5]]
+
+        payload: Dict[str, Any] = {
+            # Primary keys (stable API)
+            "ood_action": self._ood_action,
+            "ood_checks": checks_int,
+            "ood_blocks": blocks_int,
+            "ood_block_rate": float(block_rate),
+            "ood_checks_by_symbol": dict(self._ood_checks_by_symbol),
+            "ood_blocks_by_symbol": dict(self._ood_blocks_by_symbol),
+            "ood_checks_by_regime": dict(self._ood_checks_by_regime),
+            "ood_blocks_by_regime": dict(self._ood_blocks_by_regime),
+            "ood_checks_by_day": dict(self._ood_checks_by_day),
+            "ood_blocks_by_day": dict(self._ood_blocks_by_day),
+            "top_outlier_features": top_outlier_features,
+            # Backward-compat aliases
+            "checks": checks,
+            "blocks": blocks,
+            "block_rate": float(block_rate),
+        }
+        payload.update(detail)
+        return payload
+
     # ------------------------------------------------------------------
     # Drift detection and retraining
     # ------------------------------------------------------------------
@@ -808,19 +912,25 @@ class MLPipeline:
             True if the model was retrained.
         """
         ml_cfg = self.config.ml
+        elapsed_days: Optional[float] = None
 
-        # Check scheduled retrain frequency
-        if not force and self._last_train_time is not None:
+        # Scheduled retrain is ONE trigger among several (not a hard gate).
+        # We still must evaluate data-version change and PSI drift even when
+        # elapsed days are below the calendar frequency.
+        if self._last_train_time is not None:
             elapsed_days = (time.time() - self._last_train_time) / 86400
-            if elapsed_days < ml_cfg.retrain_freq_days:
-                logger.info(
-                    f"MLPipeline.retrain_if_needed: only {elapsed_days:.1f} days since "
-                    f"last train (threshold={ml_cfg.retrain_freq_days}d); skipping."
-                )
-                return False
+
+        schedule_due = (
+            force
+            or self._last_train_time is None
+            or (elapsed_days is not None and elapsed_days >= ml_cfg.retrain_freq_days)
+        )
+
+        should_retrain = force
+        reason: str = "forced" if force else ""
 
         # Check data-version change
-        if not force and self._data_fingerprint is not None:
+        if not should_retrain and self._data_fingerprint is not None:
             new_fp = _fingerprint_data(price_data)
             if new_fp == self._data_fingerprint:
                 # Data hasn't changed — still check PSI drift below
@@ -830,10 +940,11 @@ class MLPipeline:
                     "MLPipeline.retrain_if_needed: data fingerprint changed "
                     f"({self._data_fingerprint} → {new_fp}); triggering retrain."
                 )
-                force = True  # data changed → always retrain
+                should_retrain = True
+                reason = "data_fingerprint_changed"
 
         # Check PSI drift
-        if not force and self._train_feature_stats:
+        if not should_retrain and self._train_feature_stats:
             try:
                 features = self.feature_engine.compute_features(price_data, symbol=symbol)
                 n_drifted = 0
@@ -855,17 +966,39 @@ class MLPipeline:
                         f"MLPipeline.retrain_if_needed: drift_pct={drift_pct:.2%} "
                         f"< 20%, no retrain needed."
                     )
-                    return False
                 else:
                     logger.info(
                         f"MLPipeline.retrain_if_needed: drift_pct={drift_pct:.2%} "
                         f">= 20%, triggering retrain."
                     )
+                    should_retrain = True
+                    reason = "psi_drift"
             except Exception as exc:
                 logger.warning(f"Drift check failed: {exc}; proceeding with retrain.")
+                should_retrain = True
+                reason = "drift_check_failed_open"
+
+        if not should_retrain and schedule_due:
+            should_retrain = True
+            reason = "scheduled"
+
+        if not should_retrain:
+            if elapsed_days is not None:
+                logger.info(
+                    f"MLPipeline.retrain_if_needed: only {elapsed_days:.1f} days since "
+                    f"last train (threshold={ml_cfg.retrain_freq_days}d); skipping."
+                )
+            else:
+                logger.info(
+                    "MLPipeline.retrain_if_needed: no retrain trigger fired; skipping."
+                )
+            return False
 
         # Retrain
         try:
+            logger.info(
+                f"MLPipeline.retrain_if_needed: retraining triggered ({reason})."
+            )
             self.train_all(price_data, symbol=symbol, run_validation=False)
             return True
         except Exception as exc:
@@ -1500,6 +1633,167 @@ class MLPipeline:
     # ------------------------------------------------------------------
     # Private helpers — misc
     # ------------------------------------------------------------------
+
+    def _resolve_ood_action(self) -> str:
+        """Resolve OOD action from config with mode-aware defaults."""
+        configured = str(getattr(self.config.ml, "ood_action", "auto")).lower().strip()
+        valid = {"auto", "skip", "neutral", "block"}
+        if configured not in valid:
+            logger.warning(
+                "MLPipeline: invalid ml.ood_action=%r; falling back to auto.",
+                configured,
+            )
+            configured = "auto"
+
+        if configured != "auto":
+            return configured
+
+        mode = str(getattr(self.config.system, "mode", "paper")).lower().strip()
+        # Safer defaults by mode:
+        # - backtest: neutral (keep continuity for experiment comparability)
+        # - paper/live: skip (fail-open to base strategy if ML features are OOD)
+        if mode == "backtest":
+            return "neutral"
+        return "skip"
+
+    def _handle_ood_prediction(self, symbol: Optional[str]) -> Dict:
+        """Apply configured OOD fallback behavior for prediction."""
+        key = symbol or "default"
+
+        if self._ood_action == "skip":
+            # No ML adjustment for this symbol; downstream keeps base signal.
+            return {}
+
+        if self._ood_action == "block":
+            # Explicit trade block via meta-labeler-style gate.
+            return {
+                key: {
+                    "score": 0.5,
+                    "confidence": 0.0,
+                    "horizon": 5,
+                    "scores_by_horizon": {},
+                    "calibrated_scores": {},
+                    "meta_score": None,
+                    "regime": 0.0,
+                    "bet_size": 0.0,
+                    "take_trade": False,
+                    "meta_label_prob": None,
+                    "ood_blocked": True,
+                    "ood_action": self._ood_action,
+                }
+            }
+
+        # neutral: emit a no-op ML adjustment to preserve trading continuity.
+        return {
+            key: {
+                "score": 1.0,
+                "confidence": 0.0,
+                "horizon": 5,
+                "scores_by_horizon": {},
+                "calibrated_scores": {},
+                "meta_score": None,
+                "regime": 0.0,
+                "bet_size": 1.0,
+                "take_trade": True,
+                "meta_label_prob": None,
+                "ood_blocked": True,
+                "ood_action": self._ood_action,
+            }
+        }
+
+    def _is_in_distribution(self, features: pd.DataFrame) -> Tuple[bool, Dict[str, float]]:
+        """Return whether the latest feature row is in-distribution.
+
+        The detector compares each live feature to the training 1%-99%
+        quantile envelope stored in ``self._train_feature_stats``.
+
+        A row is flagged OOD when:
+        - outlier_fraction >= ``_OOD_FRACTION_THRESHOLD`` (across checked features), or
+        - any single feature has an extreme outlier score >=
+          ``_OOD_EXTREME_SCORE_THRESHOLD``.
+
+        Returns
+        -------
+        Tuple[bool, Dict[str, float]]
+            (is_in_distribution, diagnostics)
+        """
+        if not self._train_feature_stats:
+            return True, {}
+
+        latest = features.dropna(how="all")
+        if latest.empty:
+            return True, {}
+
+        row = latest.iloc[-1]
+        checked = 0
+        outlier_scores: Dict[str, float] = {}
+
+        for col, (train_vals, _) in self._train_feature_stats.items():
+            if col not in row.index:
+                continue
+
+            curr = row[col]
+            if not np.isfinite(curr):
+                continue
+
+            train = np.asarray(train_vals, dtype=float)
+            train = train[np.isfinite(train)]
+            if len(train) < 50:
+                continue
+
+            q_lo = float(np.quantile(train, _OOD_LOWER_Q))
+            q_hi = float(np.quantile(train, _OOD_UPPER_Q))
+            span = max(q_hi - q_lo, 1e-8)
+
+            checked += 1
+            if curr < q_lo:
+                outlier_scores[col] = float((q_lo - curr) / span)
+            elif curr > q_hi:
+                outlier_scores[col] = float((curr - q_hi) / span)
+
+        if checked < _OOD_MIN_FEATURES_CHECKED:
+            return True, {"checked": float(checked)}
+
+        outlier_fraction = len(outlier_scores) / checked
+        max_outlier = max(outlier_scores.values()) if outlier_scores else 0.0
+
+        is_ood = (
+            outlier_fraction >= _OOD_FRACTION_THRESHOLD
+            or max_outlier >= _OOD_EXTREME_SCORE_THRESHOLD
+        )
+        diagnostics: Dict[str, float] = {
+            "checked": float(checked),
+            "outlier_count": float(len(outlier_scores)),
+            "outlier_fraction": float(outlier_fraction),
+            "max_outlier_score": float(max_outlier),
+        }
+
+        # Keep only the top few outliers to avoid giant logs.
+        if outlier_scores:
+            for feat, score in sorted(
+                outlier_scores.items(),
+                key=lambda kv: kv[1],
+                reverse=True,
+            )[:5]:
+                diagnostics[f"outlier_{feat}"] = float(score)
+
+        return (not is_ood), diagnostics
+
+    @staticmethod
+    def _regime_label(regime_state: Any) -> str:
+        """Return canonical regime label for telemetry buckets."""
+        if regime_state is None:
+            return "UNKNOWN"
+        if isinstance(regime_state, str):
+            return regime_state.upper()
+        if hasattr(regime_state, "regime"):
+            try:
+                return str(regime_state.regime.value).upper()
+            except Exception:
+                return str(regime_state.regime).upper()
+        if hasattr(regime_state, "value"):
+            return str(regime_state.value).upper()
+        return str(regime_state).upper()
 
     @staticmethod
     def _build_lgbm_params(ml_cfg: Any) -> Dict:

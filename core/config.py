@@ -140,6 +140,21 @@ class StatArbConfig:
     stop_z: float = 3.5           # Hard stop at this Z-score
     min_entry_z: float = 1.0      # Minimum Z-score to trigger entry
     lookback_days: int = 252      # 1 year minimum cointegration history
+    # Cointegration significance threshold (also used as BH-FDR alpha).
+    coint_pvalue: float = field(default_factory=lambda: float(
+        os.environ.get("STAT_ARB_COINT_PVALUE", "0.05")
+    ))
+    # Mean-reversion half-life acceptance window in trading days.
+    half_life_min: int = field(default_factory=lambda: int(
+        os.environ.get("STAT_ARB_HALF_LIFE_MIN", "1")
+    ))
+    half_life_max: int = field(default_factory=lambda: int(
+        os.environ.get("STAT_ARB_HALF_LIFE_MAX", "120")
+    ))
+    # Cap active pairs to keep per-bar signal evaluation tractable.
+    max_pairs: int = field(default_factory=lambda: int(
+        os.environ.get("STAT_ARB_MAX_PAIRS", "20")
+    ))
     # Kalman filter noise parameters (initial defaults)
     kalman_transition_cov: float = 1e-5
     kalman_observation_cov: float = 1e-3
@@ -168,6 +183,10 @@ class FactorModelConfig:
     # Factor composite Z-score thresholds
     entry_z: float = 0.75
     exit_z: float = -0.25
+    # Recompute/refresh entries on this many bars (roughly monthly by default).
+    rebalance_days: int = field(default_factory=lambda: int(
+        os.environ.get("FACTOR_REBALANCE_DAYS", "21")
+    ))
     # Factor weights (equal by default; override to time factors)
     quality_weight: float = 0.25
     value_weight: float = 0.25
@@ -289,6 +308,14 @@ class MLConfig:
     # Directory for persisting trained models
     model_dir: str = field(default_factory=lambda: (
         os.environ.get("ML_MODEL_DIR", "models/lgbm")
+    ))
+    # OOD policy for prediction-time feature vectors:
+    #   auto    -> mode-aware default (backtest=neutral, paper/live=skip)
+    #   skip    -> skip ML adjustment for this symbol (fail-open)
+    #   neutral -> emit no-op ML adjustment (score=1, bet_size=1, take_trade=True)
+    #   block   -> emit take_trade=False so ML layer blocks the trade
+    ood_action: str = field(default_factory=lambda: (
+        os.environ.get("ML_OOD_ACTION", "auto").lower()
     ))
 
 

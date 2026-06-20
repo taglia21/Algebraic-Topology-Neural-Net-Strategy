@@ -205,6 +205,25 @@ python -m pytest tests/test_core_modules.py -v
 python -m pytest tests/test_production_modules.py -v
 ```
 
+## Promotion Gates And PR Workflow
+
+Use explicit gate checks before moving between research, paper, and live:
+
+```bash
+# Validate paper->live gate using evidence JSON
+python scripts/check_promotion_gates.py \
+     --gate paper_to_live \
+     --input templates/promotion_gate_evidence.paper_to_live.example.json \
+     --report-out artifacts/promotion_gate_report.paper_to_live.json
+```
+
+Exit code semantics:
+- `0`: gate passed
+- `2`: gate failed
+
+Governance documentation:
+- `docs/PR_WORKFLOW.md` for PR-first workflow and recommended branch protection settings.
+
 ## Key Design Decisions
 
 - **Same code path**: Backtest, paper, and live all run identical strategy logic. Only the data source and broker differ.

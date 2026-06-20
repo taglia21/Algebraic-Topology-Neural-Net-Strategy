@@ -1,0 +1,154 @@
+{
+  "recommendation": {
+    "recommended_policy": "skip",
+    "reason": "Best mean sharpe_ratio: 0.20 (skip) vs block=0.20, neutral=0.20",
+    "rankings": {
+      "skip": 0.20045975706523061,
+      "neutral": 0.20045975706523061,
+      "block": 0.20045975706523061
+    }
+  },
+  "operational_recommendation": {
+    "policy": "skip",
+    "method": "tie_break_score",
+    "weights": {
+      "mean_sharpe": 1.0,
+      "mean_return": 0.2,
+      "mean_ood_block_rate": -0.15,
+      "sharpe_std": -0.25,
+      "mean_max_drawdown_abs": -0.1
+    }
+  },
+  "diagnostics": {
+    "skip": {
+      "n_windows": 1,
+      "mean_sharpe": 0.20045975706523061,
+      "sharpe_std": 0.0,
+      "mean_sortino": 0.22606913821958335,
+      "mean_return": 0.008657699498868169,
+      "mean_max_drawdown": -0.005656933200626745,
+      "mean_ood_block_rate": 0.047619047619047616,
+      "mean_trades": 9.0,
+      "tie_break_score": 0.1944827465020844
+    },
+    "neutral": {
+      "n_windows": 1,
+      "mean_sharpe": 0.20045975706523061,
+      "sharpe_std": 0.0,
+      "mean_sortino": 0.22606913821958335,
+      "mean_return": 0.008657699498868169,
+      "mean_max_drawdown": -0.005656933200626745,
+      "mean_ood_block_rate": 0.047619047619047616,
+      "mean_trades": 9.0,
+      "tie_break_score": 0.1944827465020844
+    },
+    "block": {
+      "n_windows": 1,
+      "mean_sharpe": 0.20045975706523061,
+      "sharpe_std": 0.0,
+      "mean_sortino": 0.22606913821958335,
+      "mean_return": 0.008657699498868169,
+      "mean_max_drawdown": -0.005656933200626745,
+      "mean_ood_block_rate": 0.047619047619047616,
+      "mean_trades": 9.0,
+      "tie_break_score": 0.1944827465020844
+    }
+  },
+  "results": [
+    {
+      "policy": "skip",
+      "window_start": "2024-01-01",
+      "window_end": "2024-03-01",
+      "sharpe": 0.20045975706523061,
+      "sortino": 0.22606913821958335,
+      "max_drawdown": -0.005656933200626745,
+      "total_return": 0.008657699498868169,
+      "n_trades": 9,
+      "ood_checks": 63,
+      "ood_blocks": 3,
+      "ood_block_rate": 0.047619047619047616,
+      "ood_blocks_by_symbol": {
+        "SPY": 2,
+        "QQQ": 1
+      },
+      "ood_blocks_by_regime": {
+        "BEAR": 1,
+        "SIDEWAYS": 2
+      },
+      "ood_blocks_by_day": {
+        "2024-01-23": 1,
+        "2024-02-06": 1,
+        "2024-02-21": 1
+      }
+    },
+    {
+      "policy": "neutral",
+      "window_start": "2024-01-01",
+      "window_end": "2024-03-01",
+      "sharpe": 0.20045975706523061,
+      "sortino": 0.22606913821958335,
+      "max_drawdown": -0.005656933200626745,
+      "total_return": 0.008657699498868169,
+      "n_trades": 9,
+      "ood_checks": 63,
+      "ood_blocks": 3,
+      "ood_block_rate": 0.047619047619047616,
+      "ood_blocks_by_symbol": {
+        "SPY": 2,
+        "QQQ": 1
+      },
+      "ood_blocks_by_regime": {
+        "BEAR": 1,
+        "SIDEWAYS": 2
+      },
+      "ood_blocks_by_day": {
+        "2024-01-23": 1,
+        "2024-02-06": 1,
+        "2024-02-21": 1
+      }
+    },
+    {
+      "policy": "block",
+      "window_start": "2024-01-01",
+      "window_end": "2024-03-01",
+      "sharpe": 0.20045975706523061,
+      "sortino": 0.22606913821958335,
+      "max_drawdown": -0.005656933200626745,
+      "total_return": 0.008657699498868169,
+      "n_trades": 9,
+      "ood_checks": 63,
+      "ood_blocks": 3,
+      "ood_block_rate": 0.047619047619047616,
+      "ood_blocks_by_symbol": {
+        "SPY": 2,
+        "QQQ": 1
+      },
+      "ood_blocks_by_regime": {
+        "BEAR": 1,
+        "SIDEWAYS": 2
+      },
+      "ood_blocks_by_day": {
+        "2024-01-23": 1,
+        "2024-02-06": 1,
+        "2024-02-21": 1
+      }
+    }
+  ],
+  "calibration_params": {
+    "start_date": "2024-01-01",
+    "end_date": "2024-03-31",
+    "window_days": 60,
+    "stride_days": 60,
+    "metric": "sharpe_ratio",
+    "symbols": [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "EEM",
+      "GLD",
+      "TLT",
+      "USO"
+    ],
+    "timestamp": "2026-06-20T21:53:54.644299"
+  }
+}

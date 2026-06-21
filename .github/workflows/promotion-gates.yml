@@ -1,0 +1,74 @@
+name: Promotion Gates Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'templates/promotion_gate_evidence*.json'
+      - 'scripts/check_promotion_gates.py'
+      - '.github/workflows/promotion-gates.yml'
+
+jobs:
+  validate-gates:
+    runs-on: ubuntu-latest
+    name: Validate Promotion Gates
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Detect promotion evidence files
+        id: detect
+        run: |
+          set +e
+          files=$(git diff origin/main...HEAD --name-only | grep 'promotion_gate_evidence.*\.json' || true)
+          echo "evidence_files=$(echo "$files" | tr '\n' ' ')" >> $GITHUB_OUTPUT
+          if [ -z "$files" ]; then
+            echo "no_evidence=true" >> $GITHUB_OUTPUT
+          else
+            echo "no_evidence=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate research->paper gate
+        if: contains(steps.detect.outputs.evidence_files, 'research_to_paper')
+        run: |
+          python scripts/check_promotion_gates.py \
+            --gate research_to_paper \
+            --input templates/promotion_gate_evidence.research_to_paper.json \
+            --report-out /tmp/research_to_paper_gate_report.json
+          echo "::notice::Research->Paper gate passed"
+
+      - name: Validate paper->live gate
+        if: contains(steps.detect.outputs.evidence_files, 'paper_to_live')
+        run: |
+          python scripts/check_promotion_gates.py \
+            --gate paper_to_live \
+            --input templates/promotion_gate_evidence.paper_to_live.json \
+            --report-out /tmp/paper_to_live_gate_report.json
+          echo "::notice::Paper->Live gate passed"
+
+      - name: Validate live scale-up gate
+        if: contains(steps.detect.outputs.evidence_files, 'live_scale_up')
+        run: |
+          python scripts/check_promotion_gates.py \
+            --gate live_scale_up \
+            --input templates/promotion_gate_evidence.live_scale_up.json \
+            --report-out /tmp/live_scale_up_gate_report.json
+          echo "::notice::Live scale-up gate passed"
+
+      - name: Report results
+        if: always()
+        run: |
+          if [ "${{ steps.detect.outputs.no_evidence }}" = "true" ]; then
+            echo "::warning::No promotion evidence files detected. If this PR requires promotion gate validation, add evidence JSON to templates/"
+          else
+            echo "::notice::Promotion gate validation complete. All detected gates passed."
+          fi

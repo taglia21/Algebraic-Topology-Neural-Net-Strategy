@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from typing import Deque, Dict, Optional
 
 from equities.models import PortfolioState
+from equities.telemetry import get_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,9 @@ class KillSwitch:
         self._kill_reason = reason
         self._kill_timestamp = datetime.now(timezone.utc)
         logger.critical(f"KILL SWITCH ENGAGED: {reason}")
+        # Record halt for promotion gate evidence (manual engagement is software defect if triggered by internal condition)
+        is_software_defect = "error:" in reason.lower() or "exception:" in reason.lower()
+        get_telemetry().record_halt(reason, is_software_defect)
 
     def disengage(self) -> None:
         """Release the kill switch, allowing trading to resume."""
@@ -314,3 +318,5 @@ class KillSwitch:
         self._breaker_reason = reason
         self._breaker_trip_time = time.time()
         logger.warning(f"CIRCUIT BREAKER TRIPPED: {reason}")
+        # Record halt for promotion gate evidence (circuit breaker trip is operational, not software defect)
+        get_telemetry().record_halt(reason, is_software_defect=False)

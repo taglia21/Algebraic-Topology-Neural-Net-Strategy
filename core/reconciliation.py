@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Dict, List
 
 from equities.models import Position
+from equities.telemetry import get_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,11 @@ class Reconciler:
         # Log summary
         log_fn = logger.info if report.is_clean else logger.warning
         log_fn(report.summary())
+
+        # Record reconciliation metrics for promotion gate evidence
+        unresolved_count = len(report.discrepancies) - report.corrections_applied
+        if unresolved_count > 0:
+            get_telemetry().record_reconciliation_mismatch(unresolved_count)
 
         return report
 

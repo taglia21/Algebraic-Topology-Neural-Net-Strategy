@@ -1,0 +1,57 @@
+{
+  "checks": [
+    {
+      "actual": 24,
+      "description": "Paper period >= 20 trading days",
+      "expected": "ge 20",
+      "field": "paper_trading_days",
+      "passed": true,
+      "status": "ok"
+    },
+    {
+      "actual": 0.15714285714285708,
+      "description": "Paper/live-sim slippage deviation <= 20%",
+      "expected": "le 0.2",
+      "field": "slippage_relative_deviation",
+      "passed": true,
+      "status": "ok"
+    },
+    {
+      "actual": 0.003,
+      "description": "Order rejection rate <= 1.0%",
+      "expected": "le 0.01",
+      "field": "order_rejection_rate",
+      "passed": true,
+      "status": "ok"
+    },
+    {
+      "actual": 0,
+      "description": "Reconciliation mismatch rate == 0 unresolved mismatches",
+      "expected": "eq 0",
+      "field": "unresolved_reconciliation_mismatches",
+      "passed": true,
+      "status": "ok"
+    },
+    {
+      "actual": 0,
+      "description": "No kill switch hard halt caused by software defects",
+      "expected": "eq 0",
+      "field": "kill_switch_halts_due_to_software_defect",
+      "passed": true,
+      "status": "ok"
+    },
+    {
+      "actual": true,
+      "description": "Runbook and rollback documented",
+      "expected": "bool_is True",
+      "field": "runbook_and_rollback_documented",
+      "passed": true,
+      "status": "ok"
+    }
+  ],
+  "derived": {
+    "slippage_relative_deviation": 0.15714285714285708
+  },
+  "gate": "paper_to_live",
+  "passed": true
+}

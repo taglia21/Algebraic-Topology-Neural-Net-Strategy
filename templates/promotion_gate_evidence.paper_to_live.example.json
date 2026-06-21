@@ -1,0 +1,9 @@
+{
+  "paper_trading_days": 24,
+  "modeled_slippage_bps": 7.0,
+  "realized_slippage_bps": 8.1,
+  "order_rejection_rate": 0.003,
+  "unresolved_reconciliation_mismatches": 0,
+  "kill_switch_halts_due_to_software_defect": 0,
+  "runbook_and_rollback_documented": true
+}

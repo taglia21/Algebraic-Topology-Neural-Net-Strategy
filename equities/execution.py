@@ -69,6 +69,7 @@ from equities.models import (
     PortfolioState,
     Signal,
 )
+from equities.telemetry import get_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -590,6 +591,9 @@ class SimulatedBroker(Broker):
         )
         self._fills.append(fill)
 
+        # Record slippage in telemetry for promotion gate evidence
+        get_telemetry().record_slippage(slippage_bps)
+
         self._log.log_fill(
             order.order_id,
             fill_price,
@@ -963,6 +967,9 @@ class ExecutionManager:
                 )
                 self._submitted_orders[order.order_id] = order
                 submitted.append(order)
+                
+                # Record order submission for telemetry
+                get_telemetry().record_order_submitted()
 
                 logger.info(
                     f"ExecutionManager: submitted {side.upper()} {final_qty} "

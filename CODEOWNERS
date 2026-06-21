@@ -1,0 +1,26 @@
+## CODEOWNERS
+
+# Governance and risk changes require review from all of:
+/scripts/check_promotion_gates.py @taglia21
+/scripts/enable_branch_protection.sh @taglia21
+/docs/PR_WORKFLOW.md @taglia21
+/docs/CI_AND_GOVERNANCE_SETUP.md @taglia21
+/.github/workflows/ @taglia21
+
+# Core risk and execution changes
+/core/risk_manager.py @taglia21
+/core/kill_switch.py @taglia21
+/core/reconciliation.py @taglia21
+/equities/execution.py @taglia21
+
+# ML pipeline and safety
+/ml/pipeline.py @taglia21
+/ml/validation.py @taglia21
+/ml/policy_calibration.py @taglia21
+
+# Strategy logic
+/equities/strategies/ @taglia21
+/vrp/strategy.py @taglia21
+
+# Test coverage - all changes need tests
+/tests/ @taglia21

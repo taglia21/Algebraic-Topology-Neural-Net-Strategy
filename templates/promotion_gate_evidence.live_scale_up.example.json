@@ -1,0 +1,6 @@
+{
+  "initial_live_sizing_cap_pct": 20,
+  "successful_review_cycles": 2,
+  "stability_metrics_drift_pct": 8,
+  "sev1_incidents": 0
+}

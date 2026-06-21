@@ -2,6 +2,11 @@
 
 A production-grade quantitative equity trading system built for retail traders who want institutional-quality alpha generation.
 
+![Promotion Gates Validation](https://github.com/taglia21/Algebraic-Topology-Neural-Net-Strategy/actions/workflows/promotion-gates.yml/badge.svg?branch=main)
+[![Governance](https://img.shields.io/badge/governance-promotion--gates-blue)](docs/CI_AND_GOVERNANCE_SETUP.md)
+
+---
+
 ## Performance
 
 | Metric | Value |

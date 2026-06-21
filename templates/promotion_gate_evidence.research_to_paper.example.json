@@ -1,0 +1,8 @@
+{
+  "oos_sharpe": 1.15,
+  "max_drawdown": 0.12,
+  "calmar": 1.05,
+  "profit_factor": 1.35,
+  "leakage_findings": false,
+  "all_touched_tests_pass": true
+}

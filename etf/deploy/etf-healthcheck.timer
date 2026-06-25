@@ -1,0 +1,14 @@
+# Runs etf-healthcheck.service every 10 minutes (and 5 min after boot) so a
+# down/crash-looping engine or a dropped Gateway session is detected and alerted
+# within ~10 minutes instead of going unnoticed for days.
+[Unit]
+Description=Run ETF health check every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

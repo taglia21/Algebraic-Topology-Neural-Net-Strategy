@@ -249,3 +249,71 @@ def test_runloop_does_not_advance_cadence_on_failed_cycle(monkeypatch, tmp_path)
     rc, advanced = _run_loop_once(monkeypatch, trade_rc=4, tmp_path=tmp_path)
     assert rc == 0  # the --once loop pass itself completes
     assert advanced["called"] is False  # cadence NOT advanced -> retries next window
+
+
+# ---------------------------------------------------------------------------
+# Promotion gate — gates LIVE only, never paper (the crash-loop regression)
+# ---------------------------------------------------------------------------
+# The gate guards real capital. Gating paper execution created a silent
+# systemd crash loop that burned days of paper trading, so paper/dry-run must
+# NEVER be blocked by it. Live remains strictly gated.
+def _gate_args(execute, allow_bypass=False):
+    return types.SimpleNamespace(execute=execute, allow_gate_bypass=allow_bypass)
+
+
+def _write_gate(tmp_path, cleared):
+    import json
+    p = tmp_path / "gate.json"
+    p.write_text(json.dumps({
+        "gate_cleared": cleared,
+        "gate": {"OOS Sharpe >= 1.10": cleared, "Calmar >= 0.80": cleared},
+    }))
+    return p
+
+
+def test_gate_never_blocks_paper_even_when_red(monkeypatch, tmp_path):
+    from etf import main as etf_main
+    gate = _write_gate(tmp_path, cleared=False)
+    monkeypatch.setenv("ETF_PROMOTION_GATE_FILE", str(gate))
+    # Paper execute with a RED gate must still be allowed (no crash loop).
+    assert etf_main._promotion_gate_allows_execution(_gate_args(execute=True), live=False) is True
+
+
+def test_gate_never_blocks_dry_run(monkeypatch, tmp_path):
+    from etf import main as etf_main
+    gate = _write_gate(tmp_path, cleared=False)
+    monkeypatch.setenv("ETF_PROMOTION_GATE_FILE", str(gate))
+    # Dry-run (no --execute) is always allowed regardless of live flag.
+    assert etf_main._promotion_gate_allows_execution(_gate_args(execute=False), live=True) is True
+
+
+def test_gate_blocks_live_when_red(monkeypatch, tmp_path):
+    from etf import main as etf_main
+    gate = _write_gate(tmp_path, cleared=False)
+    monkeypatch.setenv("ETF_PROMOTION_GATE_FILE", str(gate))
+    assert etf_main._promotion_gate_allows_execution(_gate_args(execute=True), live=True) is False
+
+
+def test_gate_allows_live_when_cleared(monkeypatch, tmp_path):
+    from etf import main as etf_main
+    gate = _write_gate(tmp_path, cleared=True)
+    monkeypatch.setenv("ETF_PROMOTION_GATE_FILE", str(gate))
+    assert etf_main._promotion_gate_allows_execution(_gate_args(execute=True), live=True) is True
+
+
+def test_gate_live_bypass_flag_overrides_red(monkeypatch, tmp_path):
+    from etf import main as etf_main
+    gate = _write_gate(tmp_path, cleared=False)
+    monkeypatch.setenv("ETF_PROMOTION_GATE_FILE", str(gate))
+    args = _gate_args(execute=True, allow_bypass=True)
+    assert etf_main._promotion_gate_allows_execution(args, live=True) is True
+
+
+def test_gate_blocks_live_when_evidence_missing(monkeypatch, tmp_path):
+    from etf import main as etf_main
+    # Point at a non-existent gate file -> live must be blocked (fail-safe).
+    monkeypatch.setenv("ETF_PROMOTION_GATE_FILE", str(tmp_path / "does_not_exist.json"))
+    assert etf_main._promotion_gate_allows_execution(_gate_args(execute=True), live=True) is False
+    # ...but paper is still allowed even with no evidence file.
+    assert etf_main._promotion_gate_allows_execution(_gate_args(execute=True), live=False) is True
+

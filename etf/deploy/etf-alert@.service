@@ -1,0 +1,11 @@
+# Templated alert unit fired by `OnFailure=etf-alert@%n.service` on the engine
+# (and reusable for any other unit). %i is the failed unit's name, e.g.
+# `etf-engine.service`. Oneshot: log + webhook, then exit.
+[Unit]
+Description=ETF failure alert for %i
+
+[Service]
+Type=oneshot
+# `-` => tolerate a missing env file (webhook URL lives here if configured).
+EnvironmentFile=-/root/etf-engine/etf-engine.env
+ExecStart=/root/etf-engine/etf/deploy/etf-alert.sh "Unit %i entered FAILED state — engine is DOWN and NOT trading. Inspect: journalctl -u %i -n 80 --no-pager"

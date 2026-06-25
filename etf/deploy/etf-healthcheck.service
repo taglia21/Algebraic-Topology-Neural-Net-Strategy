@@ -1,0 +1,9 @@
+# Periodic liveness probe for the ETF stack (engine + Gateway). Paired with
+# etf-healthcheck.timer. Oneshot: runs the check, alerts on any unhealthy unit.
+[Unit]
+Description=ETF engine + Gateway health check
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/root/etf-engine/etf-engine.env
+ExecStart=/root/etf-engine/etf/deploy/etf-healthcheck.sh

@@ -42,14 +42,20 @@ logging.basicConfig(
 logger = logging.getLogger("etf.main")
 
 
-def _promotion_gate_allows_execution(args) -> bool:
-    """Return True only if promotion evidence exists and passes.
+def _promotion_gate_allows_execution(args, live: bool) -> bool:
+    """Return True unless this is a LIVE run that fails the promotion gate.
 
-    The ETF engine should not submit real orders when its own portfolio gate is
-    red. Operators may explicitly bypass for controlled research using
+    The gate exists to protect REAL capital, so it ONLY blocks live execution.
+    Paper and dry-run cycles are never gated: paper is precisely where a
+    not-yet-promoted book is run forward to gather out-of-sample evidence
+    (gating it created a silent crash loop and burned days of paper trading).
+    Operators may still bypass for a controlled live research run via
     ``--allow-gate-bypass``.
     """
     if not args.execute:
+        return True
+    if not live:
+        # Paper / dry-run is never subject to the live-promotion gate.
         return True
     if getattr(args, "allow_gate_bypass", False):
         logger.warning("Promotion gate bypass enabled by operator flag.")
@@ -738,7 +744,7 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
 
 
 def cmd_paper(cfg: ETFConfig, args) -> int:
-    if not _promotion_gate_allows_execution(args):
+    if not _promotion_gate_allows_execution(args, live=False):
         return 4
     return asyncio.run(_trade(cfg, args, live=False))
 
@@ -836,7 +842,7 @@ def cmd_run(cfg: ETFConfig, args) -> int:
             "Validate on paper for >= 20 trading days first (promotion gate)."
         )
         return 3
-    if not _promotion_gate_allows_execution(args):
+    if not _promotion_gate_allows_execution(args, live=live):
         return 4
     try:
         return asyncio.run(_run_loop(cfg, args, live=live))
@@ -877,7 +883,7 @@ def cmd_live(cfg: ETFConfig, args) -> int:
             "Validate on paper for >= 20 trading days first (promotion gate)."
         )
         return 3
-    if not _promotion_gate_allows_execution(args):
+    if not _promotion_gate_allows_execution(args, live=True):
         return 4
     return asyncio.run(_trade(cfg, args, live=True))
 

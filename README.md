@@ -210,6 +210,93 @@ python -m pytest tests/test_core_modules.py -v
 python -m pytest tests/test_production_modules.py -v
 ```
 
+## ETF Operations Dashboard
+
+Launch the professional monitoring dashboard for readiness, gate status, slippage, and recent fills:
+
+```bash
+streamlit run scripts/etf_dashboard.py
+```
+
+What you get:
+- Promotion gate status and pass/fail breakdown
+- Equity state snapshot (last equity, peak, drawdown)
+- Reconciliation and scheduler state
+- Slippage trend and latest execution cost
+- Recent order/fill events from `logs/trades_*.jsonl`
+- One-click preflight probe (runs `python -m etf.main --mode preflight`)
+
+### Paper Trading Fallback (When IBKR Is Down)
+
+If IBKR Gateway/TWS is unreachable, you can still run paper cycles using the
+local simulated paper broker:
+
+```bash
+python -m etf.main --mode paper --execute --allow-gate-bypass --paper-sim-fallback
+```
+
+State is persisted to `.etf_telemetry/paper_sim_account.json` and execution
+telemetry to `.etf_telemetry/slippage.jsonl`.
+
+### Real IBKR Paper Trading (For Performance Test Period)
+
+If you want trades to appear in your IBKR paper account, run the engine on the
+machine/network that can reach TWS/IB Gateway API and use the real-paper
+launcher below (this path does **not** use simulated fallback):
+
+```bash
+# Required: host where TWS/IB Gateway paper API is listening
+export IBKR_HOST=127.0.0.1
+
+# Optional: set explicitly if you know it.
+# If omitted, launcher probes 7497 then 4002 and picks the first reachable.
+# export IBKR_PORT=7497        # TWS paper
+# export IBKR_PORT=4002        # IB Gateway paper
+
+# Optional: custom client id
+export ETF_IBKR_CLIENT_ID=7
+
+# Optional: bypass promotion gate during controlled paper collection
+export ETF_ALLOW_GATE_BYPASS=1
+
+# Optional: run one cycle immediately (still market-hours constrained)
+export ETF_ONCE=1
+
+scripts/start_etf_ibkr_paper.sh
+```
+
+Notes:
+- You do **not** need a new Alpaca key for ETF IBKR paper routing.
+- This launcher fails fast if IBKR API is unreachable, so you do not get false
+     "paper trading" progress from simulation mode.
+- To run continuously, unset `ETF_ONCE` and leave the script running.
+
+### Cloud Droplet + Local IBKR Bridge
+
+If the bot runs in a cloud container but TWS/Gateway runs on your laptop,
+`127.0.0.1` in the cloud does **not** point to your laptop. You must bridge
+the two endpoints.
+
+Use an SSH reverse tunnel from your local IBKR machine to the droplet:
+
+```bash
+# Run on the local machine where TWS/Gateway is running.
+# Maps droplet 127.0.0.1:4002 -> local 127.0.0.1:7497
+scripts/open_ibkr_reverse_tunnel.sh ubuntu@YOUR_DROPLET 4002 7497
+```
+
+Then, on the droplet/container, run the real-paper launcher:
+
+```bash
+export IBKR_HOST=127.0.0.1
+export IBKR_PORT=4002
+export ETF_ALLOW_GATE_BYPASS=1
+scripts/start_etf_ibkr_paper.sh
+```
+
+This routes *real* paper orders to your IBKR account while keeping strategy
+runtime in the cloud.
+
 ## Promotion Gates And PR Workflow
 
 Use explicit gate checks before moving between research, paper, and live:

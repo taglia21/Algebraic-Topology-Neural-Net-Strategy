@@ -146,6 +146,8 @@ class Backtester:
             initial_cash=_cash,
             slippage_bps=_slippage,
             commission_per_share=_commission,
+            market_impact_factor=self.config.backtest.market_impact_factor,
+            short_borrow_rate=self.config.backtest.short_borrow_rate,
             trade_logger=self._trade_logger,
         )
 
@@ -338,12 +340,13 @@ class Backtester:
             # Extract current prices for all symbols
             current_prices = self._extract_current_prices(bar_df)
 
-            # ---- Update broker mark-to-market ----
-            self.broker.update_prices(current_prices)
-
-            # ---- Set simulated bar datetime for accurate fill timestamps ----
+            # Set simulated bar datetime for accurate fill timestamps and
+            # financing-cost day boundaries.
             if hasattr(self.broker, '_current_bar_dt'):
                 self.broker._current_bar_dt = bar_dt
+
+            # ---- Update broker mark-to-market ----
+            self.broker.update_prices(current_prices)
 
             # ---- Fill pending orders with today's bar ----
             for sym, bar_series in self._iter_symbol_bars(bar_df):
@@ -467,10 +470,13 @@ class Backtester:
             # momentum run every bar because they're O(n).
             signals = []
             price_data = self._build_price_pivot(history, symbols)
+            volume_data = self._build_volume_pivot(history, symbols)
             if price_data is not None and len(price_data) >= 20:
                 try:
                     signals = self.signal_generator.generate_all_signals(
-                        price_data, regime_state
+                        price_data,
+                        regime_state,
+                        volume_data=volume_data,
                     )
                 except Exception as exc:
                     logger.error(
@@ -499,8 +505,12 @@ class Backtester:
             # ---- Step 7-8: Risk check + order submission ----
             if signals:
                 try:
+                    returns_data = price_data.pct_change().dropna() if price_data is not None else None
                     orders = self.execution_manager.process_signals(
-                        signals, current_prices
+                        signals,
+                        current_prices,
+                        returns_data=returns_data,
+                        volume_data=volume_data,
                     )
                 except Exception as exc:
                     logger.error(
@@ -914,6 +924,34 @@ class Backtester:
             logger.debug(f"_build_price_pivot error: {exc}")
             return None
 
+    def _build_volume_pivot(
+        self,
+        history: pd.DataFrame,
+        symbols: List[str],
+    ) -> Optional[pd.DataFrame]:
+        """Build a wide-format volume DataFrame from the MultiIndex history."""
+        if history is None or len(history) == 0:
+            return None
+
+        try:
+            volume_col = None
+            for col in history.columns:
+                if col.lower() == "volume":
+                    volume_col = col
+                    break
+
+            if volume_col is None:
+                return None
+
+            pivot = history[volume_col].unstack(level="symbol")
+            present = [s for s in symbols if s in pivot.columns]
+            if not present:
+                return None
+            return pivot[present]
+        except Exception as exc:
+            logger.debug(f"_build_volume_pivot error: {exc}")
+            return None
+
     def _extract_current_prices(self, bar_df: pd.DataFrame) -> Dict[str, float]:
         """Extract the latest close price for each symbol from a bar slice.
 
@@ -1159,64 +1197,94 @@ class Backtester:
         # Track open lots per symbol: list of {side, qty, price, timestamp}
         open_lots: Dict[str, list] = {}
 
+        def _close_lot(
+            symbol: str,
+            entry_side: str,
+            entry_price: float,
+            entry_ts: Any,
+            exit_price: float,
+            exit_ts: Any,
+            matched_qty: int,
+        ) -> None:
+            if matched_qty <= 0:
+                return
+            if entry_side == "buy":
+                trade_side = "long"
+                pnl = (exit_price - entry_price) * matched_qty
+            else:
+                trade_side = "short"
+                pnl = (entry_price - exit_price) * matched_qty
+
+            trades.append({
+                "symbol":       symbol,
+                "side":         trade_side,
+                "entry_date":   entry_ts,
+                "exit_date":    exit_ts,
+                "entry_price":  entry_price,
+                "exit_price":   exit_price,
+                "qty":          matched_qty,
+                "pnl":          pnl,
+                "holding_days": self._days_between(entry_ts, exit_ts),
+                "strategy":     "combined",
+            })
+
         for fill in fills:
             symbol = fill.symbol
             if symbol not in open_lots:
                 open_lots[symbol] = []
 
             lots = open_lots[symbol]
+            remaining_qty = int(fill.fill_qty)
 
             if fill.side == "buy":
-                # Check if this closes a short position
-                if lots and lots[0]["side"] == "sell":
-                    # Buy to cover — close the short
-                    open_lot = lots.pop(0)
-                    pnl = (open_lot["price"] - fill.fill_price) * fill.fill_qty
-                    holding = self._days_between(open_lot["timestamp"], fill.timestamp)
-                    trades.append({
-                        "symbol":       symbol,
-                        "side":         "short",
-                        "entry_date":   open_lot["timestamp"],
-                        "exit_date":    fill.timestamp,
-                        "entry_price":  open_lot["price"],
-                        "exit_price":   fill.fill_price,
-                        "qty":          fill.fill_qty,
-                        "pnl":          pnl,
-                        "holding_days": holding,
-                        "strategy":     "combined",
-                    })
-                else:
-                    # Open a long position
+                # Buy may close existing shorts first, then open/add long.
+                while remaining_qty > 0 and lots and lots[0]["side"] == "sell":
+                    open_lot = lots[0]
+                    matched_qty = min(remaining_qty, int(open_lot["qty"]))
+                    _close_lot(
+                        symbol=symbol,
+                        entry_side=open_lot["side"],
+                        entry_price=float(open_lot["price"]),
+                        entry_ts=open_lot["timestamp"],
+                        exit_price=float(fill.fill_price),
+                        exit_ts=fill.timestamp,
+                        matched_qty=matched_qty,
+                    )
+                    open_lot["qty"] -= matched_qty
+                    remaining_qty -= matched_qty
+                    if open_lot["qty"] <= 0:
+                        lots.pop(0)
+
+                if remaining_qty > 0:
                     lots.append({
                         "side":      "buy",
-                        "qty":       fill.fill_qty,
+                        "qty":       remaining_qty,
                         "price":     fill.fill_price,
                         "timestamp": fill.timestamp,
                     })
             elif fill.side == "sell":
-                # Check if this closes a long position
-                if lots and lots[0]["side"] == "buy":
-                    # Sell to close — close the long
-                    open_lot = lots.pop(0)
-                    pnl = (fill.fill_price - open_lot["price"]) * fill.fill_qty
-                    holding = self._days_between(open_lot["timestamp"], fill.timestamp)
-                    trades.append({
-                        "symbol":       symbol,
-                        "side":         "long",
-                        "entry_date":   open_lot["timestamp"],
-                        "exit_date":    fill.timestamp,
-                        "entry_price":  open_lot["price"],
-                        "exit_price":   fill.fill_price,
-                        "qty":          fill.fill_qty,
-                        "pnl":          pnl,
-                        "holding_days": holding,
-                        "strategy":     "combined",
-                    })
-                else:
-                    # Open a short position
+                # Sell may close existing longs first, then open/add short.
+                while remaining_qty > 0 and lots and lots[0]["side"] == "buy":
+                    open_lot = lots[0]
+                    matched_qty = min(remaining_qty, int(open_lot["qty"]))
+                    _close_lot(
+                        symbol=symbol,
+                        entry_side=open_lot["side"],
+                        entry_price=float(open_lot["price"]),
+                        entry_ts=open_lot["timestamp"],
+                        exit_price=float(fill.fill_price),
+                        exit_ts=fill.timestamp,
+                        matched_qty=matched_qty,
+                    )
+                    open_lot["qty"] -= matched_qty
+                    remaining_qty -= matched_qty
+                    if open_lot["qty"] <= 0:
+                        lots.pop(0)
+
+                if remaining_qty > 0:
                     lots.append({
                         "side":      "sell",
-                        "qty":       fill.fill_qty,
+                        "qty":       remaining_qty,
                         "price":     fill.fill_price,
                         "timestamp": fill.timestamp,
                     })

@@ -25,6 +25,7 @@ from etf.metrics import compute_metrics, max_drawdown
 from etf.strategy import (
     apply_drawdown_overlay,
     compute_target_weights,
+    enforce_gross_cap,
 )
 
 
@@ -168,6 +169,34 @@ def test_backtest_runs_and_is_finite(cfg, prices):
     assert (res.equity > 0).all()
     assert res.gross_exposure.max() <= cfg.risk.max_gross_leverage + 1e-9
     assert res.metrics.n_periods > 0
+
+
+# --- gross-leverage cap enforcement --------------------------------------
+def test_enforce_gross_cap_noop_within_cap():
+    w = {"A": 0.4, "B": 0.3, "C": 0.2}  # gross 0.9 <= cap
+    assert enforce_gross_cap(w, 1.0) == pytest.approx(w)
+
+
+def test_enforce_gross_cap_scales_when_over():
+    w = {"A": 0.45, "B": 0.45, "C": 0.40}  # gross 1.30 > cap
+    out = enforce_gross_cap(w, 1.0)
+    assert sum(abs(v) for v in out.values()) == pytest.approx(1.0)
+    # Relative composition is preserved by a proportional trim.
+    assert out["A"] / out["C"] == pytest.approx(0.45 / 0.40)
+
+
+def test_enforce_gross_cap_handles_shorts():
+    w = {"A": 0.8, "B": -0.8}  # gross 1.6 > cap
+    out = enforce_gross_cap(w, 1.0)
+    assert sum(abs(v) for v in out.values()) == pytest.approx(1.0)
+    assert out["A"] == pytest.approx(0.5)
+    assert out["B"] == pytest.approx(-0.5)
+
+
+def test_enforce_gross_cap_empty_and_disabled():
+    assert enforce_gross_cap({}, 1.0) == {}
+    # max_gross <= 0 disables the cap (no scaling).
+    assert enforce_gross_cap({"A": 2.0}, 0.0) == pytest.approx({"A": 2.0})
 
 
 def test_costs_reduce_equity(cfg, prices):

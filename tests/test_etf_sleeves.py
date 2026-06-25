@@ -88,6 +88,26 @@ def test_weight_fn_callable_path_runs(cfg, prices):
     assert 0.3 < res.gross_exposure.mean() < 0.7
 
 
+def test_backtest_skips_tiny_rebalance_drifts(cfg, prices):
+    """Weight changes below min_rebalance_delta notional must be ignored."""
+    cfg.execution.min_rebalance_delta = 0.02  # 2% NAV trade-size threshold
+
+    def tiny_drift_weight_fn(p: pd.DataFrame) -> Dict[str, float]:
+        # Oscillates by 1% NAV around a 50% base exposure.
+        return {"SPY": 0.50 if (len(p) % 2 == 0) else 0.51}
+
+    res = run_backtest(
+        prices[["SPY", "BIL"]],
+        cfg,
+        weight_fn=tiny_drift_weight_fn,
+        rebalance_every=1,
+        warmup=1,
+    )
+
+    # After the initial entry, all 1%-NAV drifts should be skipped.
+    assert (res.turnover.iloc[3:] <= 1e-12).all()
+
+
 # --- RSI helper ------------------------------------------------------------
 def test_rsi_bounds_and_causality():
     rng = np.random.default_rng(0)
@@ -311,4 +331,6 @@ def test_analyze_sleeve_set_runs(cfg, prices):
     # blend metrics are finite.
     assert np.isfinite(report.combo_inv_vol.sharpe)
     assert report.overlap_days > 100
+
+
 

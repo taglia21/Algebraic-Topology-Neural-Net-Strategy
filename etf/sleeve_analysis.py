@@ -307,30 +307,15 @@ def analyze_sleeve_set(
 def default_sleeves(cfg: ETFConfig) -> List[Sleeve]:
     """The PRODUCTION sleeve roster: A (trend), B (mean-rev), C (defensive carry).
 
-    Sleeve D (cross-sectional L/S, :class:`CrossSectionalSleeve`) is intentionally
-    excluded: it is beautifully orthogonal (corr ~0.06-0.18) but has NO standalone
-    edge — gross-of-cost Sharpe is ~0/negative across an 8-cell parameter sweep
-    (cross-sectional momentum among ~10 broad equity-sector ETFs is empirically
-    absent). Diversifying a zero-edge source only adds noise and dragged the
-    blend Sharpe 0.51 -> 0.40, so it is rejected for production. The class is
-    retained as tested infrastructure for future research (e.g. a much wider
-    cross-section) and for the Phase 3 combiner experiments.
+    Sleeve D (cross-sectional L/S, :class:`CrossSectionalSleeve`) remains a
+    research sleeve, not a production default. Current full-window evidence in
+    this repository shows that adding D improves drawdown/Calmar but lowers
+    growth and still fails the OOS-Sharpe gate. We keep the core 3-sleeve set as
+    the default while preserving D as a tested, optional candidate.
 
-    Sleeve E (turn-of-month seasonality, :class:`TurnOfMonthSleeve`) is ALSO
-    excluded after honest evaluation (full sample 2007-2026, daily, realistic
-    costs): standalone Sharpe -0.04 gross-of-rf, CPCV median 0.31 but Deflated
-    Sharpe only 0.020 (no edge after multiple-testing deflation), and it is the
-    *least* orthogonal candidate (corr 0.365 to trend — it is just long equity
-    beta inside a calendar window). Adding it dragged the parameter-free inv-vol
-    blend Sharpe 0.51 -> 0.39. The ToM premium on 3 broad equity ETFs net of
-    transaction costs is too thin to be a promotable sleeve. Retained as tested
-    research infrastructure (the calendar logic is reusable for a future
-    cost-aware or wider-universe variant).
-
-    LESSON (two rejected candidates): the Sharpe >= 1.10 gate is an EDGE problem,
-    not an orthogonality problem — the three production sleeves are already
-    decently uncorrelated. Bolting on another low/zero-edge orthogonal stream
-    only adds noise. The next experiments must target genuinely new *edge*.
+    Sleeve E (turn-of-month seasonality, :class:`TurnOfMonthSleeve`) also
+    remains excluded: weak standalone edge net of realistic costs and no blended
+    Sharpe improvement in current tests.
 
     Volatility-managed overlay (``cfg.vol_managed.enabled``): when ON, the two
     equity-beta sleeves (trend, mean-reversion) are wrapped in

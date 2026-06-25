@@ -228,6 +228,11 @@ class RiskConfig:
     max_position_pct: float = field(default_factory=lambda: float(
         os.environ.get("RISK_MAX_POSITION_PCT", "0.20")
     ))
+    # Maximum gross exposure (sum of absolute position notionals) as a
+    # fraction of equity.
+    max_gross_exposure: float = field(default_factory=lambda: float(
+        os.environ.get("RISK_MAX_GROSS_EXPOSURE", "1.50")
+    ))
     max_sector_pct: float = field(default_factory=lambda: float(
         os.environ.get("RISK_MAX_SECTOR_PCT", "0.35")
     ))
@@ -267,6 +272,10 @@ class RiskConfig:
     # --- Kelly criterion ---
     # Position size is capped at half-Kelly
     kelly_fraction: float = 0.5
+    # Volatility target used by volatility-inverse and Kelly sizing paths.
+    vol_target: float = field(default_factory=lambda: float(
+        os.environ.get("RISK_VOL_TARGET", "0.20")
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -334,9 +343,13 @@ class BacktestConfig:
         os.environ.get("BACKTEST_COMMISSION_PER_SHARE", "0.005")
     ))
     # Market-impact model: cost ≈ market_impact_factor * sqrt(qty / adv)
-    market_impact_factor: float = 0.1
+    market_impact_factor: float = field(default_factory=lambda: float(
+        os.environ.get("BACKTEST_MARKET_IMPACT_FACTOR", "0.1")
+    ))
     # Short borrow rate, annualised
-    short_borrow_rate: float = 0.02
+    short_borrow_rate: float = field(default_factory=lambda: float(
+        os.environ.get("BACKTEST_SHORT_BORROW_RATE", "0.02")
+    ))
 
     # Walk-forward parameters
     train_window: int = field(default_factory=lambda: int(

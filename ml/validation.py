@@ -140,6 +140,7 @@ def cpcv_validate(
     model_factory: ModelFactory,
     features: pd.DataFrame,
     labels: pd.Series,
+    forward_returns: Optional[pd.Series] = None,
     n_groups: int = 10,
     purge_window: int = 26,
     n_paths: Optional[int] = None,
@@ -194,8 +195,13 @@ def cpcv_validate(
 
     # Drop rows where labels are NaN (features are imputed inside model.train)
     valid_mask = labels.notna()
+    if forward_returns is not None:
+        valid_mask &= forward_returns.notna()
     feats = features.loc[valid_mask].copy()
     labs  = labels.loc[valid_mask].copy()
+    fwd: Optional[pd.Series] = None
+    if forward_returns is not None:
+        fwd = forward_returns.loc[valid_mask].copy()
 
     n = len(feats)
     if n < n_groups * 10:
@@ -220,6 +226,7 @@ def cpcv_validate(
     sharpe_per_path: List[float] = []
     feats_arr = feats.values
     labs_arr  = labs.values
+    fwd_arr = fwd.values if fwd is not None else None
 
     for path_idx, test_groups in enumerate(all_test_combos):
         test_mask  = np.isin(group_ids, test_groups)
@@ -257,7 +264,8 @@ def cpcv_validate(
             logger.warning(f"CPCV path {path_idx}: training/prediction failed: {exc}")
             continue
 
-        strat_returns = _predictions_to_returns(preds, y_test.values, threshold)
+        realized = fwd_arr[test_pos_idx] if fwd_arr is not None else y_test.values
+        strat_returns = _predictions_to_returns(preds, realized, threshold)
         sr = _sharpe(strat_returns)
         sharpe_per_path.append(sr)
 
@@ -402,6 +410,7 @@ def walk_forward_validate(
     model_factory: ModelFactory,
     features: pd.DataFrame,
     labels: pd.Series,
+    forward_returns: Optional[pd.Series] = None,
     train_window: int = 504,
     test_window: int = 21,
     step: int = 21,
@@ -457,8 +466,13 @@ def walk_forward_validate(
     """
     # Drop rows where labels are NaN (features are imputed inside model.train)
     valid_mask = labels.notna()
+    if forward_returns is not None:
+        valid_mask &= forward_returns.notna()
     feats = features.loc[valid_mask].copy()
     labs  = labels.loc[valid_mask].copy()
+    fwd: Optional[pd.Series] = None
+    if forward_returns is not None:
+        fwd = forward_returns.loc[valid_mask].copy()
     n     = len(feats)
 
     # Compute how many windows are possible
@@ -478,6 +492,7 @@ def walk_forward_validate(
 
     feats_arr = feats.values
     labs_arr  = labs.values
+    fwd_arr = fwd.values if fwd is not None else None
 
     all_oos_returns: List[np.ndarray] = []
     per_window_sharpe: List[float]    = []
@@ -495,6 +510,13 @@ def walk_forward_validate(
         X_test  = pd.DataFrame(feats_arr[test_start:test_end], columns=feats.columns)
         y_test  = pd.Series(labs_arr[test_start:test_end])
 
+        realized_train = (
+            fwd_arr[start:train_end] if fwd_arr is not None else y_train.values
+        )
+        realized_test = (
+            fwd_arr[test_start:test_end] if fwd_arr is not None else y_test.values
+        )
+
         try:
             model = model_factory()
             model.train(X_train, y_train)
@@ -505,8 +527,8 @@ def walk_forward_validate(
             start += step
             continue
 
-        oos_ret = _predictions_to_returns(oos_preds, y_test.values, threshold)
-        is_ret  = _predictions_to_returns(is_preds,  y_train.values, threshold)
+        oos_ret = _predictions_to_returns(oos_preds, realized_test, threshold)
+        is_ret  = _predictions_to_returns(is_preds,  realized_train, threshold)
 
         oos_sr  = _sharpe(oos_ret)
         is_sr   = _sharpe(is_ret)
@@ -661,6 +683,7 @@ def validate_model(
     model_factory: ModelFactory,
     features: pd.DataFrame,
     labels: pd.Series,
+    forward_returns: Optional[pd.Series] = None,
     config: Optional[Dict] = None,
 ) -> Dict:
     """Run ALL validation checks and return a comprehensive report.
@@ -721,6 +744,7 @@ def validate_model(
             model_factory  = model_factory,
             features       = features,
             labels         = labels,
+            forward_returns= forward_returns,
             train_window   = cfg["train_window"],
             test_window    = cfg["test_window"],
             step           = cfg["step"],
@@ -745,6 +769,7 @@ def validate_model(
             model_factory  = model_factory,
             features       = features,
             labels         = labels,
+            forward_returns= forward_returns,
             n_groups       = cfg["cpcv_n_groups"],
             purge_window   = cfg["cpcv_purge_window"],
             threshold      = cfg["threshold"],

@@ -52,7 +52,7 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -213,15 +213,13 @@ class SimulatedBroker(Broker):
         Audit logger.
     """
 
-    # Almgren-Chriss temporary impact calibration constant.
-    # Kyle's lambda ≈ 0.1 is a widely-used institutional default.
-    _IMPACT_K: float = 0.1
-
     def __init__(
         self,
         initial_cash: float = 100_000.0,
         slippage_bps: float = 7.0,
         commission_per_share: float = 0.005,
+        market_impact_factor: float = 0.1,
+        short_borrow_rate: float = 0.02,
         account_id: str = "SIM-001",
         trade_logger: Optional[TradeLogger] = None,
     ) -> None:
@@ -232,6 +230,8 @@ class SimulatedBroker(Broker):
         self._cash = initial_cash
         self._slippage_bps = slippage_bps
         self._commission_per_share = commission_per_share
+        self._impact_k = max(float(market_impact_factor), 0.0)
+        self._short_borrow_rate = max(float(short_borrow_rate), 0.0)
         self._account_id = account_id
         self._log = trade_logger or get_trade_logger()
 
@@ -262,11 +262,14 @@ class SimulatedBroker(Broker):
         # reset_daily().  Initialised to initial_cash so that today_pnl starts
         # at zero on day 1.
         self._sod_equity: float = initial_cash
+        # Date of the most recent borrow-cost charge (applied once per day).
+        self._last_borrow_charge_date: Optional[date] = None
 
         logger.info(
             f"SimulatedBroker initialised: "
             f"cash={initial_cash:,.2f}, slippage={slippage_bps}bps, "
-            f"market_impact=sqrt (k={self._IMPACT_K})."
+            f"market_impact=sqrt (k={self._impact_k}), "
+            f"short_borrow_rate={self._short_borrow_rate:.2%}."
         )
 
     # ------------------------------------------------------------------
@@ -441,6 +444,32 @@ class SimulatedBroker(Broker):
                 pos.current_price = float(price)
                 pos.unrealized_pnl = (pos.current_price - pos.avg_entry) * pos.qty
 
+        self._apply_short_borrow_cost()
+
+    def _apply_short_borrow_cost(self) -> None:
+        """Apply one day of financing cost for open short inventory."""
+        if self._short_borrow_rate <= 0.0 or self._current_bar_dt is None:
+            return
+
+        cur_date = self._current_bar_dt.date()
+        if self._last_borrow_charge_date == cur_date:
+            return
+
+        short_notional = sum(
+            abs(pos.qty * pos.current_price)
+            for pos in self._positions.values()
+            if pos.qty < 0
+        )
+        if short_notional <= 0.0:
+            self._last_borrow_charge_date = cur_date
+            return
+
+        daily_rate = self._short_borrow_rate / 252.0
+        borrow_cost = short_notional * daily_rate
+        self._cash -= borrow_cost
+        self._realized_pnl -= borrow_cost
+        self._last_borrow_charge_date = cur_date
+
     # ------------------------------------------------------------------
     # Private fill logic
     # ------------------------------------------------------------------
@@ -485,7 +514,7 @@ class SimulatedBroker(Broker):
             return 0.0
 
         participation_rate = float(qty) / adv
-        impact = self._IMPACT_K * sigma_daily * np.sqrt(participation_rate)
+        impact = self._impact_k * sigma_daily * np.sqrt(participation_rate)
 
         # Convert to basis points (impact is in decimal return units)
         return impact * 10_000.0
@@ -819,6 +848,9 @@ class ExecutionManager:
         self,
         signals: List[Signal],
         current_prices: Dict[str, float],
+        returns_data: Optional[pd.DataFrame] = None,
+        volume_data: Optional[pd.DataFrame] = None,
+        sector_map: Optional[Dict[str, str]] = None,
     ) -> List[Order]:
         """Convert signals to orders with risk approval and submit to broker.
 
@@ -828,6 +860,14 @@ class ExecutionManager:
             Consolidated signals from :class:`~equities.signal_generator.SignalGenerator`.
         current_prices:
             Current prices for all symbols (used for position sizing).
+        returns_data:
+            Optional return matrix (columns=symbols) used for pairwise
+            correlation checks in the risk manager.
+        volume_data:
+            Optional volume matrix used to estimate ADV-sensitive entry
+            thresholds.
+        sector_map:
+            Optional symbol->sector mapping used for sector exposure checks.
 
         Returns
         -------
@@ -879,10 +919,14 @@ class ExecutionManager:
                     if k.endswith("__pre_scale_strength") and isinstance(v, (int, float))
                 ]
                 _raw_str = max(_pre_scales) if _pre_scales else signal.strength
-            _MIN_RAW_STRENGTH = 0.20
+            _MIN_RAW_STRENGTH = self._liquidity_adjusted_strength_floor(
+                symbol=symbol,
+                price=price,
+                volume_data=volume_data,
+            )
             if abs(float(_raw_str)) < _MIN_RAW_STRENGTH:
                 logger.info(
-                    f"ExecutionManager: {symbol} raw strength {float(_raw_str):.3f} < {_MIN_RAW_STRENGTH} — skip"
+                    f"ExecutionManager: {symbol} raw strength {float(_raw_str):.3f} < {_MIN_RAW_STRENGTH:.3f} — skip"
                 )
                 continue
 
@@ -925,6 +969,7 @@ class ExecutionManager:
                     sym: pos.market_value
                     for sym, pos in portfolio_state.positions.items()
                 },
+                sector_map=self._build_sector_map(portfolio_state, symbol, signal, sector_map),
             )
 
             approval = self._risk_manager.approve_trade(
@@ -933,6 +978,7 @@ class ExecutionManager:
                 qty=qty,
                 price=price,
                 portfolio_state=rm_portfolio,
+                returns_data=returns_data,
             )
 
             if not approval.approved:
@@ -1092,12 +1138,12 @@ class ExecutionManager:
         Number of shares (0 if below minimum lot size).
         """
         max_pct = get_config().risk.max_position_pct
+        max_gross_exposure_pct = get_config().risk.max_gross_exposure
         equity = max(portfolio_state.equity, 1.0)
 
         # --- Gross exposure cap (150% of equity) ---
-        _MAX_GROSS_EXPOSURE_PCT = 0.95
         current_gross = portfolio_state.gross_exposure
-        remaining_capacity = max(equity * _MAX_GROSS_EXPOSURE_PCT - current_gross, 0.0)
+        remaining_capacity = max(equity * max_gross_exposure_pct - current_gross, 0.0)
         if remaining_capacity <= 0:
             logger.info(
                 f"ExecutionManager: gross exposure at {current_gross / equity:.1%} "
@@ -1150,6 +1196,110 @@ class ExecutionManager:
 
         qty = int(target_notional / max(price, 0.01))
         return max(qty, 0)
+
+    def _liquidity_adjusted_strength_floor(
+        self,
+        symbol: str,
+        price: float,
+        volume_data: Optional[pd.DataFrame] = None,
+    ) -> float:
+        """Return a conservative minimum raw-strength floor for new entries.
+
+        The floor rises as modeled execution costs and liquidity stress rise,
+        so weaker signals are filtered out sooner under stressed trading
+        conditions.
+        """
+        cfg = get_config()
+        base_floor = 0.20
+        slippage_bps = max(float(cfg.backtest.slippage_bps), 0.0)
+        commission_bps = 0.0
+        if price > 0:
+            commission_bps = max(float(cfg.backtest.commission_per_share), 0.0) / price * 10_000.0
+
+        adv_shares = self._estimate_adv_shares(symbol, volume_data=volume_data)
+        impact_bps = 0.0
+        liquidity_penalty = 0.0
+
+        if adv_shares is not None and adv_shares > 0.0 and price > 0.0:
+            price_hist = self._broker._price_history.get(symbol, [])
+            if len(price_hist) >= 5:
+                adv_window = int(getattr(self._broker, "_adv_window", 20))
+                prices = np.asarray(price_hist[-adv_window:], dtype=float)
+                prices = prices[prices > 0]
+                if len(prices) >= 5:
+                    log_returns = np.diff(np.log(prices))
+                    if len(log_returns) >= 2:
+                        sigma_daily = float(np.std(log_returns, ddof=1))
+                        if sigma_daily > 0.0:
+                            expected_qty = max(1.0, self._max_position_value / price)
+                            participation_rate = min(expected_qty / adv_shares, 1.0)
+                            impact_bps = (
+                                max(float(cfg.backtest.market_impact_factor), 0.0)
+                                * sigma_daily
+                                * np.sqrt(participation_rate)
+                                * 10_000.0
+                            )
+
+            adv_dollars = adv_shares * price
+            expected_participation = self._max_position_value / max(adv_dollars, 1.0)
+            liquidity_penalty = min(0.08, max(0.0, expected_participation - 0.02) * 0.75)
+
+        modeled_cost_bps = slippage_bps + commission_bps + impact_bps
+        return min(0.40, base_floor + 0.0075 * modeled_cost_bps + liquidity_penalty)
+
+    def _estimate_adv_shares(
+        self,
+        symbol: str,
+        volume_data: Optional[pd.DataFrame] = None,
+    ) -> Optional[float]:
+        """Estimate trailing ADV in shares from the best available source."""
+        adv_window = int(getattr(self._broker, "_adv_window", 20))
+        if volume_data is not None and symbol in volume_data.columns:
+            vol_series = volume_data[symbol].dropna().tail(adv_window)
+            if len(vol_series) >= 5:
+                adv = float(vol_series.mean())
+                if adv > 0.0:
+                    return adv
+
+        volume_history = getattr(self._broker, "_volume_history", {})
+        vol_hist = volume_history.get(symbol, []) if isinstance(volume_history, dict) else []
+        if len(vol_hist) >= 5:
+            adv = float(np.mean(vol_hist[-adv_window:]))
+            if adv > 0.0:
+                return adv
+
+        return None
+
+    def _cost_adjusted_strength_floor(self, price: float) -> float:
+        """Compatibility wrapper for callers/tests that only want cost inputs."""
+        return self._liquidity_adjusted_strength_floor(symbol="", price=price, volume_data=None)
+
+    @staticmethod
+    def _build_sector_map(
+        portfolio_state: PortfolioState,
+        symbol: str,
+        signal: Signal,
+        external_sector_map: Optional[Dict[str, str]],
+    ) -> Dict[str, str]:
+        """Assemble a best-effort sector map for risk checks.
+
+        Uses (in order): explicit external map, existing position metadata,
+        and signal metadata for the candidate symbol.
+        """
+        merged: Dict[str, str] = {}
+
+        if external_sector_map:
+            merged.update(external_sector_map)
+
+        for held_sym, pos in portfolio_state.positions.items():
+            if getattr(pos, "sector", None) and pos.sector != "Unknown":
+                merged.setdefault(held_sym, pos.sector)
+
+        sig_sector = signal.metadata.get("sector")
+        if isinstance(sig_sector, str) and sig_sector:
+            merged[symbol] = sig_sector
+
+        return merged
 
     # ------------------------------------------------------------------
     # Accessors

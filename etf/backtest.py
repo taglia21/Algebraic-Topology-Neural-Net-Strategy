@@ -24,7 +24,7 @@ import pandas as pd
 
 from etf.config import ETFConfig
 from etf.metrics import ETFMetrics, compute_metrics
-from etf.strategy import apply_drawdown_overlay, compute_target_weights
+from etf.strategy import apply_drawdown_overlay, compute_target_weights, enforce_gross_cap
 
 logger = logging.getLogger("etf.backtest")
 
@@ -45,6 +45,33 @@ class BacktestResult:
 def _warmup_bars(cfg: ETFConfig) -> int:
     s = cfg.signal
     return max(s.trend_sma, s.ts_momentum_long, max(s.momentum_lookbacks)) + 1
+
+
+def _apply_min_rebalance_delta(
+    current_weights: Dict[str, float],
+    target_weights: Dict[str, float],
+    *,
+    equity: float,
+    min_rebalance_delta: float,
+) -> Dict[str, float]:
+    """Apply live-like min-notional rebalance threshold to target weights.
+
+    For each symbol, if the absolute notional trade implied by the weight change
+    is below ``min_rebalance_delta * equity``, retain the current weight.
+    """
+    threshold = max(0.0, float(min_rebalance_delta)) * max(0.0, float(equity))
+    if threshold <= 0.0:
+        return {k: float(v) for k, v in target_weights.items() if abs(v) > 1e-12}
+
+    effective: Dict[str, float] = {}
+    for sym in set(current_weights) | set(target_weights):
+        cur_w = float(current_weights.get(sym, 0.0))
+        tgt_w = float(target_weights.get(sym, 0.0))
+        trade_notional = abs(tgt_w - cur_w) * equity
+        w = cur_w if trade_notional < threshold else tgt_w
+        if abs(w) > 1e-12:
+            effective[sym] = w
+    return effective
 
 
 def run_backtest(
@@ -123,14 +150,33 @@ def run_backtest(
                 new_weights = {k: float(v) for k, v in raw.items() if abs(v) > 1e-12}
                 new_cash = max(0.0, 1.0 - float(sum(new_weights.values())))
 
-            # L1 turnover across the union of old & new risky positions.
-            syms = set(active_weights) | set(new_weights)
-            turnover_today = sum(abs(new_weights.get(s, 0.0) - active_weights.get(s, 0.0)) for s in syms)
+            # Mirror live execution: tiny notional drifts are ignored.
+            effective_weights = _apply_min_rebalance_delta(
+                active_weights,
+                new_weights,
+                equity=equity,
+                min_rebalance_delta=cfg.execution.min_rebalance_delta,
+            )
+            # Strictly enforce the gross-leverage cap on the actually-held book.
+            # The min-delta filter mixes retained-old and adopted-new weights and
+            # can push gross above the cap even though both books individually
+            # satisfy it; trim proportionally so the held exposure never breaches
+            # max_gross_leverage (matches the live-broker enforcement).
+            effective_weights = enforce_gross_cap(
+                effective_weights, cfg.risk.max_gross_leverage
+            )
+
+            # L1 turnover across the union of old & effective new positions.
+            syms = set(active_weights) | set(effective_weights)
+            turnover_today = sum(
+                abs(effective_weights.get(s, 0.0) - active_weights.get(s, 0.0))
+                for s in syms
+            )
             # Charge cost on the traded notional now (reduces tomorrow's base).
             equity *= (1.0 - turnover_today * cost_rate)
 
-            active_weights = new_weights
-            active_cash = new_cash
+            active_weights = effective_weights
+            active_cash = max(0.0, 1.0 - float(sum(active_weights.values())))
             last_rebalance = i
             rebalance_dates.append(date)
 

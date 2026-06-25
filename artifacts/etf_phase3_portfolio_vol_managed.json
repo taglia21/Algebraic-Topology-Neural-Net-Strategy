@@ -1,0 +1,100 @@
+{
+  "method": "erc",
+  "sleeves": [
+    "trend_momentum",
+    "mean_reversion",
+    "defensive_carry"
+  ],
+  "max_leverage": 1.0,
+  "dd_derisk": false,
+  "comparison": {
+    "equal": {
+      "total_return": 2.2314200551417867,
+      "cagr": 0.0636231974982624,
+      "annual_volatility": 0.06974677219625934,
+      "sharpe": 0.48925981100514027,
+      "sortino": 0.6150767963424051,
+      "max_drawdown": -0.1242267930307902,
+      "calmar": 0.5121535857606264,
+      "win_rate": 0.5605175292153589,
+      "profit_factor": 1.1826221385752944,
+      "var_95": -0.006681252792019665,
+      "cvar_95": -0.010590835629064096,
+      "avg_gross_exposure": 0.9718228851023779,
+      "turnover_annual": 0.0,
+      "alpha": 0.0,
+      "beta": 0.0,
+      "n_periods": 4792
+    },
+    "inverse_vol": {
+      "total_return": 1.7764335928018573,
+      "cagr": 0.05516882787975241,
+      "annual_volatility": 0.05764951725220701,
+      "sharpe": 0.4400767386520015,
+      "sortino": 0.5305929002195738,
+      "max_drawdown": -0.10356223119486585,
+      "calmar": 0.5327118510603066,
+      "win_rate": 0.5640651085141903,
+      "profit_factor": 1.2030214271510284,
+      "var_95": -0.005222147368417246,
+      "cvar_95": -0.008886686981193836,
+      "avg_gross_exposure": 0.9732637495569018,
+      "turnover_annual": 0.0,
+      "alpha": 0.0,
+      "beta": 0.0,
+      "n_periods": 4792
+    },
+    "erc": {
+      "total_return": 1.6764844338792781,
+      "cagr": 0.053136396459009694,
+      "annual_volatility": 0.05669258621150914,
+      "sharpe": 0.41251852120455884,
+      "sortino": 0.4953434058369386,
+      "max_drawdown": -0.10569051115081918,
+      "calmar": 0.5027546548921942,
+      "win_rate": 0.5659432387312187,
+      "profit_factor": 1.2006525689644503,
+      "var_95": -0.005045976276883057,
+      "cvar_95": -0.008756416370167192,
+      "avg_gross_exposure": 0.9733776322025138,
+      "turnover_annual": 0.0,
+      "alpha": 0.0,
+      "beta": 0.0,
+      "n_periods": 4792
+    }
+  },
+  "metrics": {
+    "total_return": 1.6764844338792781,
+    "cagr": 0.053136396459009694,
+    "annual_volatility": 0.05669258621150914,
+    "sharpe": 0.41251852120455884,
+    "sortino": 0.4953434058369386,
+    "max_drawdown": -0.10569051115081918,
+    "calmar": 0.5027546548921942,
+    "win_rate": 0.5659432387312187,
+    "profit_factor": 1.2006525689644503,
+    "var_95": -0.005045976276883057,
+    "cvar_95": -0.008756416370167192,
+    "avg_gross_exposure": 0.9733776322025138,
+    "turnover_annual": 0.0,
+    "alpha": 0.0,
+    "beta": 0.0,
+    "n_periods": 4792
+  },
+  "cpcv_median": 0.9299923471828311,
+  "cpcv_p_positive": 1.0,
+  "dsr": 0.9344806590256975,
+  "gate": {
+    "OOS Sharpe >= 1.10": false,
+    "Max drawdown <= 18%": true,
+    "Calmar >= 0.80": false,
+    "Profit factor >= 1.20": true
+  },
+  "gate_cleared": false,
+  "avg_allocation": {
+    "trend_momentum": 0.1651524657602896,
+    "mean_reversion": 0.4163697124572171,
+    "defensive_carry": 0.41834901577020206
+  },
+  "avg_gross_exposure": 0.9733776322025138
+}

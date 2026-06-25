@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -39,6 +40,53 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("etf.main")
+
+
+def _promotion_gate_allows_execution(args) -> bool:
+    """Return True only if promotion evidence exists and passes.
+
+    The ETF engine should not submit real orders when its own portfolio gate is
+    red. Operators may explicitly bypass for controlled research using
+    ``--allow-gate-bypass``.
+    """
+    if not args.execute:
+        return True
+    if getattr(args, "allow_gate_bypass", False):
+        logger.warning("Promotion gate bypass enabled by operator flag.")
+        return True
+
+    gate_path = os.environ.get("ETF_PROMOTION_GATE_FILE", "etf_phase3_portfolio.json")
+    if not os.path.exists(gate_path):
+        logger.error(
+            "Blocking execution: promotion evidence file not found: %s. "
+            "Run portfolio validation first (python -m etf.main --mode portfolio --out %s).",
+            gate_path,
+            gate_path,
+        )
+        return False
+
+    try:
+        with open(gate_path, "r") as fh:
+            report = json.load(fh)
+    except Exception as exc:
+        logger.error("Blocking execution: failed to read promotion evidence %s: %s", gate_path, exc)
+        return False
+
+    gate_cleared = bool(report.get("gate_cleared", False))
+    if gate_cleared:
+        logger.info("Promotion gate passed (%s). Execution allowed.", gate_path)
+        return True
+
+    logger.error("Blocking execution: promotion gate NOT cleared (%s).", gate_path)
+    gate = report.get("gate", {})
+    if isinstance(gate, dict):
+        for name, passed in gate.items():
+            logger.error("  [%s] %s", "PASS" if passed else "FAIL", name)
+    logger.error(
+        "If this is an intentional research run, add --allow-gate-bypass. "
+        "Otherwise improve the book and re-run portfolio validation."
+    )
+    return False
 
 
 def _print_metrics(title: str, m, benchmark=None) -> None:
@@ -230,6 +278,7 @@ def cmd_portfolio(cfg: ETFConfig, args) -> int:
         "Combining %d sleeves via %s: %s",
         len(sleeves), cfg.portfolio.method, ", ".join(sleeve_names),
     )
+    selected_method = cfg.portfolio.method
 
     # --- Method comparison (equal / inverse_vol / erc) on identical sleeves ---
     comparison = {}
@@ -249,8 +298,8 @@ def cmd_portfolio(cfg: ETFConfig, args) -> int:
         print(f"{method:<14}{m.sharpe:>8.2f}{m.sortino:>9.2f}{m.cagr:>9.2%}"
               f"{m.annual_volatility:>8.2%}{m.max_drawdown:>9.2%}{m.calmar:>8.2f}{m.profit_factor:>7.2f}")
 
-    # --- Focus on the configured method (default erc) for the gate + OOS ---
-    primary = args.method or "erc"
+    # --- Focus on the configured method for the gate + OOS ---
+    primary = selected_method
     cfg.portfolio.method = primary
     res = comparison[primary]
     m = res.metrics
@@ -523,10 +572,44 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
 
     dry_run = not args.execute
     broker = IBKRETFBroker(cfg.ibkr, dry_run=dry_run)
+    using_sim_fallback = False
     if not await broker.connect():
-        logger.error("Could not connect to IBKR; aborting.")
-        return 2
+        if (not live) and getattr(args, "paper_sim_fallback", False):
+            from etf.paper_broker import SimulatedPaperBroker
+
+            logger.warning(
+                "IBKR unavailable; switching to simulated paper broker fallback "
+                "for this paper cycle."
+            )
+            broker = SimulatedPaperBroker(cfg.execution, dry_run=dry_run)
+            using_sim_fallback = True
+            if not await broker.connect():
+                logger.error("Could not initialize simulated paper fallback; aborting.")
+                return 2
+        else:
+            logger.error("Could not connect to IBKR; aborting.")
+            return 2
+    # Exit code propagated to the scheduler. A non-zero code means this cycle
+    # did NOT cleanly establish the target book, so the runner must NOT advance
+    # the rebalance cadence (it should retry at the next eligible window rather
+    # than wait a full cadence on a failed/incomplete rebalance).
+    trade_exit_code = 0
     try:
+        # Keep simulated paper fallback safety memory isolated from primary
+        # paper/live state, so stale primary equity/reconciliation history does
+        # not spuriously halt local fallback cycles.
+        state_path = cfg.execution.state_path
+        recon_state_path = cfg.execution.recon_state_path
+        if using_sim_fallback:
+            state_path = os.environ.get(
+                "ETF_PAPER_SIM_EQUITY_STATE_PATH",
+                ".etf_telemetry/paper_sim_equity_state.json",
+            )
+            recon_state_path = os.environ.get(
+                "ETF_PAPER_SIM_RECON_STATE_PATH",
+                ".etf_telemetry/paper_sim_reconciliation_state.json",
+            )
+
         # --- Update persistent equity state -> live drawdown / daily P&L ---
         # The kill-switch needs memory across cycles (peak + start-of-day equity)
         # that survives restarts. We read the broker's equity, advance the state,
@@ -536,9 +619,9 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
         current_drawdown, daily_pnl_pct = 0.0, 0.0
         account = await broker.get_account()
         if account is not None and account.equity > 0:
-            prev_state = load_state(cfg.execution.state_path)
+            prev_state = load_state(state_path)
             state, current_drawdown, daily_pnl_pct = update_state(prev_state, account.equity)
-            save_state(state, cfg.execution.state_path)
+            save_state(state, state_path)
             logger.info(
                 "Equity state: equity $%.2f, peak $%.2f, drawdown %.2f%%, daily P&L %.2f%%",
                 account.equity, state.peak_equity, 100 * current_drawdown, 100 * daily_pnl_pct,
@@ -551,7 +634,7 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
         # top of an inconsistent book — block until a human investigates and
         # resets (delete the recon-state file). A missing file => no prior cycle
         # => reconciled (a fresh deployment is free to trade).
-        prior_recon = load_reconciliation_state(cfg.execution.recon_state_path)
+        prior_recon = load_reconciliation_state(recon_state_path)
         reconciliation_ok = True if prior_recon is None else prior_recon.ok
         if not reconciliation_ok:
             logger.warning(
@@ -631,7 +714,7 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
         elif report.ok:
             logger.info("Reconciliation OK: live book matches target within tolerance.")
             save_reconciliation_state(
-                True, {}, cfg.execution.recon_state_path, as_of=report.as_of,
+                True, {}, recon_state_path, as_of=report.as_of,
             )
         else:
             logger.warning(
@@ -639,15 +722,24 @@ async def _trade(cfg: ETFConfig, args, live: bool) -> int:
                 report.mismatches,
             )
             save_reconciliation_state(
-                False, report.mismatches, cfg.execution.recon_state_path,
+                False, report.mismatches, recon_state_path,
                 as_of=report.as_of,
             )
+            # The live book does NOT match intent (e.g. orders rejected, no
+            # market data / competing session, or partial fills). Treat this as
+            # an incomplete rebalance: propagate non-zero so the scheduler does
+            # NOT advance the cadence. The saved mismatch state additionally
+            # gates the next cycle until a human reviews/resets, so a 0-fill
+            # cycle can never be silently mistaken for a completed rebalance.
+            trade_exit_code = 4
     finally:
         await broker.disconnect()
-    return 0
+    return trade_exit_code
 
 
 def cmd_paper(cfg: ETFConfig, args) -> int:
+    if not _promotion_gate_allows_execution(args):
+        return 4
     return asyncio.run(_trade(cfg, args, live=False))
 
 
@@ -663,6 +755,7 @@ async def _run_loop(cfg: ETFConfig, args, live: bool) -> int:
     """
     from etf.runner import (
         MarketCalendar,
+        RunDecision,
         ScheduleState,
         decide_action,
         load_schedule_state,
@@ -685,6 +778,25 @@ async def _run_loop(cfg: ETFConfig, args, live: bool) -> int:
             window_minutes=window_minutes,
             force=args.force,
         )
+        if (
+            args.force
+            and getattr(args, "paper_sim_fallback", False)
+            and not live
+            and not decision.should_trade
+        ):
+            # Operator emergency path for local simulated paper mode only:
+            # execute a cycle immediately even when outside market hours so
+            # deployment/run wiring can be validated on demand.
+            decision = RunDecision(
+                should_trade=True,
+                is_trading_day=decision.is_trading_day,
+                in_execution_window=decision.in_execution_window,
+                cadence_elapsed=decision.cadence_elapsed,
+                minutes_to_close=decision.minutes_to_close,
+                sleep_seconds=decision.sleep_seconds,
+                reasons=list(decision.reasons)
+                + ["forced immediate cycle in simulated paper fallback mode"],
+            )
         mtc = decision.minutes_to_close
         logger.info(
             "Scheduler @ %s ET: trade=%s (session=%s, window=%s, cadence_elapsed=%s, "
@@ -724,6 +836,8 @@ def cmd_run(cfg: ETFConfig, args) -> int:
             "Validate on paper for >= 20 trading days first (promotion gate)."
         )
         return 3
+    if not _promotion_gate_allows_execution(args):
+        return 4
     try:
         return asyncio.run(_run_loop(cfg, args, live=live))
     except KeyboardInterrupt:
@@ -763,6 +877,8 @@ def cmd_live(cfg: ETFConfig, args) -> int:
             "Validate on paper for >= 20 trading days first (promotion gate)."
         )
         return 3
+    if not _promotion_gate_allows_execution(args):
+        return 4
     return asyncio.run(_trade(cfg, args, live=True))
 
 
@@ -780,6 +896,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default=None, help="Write backtest results JSON to this path")
     p.add_argument("--execute", action="store_true", help="Actually submit orders (paper/live/run)")
     p.add_argument("--i-understand-the-risk", action="store_true", help="Required for live mode")
+    p.add_argument(
+        "--allow-gate-bypass",
+        action="store_true",
+        help="Allow paper/live/run execution even when promotion gate evidence is missing/failing (research use only).",
+    )
     # --- Live runner (mode=run) options ---------------------------------
     p.add_argument("--live", action="store_true", help="run mode: trade the live account (else paper). Still requires --execute and --i-understand-the-risk.")
     p.add_argument("--once", action="store_true", help="run mode: perform a single scheduling check (trade if due) then exit — ideal for a cron trigger.")
@@ -787,8 +908,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--anytime", action="store_true", help="run mode: widen the execution window to the whole session (still never trades when the market is closed).")
     p.add_argument("--force", action="store_true", help="run mode: bypass the cadence gate for one immediate rebalance (market-open gate still applies).")
     p.add_argument("--reset-equity", dest="reset_equity", action="store_true", help="reset-safety mode: also clear the persisted equity high-water-mark state.")
+    p.add_argument(
+        "--paper-sim-fallback",
+        action="store_true",
+        help="paper/run mode: if IBKR is unreachable, execute against a local simulated paper broker.",
+    )
     return p
-
 
 def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(argv)

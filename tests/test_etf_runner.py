@@ -10,6 +10,8 @@ so the pure scheduling logic is verified independent of the calendar backend.
 
 from __future__ import annotations
 
+import asyncio
+import types
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -187,3 +189,63 @@ def test_real_calendar_knows_july_4_holiday():
     if cal._cal is not None:
         assert not cal.is_session(date(2025, 7, 4))
     assert cal.is_session(date(2025, 7, 7))
+
+
+# ---------------------------------------------------------------------------
+# Runner cadence-advance gating (_run_loop)
+# ---------------------------------------------------------------------------
+# Regression: a failed/incomplete trade cycle (e.g. a post-trade reconciliation
+# mismatch caused by 0 fills / no market data) must NOT advance the rebalance
+# cadence. Otherwise a cycle that established no positions is mistaken for a
+# completed rebalance and the runner waits a full cadence (~21 trading days)
+# before retrying.
+def _run_loop_once(monkeypatch, trade_rc, tmp_path):
+    from etf import main as etf_main
+
+    decision = RunDecision(
+        should_trade=True, is_trading_day=True, in_execution_window=True,
+        cadence_elapsed=True, minutes_to_close=10.0, sleep_seconds=300,
+        reasons=["forced trade for test"],
+    )
+    monkeypatch.setattr("etf.runner.decide_action", lambda *a, **k: decision)
+    monkeypatch.setattr("etf.runner.load_schedule_state", lambda p: None)
+    monkeypatch.setattr("etf.runner.MarketCalendar", lambda *a, **k: _WeekdayCalendar())
+
+    advanced = {"called": False, "date": None}
+
+    def fake_save(state, path, **kw):
+        advanced["called"] = True
+        advanced["date"] = state.last_rebalance_date
+
+    monkeypatch.setattr("etf.runner.save_schedule_state", fake_save)
+
+    async def fake_trade(cfg, args, live):
+        return trade_rc
+
+    monkeypatch.setattr(etf_main, "_trade", fake_trade)
+
+    cfg = types.SimpleNamespace(
+        execution=types.SimpleNamespace(
+            rebalance_every=21,
+            schedule_state_path=str(tmp_path / "sched.json"),
+        )
+    )
+    args = types.SimpleNamespace(
+        anytime=False, window_minutes=30, force=False, once=True,
+        paper_sim_fallback=False,
+    )
+    rc = asyncio.run(etf_main._run_loop(cfg, args, live=False))
+    return rc, advanced
+
+
+def test_runloop_advances_cadence_on_clean_cycle(monkeypatch, tmp_path):
+    rc, advanced = _run_loop_once(monkeypatch, trade_rc=0, tmp_path=tmp_path)
+    assert rc == 0
+    assert advanced["called"] is True  # clean cycle -> cadence advanced
+
+
+def test_runloop_does_not_advance_cadence_on_failed_cycle(monkeypatch, tmp_path):
+    # _trade returns non-zero (post-trade reconciliation mismatch / 0 fills).
+    rc, advanced = _run_loop_once(monkeypatch, trade_rc=4, tmp_path=tmp_path)
+    assert rc == 0  # the --once loop pass itself completes
+    assert advanced["called"] is False  # cadence NOT advanced -> retries next window

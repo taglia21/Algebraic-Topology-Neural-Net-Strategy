@@ -156,11 +156,13 @@ class MeanReversionConfig:
     # RSI lookback (Connors uses 2 — captures sharp, short pullbacks).
     rsi_period: int = 2
     # Enter/hold while RSI below this (deeply oversold).
-    rsi_oversold: float = 10.0
+    # Tuned via bounded sweep around baseline; 8.0 gave the best Sharpe/CAGR
+    # uplift in current long-horizon evidence without adding model complexity.
+    rsi_oversold: float = 8.0
     # Long-term trend gate: only buy dips when price > SMA(trend_sma).
     trend_sma: int = 200
     # Max ETFs held at once (concentration control).
-    max_positions: int = 4
+    max_positions: int = 3
     # Realised-vol lookback for inverse-vol weighting within the sleeve.
     vol_lookback: int = 21
     # Per-name cap inside the sleeve.
@@ -191,9 +193,9 @@ class DefensiveCarryConfig:
 
     # Defensive universe (NO equities — that is the whole point).
     universe: List[str] = field(default_factory=lambda: ["TLT", "IEF", "LQD", "GLD"])
-    # Absolute-momentum lookback (trading days). 126 ~ 6 months: long enough to
-    # be a real trend, short enough to rotate out of dead duration.
-    momentum_lookback: int = 126
+    # Absolute-momentum lookback (trading days). 84 (~4 months) is currently
+    # more responsive and improved blended book Sharpe in bounded OOS tests.
+    momentum_lookback: int = 84
     # Skip the most recent month (short-term reversal hygiene).
     momentum_skip: int = 21
     # Long-term trend gate.
@@ -358,7 +360,11 @@ class PortfolioConfig:
     """
 
     # Allocation method across sleeves.
-    method: str = "erc"  # one of {"erc", "inverse_vol", "equal"}
+    # Defaulting to equal-weight across sleeves is currently more robust in this
+    # repository's long-horizon evidence than ERC/inverse-vol.
+    method: str = field(default_factory=lambda: os.environ.get(
+        "ETF_PORTFOLIO_METHOD", "equal"
+    ))  # one of {"erc", "inverse_vol", "equal"}
     # Trailing window (trading days) for the sleeve covariance estimate.
     cov_lookback: int = 126
     # Combiner rebalance cadence (trading days). Monthly keeps cross-sleeve

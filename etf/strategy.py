@@ -228,3 +228,25 @@ def apply_drawdown_overlay(decision: WeightDecision, current_drawdown: float, cf
         eligible=decision.eligible,
         selected=decision.selected,
     )
+
+
+def enforce_gross_cap(weights: Dict[str, float], max_gross: float) -> Dict[str, float]:
+    """Scale a weight book down proportionally so ``sum(|w|) <= max_gross``.
+
+    The vol-targeting clip guarantees the *target* book is within the leverage
+    cap, but the live-like min-rebalance-delta filter holds some positions at
+    their prior weight while moving others, so the *effective* book actually held
+    can drift above the cap. This proportional trim enforces the gross-leverage
+    constraint on whatever book is about to be held, in both the backtester and
+    the live brokers, keeping them aligned.
+
+    No-op when already within the cap, when the book is empty, or when
+    ``max_gross <= 0`` (cap disabled). Relative composition is preserved.
+    """
+    if max_gross <= 0:
+        return {k: float(v) for k, v in weights.items()}
+    gross = sum(abs(float(v)) for v in weights.values())
+    if gross <= max_gross or gross <= 0.0:
+        return {k: float(v) for k, v in weights.items()}
+    scale = max_gross / gross
+    return {k: float(v) * scale for k, v in weights.items()}

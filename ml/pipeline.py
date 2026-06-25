@@ -419,6 +419,13 @@ class MLPipeline:
                 mode    = "classification",
             )
             labels = model_tmp.prepare_labels(price_data)
+            close_series = price_data.get("close", price_data.get("Close"))
+            if close_series is not None:
+                forward_returns = np.log(
+                    close_series.shift(-horizon) / close_series.replace(0.0, np.nan)
+                ).rename(f"fwd_ret_h{horizon}")
+            else:
+                forward_returns = None
 
             # --- Step 2: Purged walk-forward to collect OOS predictions ---
             # MI feature selection is now performed INSIDE each walk-forward fold
@@ -528,6 +535,7 @@ class MLPipeline:
                         model_factory = _factory,
                         features      = features_h,
                         labels        = labels,
+                        forward_returns = forward_returns,
                         config        = {
                             "train_window":      ml_cfg.train_window_days,
                             "test_window":       21,

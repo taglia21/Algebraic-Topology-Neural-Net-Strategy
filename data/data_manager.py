@@ -55,6 +55,7 @@ from __future__ import annotations
 import warnings
 from datetime import datetime, timezone
 from typing import Dict, Generator, Iterator, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -76,7 +77,7 @@ _MAX_FFILL_BARS: int = 5          # Fill-forward limit before issuing warning
 _MARKET_OPEN_HOUR: int = 9        # 09:30 ET
 _MARKET_OPEN_MINUTE: int = 30
 _MARKET_CLOSE_HOUR: int = 16      # 16:00 ET
-_ET_OFFSET_HOURS: int = -5        # Standard EST offset from UTC (approx)
+_NY_TZ = ZoneInfo("America/New_York")
 
 
 # ---------------------------------------------------------------------------
@@ -783,28 +784,26 @@ def _max_consecutive_nans(df: pd.DataFrame) -> int:
 
 
 def _count_out_of_hours(sym_df: pd.DataFrame) -> int:
-    """Count bars whose timestamp falls outside 09:30–16:00 ET (approximate).
+    """Count bars outside 09:30–16:00 America/New_York trading session.
 
-    Fully vectorised implementation using pandas DatetimeIndex operations.
-    We convert UTC timestamps to approximate ET by subtracting 5 hours
-    (standard time; daylight saving is not accounted for as this check
-    is advisory only).
+    This check is timezone-aware and DST-safe.
     """
-    datetimes = sym_df.index.get_level_values("datetime")
+    datetimes = pd.DatetimeIndex(sym_df.index.get_level_values("datetime"))
     if len(datetimes) == 0:
         return 0
 
     try:
-        # Vectorised: extract hour and minute as integer arrays
-        et_hours = (datetimes.hour - _ET_OFFSET_HOURS) % 24
-        et_minutes = datetimes.minute
+        if datetimes.tz is None:
+            datetimes = datetimes.tz_localize(timezone.utc)
+        else:
+            datetimes = datetimes.tz_convert(timezone.utc)
+        ny_times = datetimes.tz_convert(_NY_TZ)
 
-        # Encode as fractional hours for simple comparison
-        et_time = et_hours + et_minutes / 60.0
-        market_open = _MARKET_OPEN_HOUR + _MARKET_OPEN_MINUTE / 60.0  # 9.5
-        market_close = float(_MARKET_CLOSE_HOUR)                      # 16.0
+        minutes = ny_times.hour * 60 + ny_times.minute
+        market_open = _MARKET_OPEN_HOUR * 60 + _MARKET_OPEN_MINUTE
+        market_close = _MARKET_CLOSE_HOUR * 60
 
-        outside = (et_time < market_open) | (et_time > market_close)
+        outside = (minutes < market_open) | (minutes > market_close)
         return int(outside.sum())
     except (AttributeError, TypeError):
         return 0

@@ -370,7 +370,13 @@ class SystemOrchestrator:
                 if len(price_data) >= 20:
                     signals = signal_gen.generate_all_signals(price_data, regime_state, volume_data=volume_data)
                     if signals:
-                        orders = exec_mgr.process_signals(signals, current_prices)
+                        returns_data = price_data.pct_change().dropna()
+                        orders = exec_mgr.process_signals(
+                            signals,
+                            current_prices,
+                            returns_data=returns_data,
+                            volume_data=volume_data,
+                        )
                         logger.info(
                             f"Cycle {cycle}: {len(signals)} signals → "
                             f"{len(orders)} orders submitted."

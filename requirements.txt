@@ -31,3 +31,7 @@ pyarrow>=14.0
 
 # Market calendar
 exchange-calendars>=4.2
+
+# Dashboard and monitoring UI
+streamlit>=1.36
+plotly>=5.22

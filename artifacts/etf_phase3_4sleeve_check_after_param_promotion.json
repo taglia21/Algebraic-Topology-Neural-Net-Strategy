@@ -1,0 +1,47 @@
+{
+  "equal": {
+    "sharpe": 0.42169232735477347,
+    "sortino": 0.540253634302487,
+    "cagr": 0.05144641843271591,
+    "max_drawdown": -0.07689493739585729,
+    "calmar": 0.6690481867209062,
+    "profit_factor": 1.2027030490816235,
+    "cpcv_median": 0.9557218886931911,
+    "gate": {
+      "OOS Sharpe >= 1.10": false,
+      "Max drawdown <= 18%": true,
+      "Calmar >= 0.80": false,
+      "Profit factor >= 1.20": true
+    }
+  },
+  "inverse_vol": {
+    "sharpe": 0.32192590318099346,
+    "sortino": 0.4091941346373482,
+    "cagr": 0.04435057362529449,
+    "max_drawdown": -0.05146428331392949,
+    "calmar": 0.8617738510951034,
+    "profit_factor": 1.2038338131827335,
+    "cpcv_median": 0.9517799982915633,
+    "gate": {
+      "OOS Sharpe >= 1.10": false,
+      "Max drawdown <= 18%": true,
+      "Calmar >= 0.80": true,
+      "Profit factor >= 1.20": true
+    }
+  },
+  "erc": {
+    "sharpe": 0.26966453092472925,
+    "sortino": 0.3416236719345212,
+    "cagr": 0.04177240037505947,
+    "max_drawdown": -0.052015366404061014,
+    "calmar": 0.8030780760163627,
+    "profit_factor": 1.1958796058796934,
+    "cpcv_median": 0.929312427427055,
+    "gate": {
+      "OOS Sharpe >= 1.10": false,
+      "Max drawdown <= 18%": true,
+      "Calmar >= 0.80": true,
+      "Profit factor >= 1.20": false
+    }
+  }
+}

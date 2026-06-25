@@ -467,3 +467,48 @@ def test_get_account_reads_summary_rows():
     assert acct.equity == pytest.approx(1021473.52)
     assert acct.cash == pytest.approx(1020510.62)
     assert acct.positions == {"XLK": 100.0}
+
+
+# ---------------------------------------------------------------------------
+# Gross-leverage cap enforced on the EFFECTIVE held book (min-delta drift)
+# ---------------------------------------------------------------------------
+def test_plan_rebalance_enforces_gross_cap_after_min_delta_drift():
+    # Reproduces the latent live breach: starting fully invested at gross 1.0
+    # (A 45%, B 45%, C 10%), the new target trims A,B to 30% (a 15% move, BELOW
+    # the 20% min-rebalance-delta -> RETAINED at 45%) while lifting C to 40%
+    # (a 30% move -> ADOPTED). The raw effective book is therefore 0.45+0.45+
+    # 0.40 = 1.30 gross, well over the 1.0 cap. The cap must trim it back.
+    fake = _FakeIB(
+        tickers={
+            "A": _LiveTicker(100.0, ready_after=0.0),
+            "B": _LiveTicker(100.0, ready_after=0.0),
+            "C": _LiveTicker(100.0, ready_after=0.0),
+        },
+        rows=[_Row("NetLiquidation", "100000"), _Row("TotalCashValue", "0")],
+        positions=[_Pos("A", 450.0), _Pos("B", 450.0), _Pos("C", 100.0)],
+    )
+    b = _broker_with(fake)
+    cfg = get_default_config()
+    cfg.execution.min_rebalance_delta = 0.20   # 15% A/B moves stay retained
+    cfg.risk.max_gross_leverage = 1.0
+
+    orders = asyncio.run(
+        b.plan_rebalance({"A": 0.30, "B": 0.30, "C": 0.40}, cfg)
+    )
+    assert orders is not None
+
+    # Reconstruct the held book that these orders produce.
+    shares = {"A": 450.0, "B": 450.0, "C": 100.0}
+    for o in orders:
+        shares[o.symbol] += o.quantity if o.action == "BUY" else -o.quantity
+    equity = 100_000.0
+    gross = sum(abs(s) * 100.0 for s in shares.values()) / equity
+
+    # Capped book respects the 1.0 limit (was 1.30 without enforcement).
+    assert gross <= cfg.risk.max_gross_leverage + 1e-3
+    assert gross == pytest.approx(1.0, abs=5e-3)
+    # The cap forced A and B to be trimmed even though min-delta alone would
+    # have left them untouched -> there must be SELL orders for both.
+    sells = {o.symbol for o in orders if o.action == "SELL"}
+    assert {"A", "B"} <= sells
+

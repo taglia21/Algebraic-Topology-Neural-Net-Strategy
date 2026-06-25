@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from etf.config import ETFConfig, IBKRConfig
+from etf.strategy import enforce_gross_cap
 
 logger = logging.getLogger("etf.ibkr")
 
@@ -424,15 +425,28 @@ class IBKRETFBroker:
             prices[sym] = px
 
         min_delta_notional = cfg.execution.min_rebalance_delta * equity
-        orders: List[PlannedOrder] = []
+        # 1. Effective post-min-delta book: adopt the target where the move
+        #    clears the churn threshold, else retain the current weight.
+        effective_w: Dict[str, float] = {}
         for sym in symbols:
             tgt_w = target_weights.get(sym, 0.0)
             cur_shares = account.positions.get(sym, 0.0)
+            delta_notional = tgt_w * equity - cur_shares * prices[sym]
             cur_w = (cur_shares * prices[sym]) / equity if equity else 0.0
-            target_notional = tgt_w * equity
-            delta_notional = target_notional - cur_shares * prices[sym]
-            if abs(delta_notional) < min_delta_notional:
-                continue  # below churn threshold; skip
+            effective_w[sym] = (
+                tgt_w if abs(delta_notional) >= min_delta_notional else cur_w
+            )
+        # 2. Strictly enforce the gross-leverage cap on the book about to be held
+        #    (the min-delta mix can drift above the cap even when the target book
+        #    is within it). No-op when already within the cap.
+        effective_w = enforce_gross_cap(effective_w, cfg.risk.max_gross_leverage)
+        # 3. Generate orders from current shares -> effective weights.
+        orders: List[PlannedOrder] = []
+        for sym in symbols:
+            eff_w = effective_w.get(sym, 0.0)
+            cur_shares = account.positions.get(sym, 0.0)
+            cur_w = (cur_shares * prices[sym]) / equity if equity else 0.0
+            delta_notional = eff_w * equity - cur_shares * prices[sym]
             qty = int(round(delta_notional / prices[sym]))
             if qty == 0:
                 continue
@@ -446,7 +460,7 @@ class IBKRETFBroker:
                 symbol=sym,
                 action=action,
                 quantity=abs(qty),
-                target_weight=tgt_w,
+                target_weight=eff_w,
                 current_weight=cur_w,
                 est_price=prices[sym],
                 est_notional=abs(qty) * prices[sym],

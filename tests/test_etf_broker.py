@@ -78,7 +78,7 @@ def test_reconciliation_match_within_tolerance():
     positions = {"SPY": 50.0, "QQQ": 25.0}
     prices = {"SPY": 100.0, "QQQ": 200.0}
     equity = 10_000.0  # SPY 50*100=5000 (50%), QQQ 25*200=5000 (50%)
-    rep = compute_reconciliation(target, positions, prices, equity, tolerance=0.02)
+    rep = compute_reconciliation(target, positions, prices, equity)
     assert isinstance(rep, ReconciliationReport)
     assert rep.ok
     assert rep.mismatches == {}
@@ -92,7 +92,7 @@ def test_reconciliation_flags_drift_beyond_tolerance():
     positions = {"SPY": 50.0, "QQQ": 15.0}
     prices = {"SPY": 100.0, "QQQ": 200.0}
     equity = 10_000.0  # QQQ 15*200=3000 -> 30%
-    rep = compute_reconciliation(target, positions, prices, equity, tolerance=0.02)
+    rep = compute_reconciliation(target, positions, prices, equity)
     assert not rep.ok
     assert "QQQ" in rep.mismatches
     assert rep.mismatches["QQQ"] == pytest.approx(0.20, abs=1e-9)
@@ -106,7 +106,7 @@ def test_reconciliation_flags_unexpected_position():
     positions = {"SPY": 100.0, "XLE": 50.0}
     prices = {"SPY": 100.0, "XLE": 80.0}
     equity = 14_000.0  # SPY 100% target; XLE 50*80=4000 -> ~28.6% unexpected
-    rep = compute_reconciliation(target, positions, prices, equity, tolerance=0.02)
+    rep = compute_reconciliation(target, positions, prices, equity)
     assert not rep.ok
     assert "XLE" in rep.mismatches
 
@@ -114,7 +114,7 @@ def test_reconciliation_flags_unexpected_position():
 def test_reconciliation_failsafe_on_zero_equity():
     # Degenerate equity -> no realised weights, every nonzero target is a mismatch.
     target = {"SPY": 0.5, "QQQ": 0.5}
-    rep = compute_reconciliation(target, {}, {}, 0.0, tolerance=0.02)
+    rep = compute_reconciliation(target, {}, {}, 0.0)
     assert not rep.ok
     assert set(rep.mismatches) == {"SPY", "QQQ"}
 
@@ -126,50 +126,52 @@ def test_reconciliation_ignores_missing_price_symbol():
     positions = {"SPY": 50.0, "QQQ": 25.0}
     prices = {"SPY": 100.0}  # QQQ price missing
     equity = 10_000.0
-    rep = compute_reconciliation(target, positions, prices, equity, tolerance=0.02)
+    rep = compute_reconciliation(target, positions, prices, equity)
     assert not rep.ok
     assert "QQQ" in rep.mismatches
 
 
-def test_reconciliation_tolerance_absorbs_realistic_postfill_drift():
-    """Regression: a successful rebalance leaves a few % of fill noise.
+def test_reconciliation_flags_zero_fill_even_for_small_targets():
+    """Regression (2026-06-26 root cause): when the vol-target sizes a small
+    book (gross ~14%, legs ~2-3.4% of NAV) and the orders get ZERO fills
+    (here: a competing IBKR session starved the paper engine of market data so
+    no paper fills simulated), the live book is all cash. Every unfilled leg
+    MUST be flagged. A flat absolute 5% band would have wrongly passed this
+    (a 2.2% target left fully unfilled is only 2.2% absolute drift); the
+    relative band catches it because the leg is ~100% unfilled."""
+    target = {"IWM": 0.0342, "XLI": 0.0324, "QQQ": 0.0298,
+              "XLK": 0.0224, "EEM": 0.0215}
+    # No positions, all cash -> realised weight 0 for every leg.
+    rep = compute_reconciliation(target, {}, {}, 1_000_000.0)
+    assert not rep.ok
+    assert set(rep.mismatches) == set(target)
 
-    On 2026-06-26 the paper bot DID establish its full book, but the realised
-    weights sat ~2-3.4% off target (whole-share rounding + live-vs-mark price
-    basis + equity basis shift between sizing and post-fill valuation). The old
-    2% reconciliation tolerance (borrowed from the churn threshold) flagged this
-    NORMAL drift as a MISMATCH, which then permanently hard-blocked every later
-    cycle. The realistic 5% reconciliation tolerance must treat this as OK.
-    """
-    target = {"XLI": 0.20, "XLK": 0.20, "IWM": 0.20, "EEM": 0.20, "QQQ": 0.20}
-    # Realised weights drifted by the actual Friday magnitudes (<=3.44%).
-    realised = {"XLI": 0.2327, "XLK": 0.1774, "IWM": 0.1656,
-                "EEM": 0.2215, "QQQ": 0.2301}
+
+def test_reconciliation_ignores_whole_share_rounding_noise():
+    """A genuinely established book differs from target only by sub-percent
+    whole-share rounding; that must reconcile OK and never self-block."""
+    target = {"SPY": 0.20, "QQQ": 0.03}
+    realised = {"SPY": 0.1998, "QQQ": 0.0299}
     equity = 1_000_000.0
-    prices = {s: 100.0 for s in target}
+    prices = {"SPY": 100.0, "QQQ": 100.0}
     positions = {s: w * equity / 100.0 for s, w in realised.items()}
-
-    # Old churn-threshold tolerance: false MISMATCH (the bug).
-    bad = compute_reconciliation(target, positions, prices, equity, tolerance=0.02)
-    assert not bad.ok
-
-    # New realistic tolerance: OK, book accepted, no self-block.
-    good = compute_reconciliation(target, positions, prices, equity, tolerance=0.05)
-    assert good.ok
-    assert good.mismatches == {}
+    rep = compute_reconciliation(target, positions, prices, equity)
+    assert rep.ok
+    assert rep.mismatches == {}
 
 
-def test_reconciliation_still_flags_material_gap_under_wider_tolerance():
-    """A genuine failure (e.g. a zero-fill / rejected leg) drifts the book by
-    far more than fill noise and must STILL trip the mismatch guard at 5%."""
-    target = {"SPY": 0.5, "QQQ": 0.5}
-    # QQQ leg never filled -> 50% gap, far beyond realistic fill noise.
-    positions = {"SPY": 50.0, "QQQ": 0.0}
-    prices = {"SPY": 100.0, "QQQ": 200.0}
-    equity = 10_000.0
-    rep = compute_reconciliation(target, positions, prices, equity, tolerance=0.05)
-    assert not rep.ok
-    assert "QQQ" in rep.mismatches
+def test_reconciliation_relative_band_scales_with_position():
+    """The acceptable drift scales with the leg's target weight: a moderate
+    relative drift is OK, a large one (approaching a failed fill) is flagged."""
+    target = {"SPY": 0.20}
+    equity = 1_000_000.0
+    prices = {"SPY": 100.0}
+    # 15% relative drift (0.17 vs 0.20) -> within 25% band -> OK.
+    ok_pos = {"SPY": 0.17 * equity / 100.0}
+    assert compute_reconciliation(target, ok_pos, prices, equity).ok
+    # 40% relative drift (0.12 vs 0.20) -> exceeds band -> flagged.
+    bad_pos = {"SPY": 0.12 * equity / 100.0}
+    assert not compute_reconciliation(target, bad_pos, prices, equity).ok
 
 
 # ---------------------------------------------------------------------------

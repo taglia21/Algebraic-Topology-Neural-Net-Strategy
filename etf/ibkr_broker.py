@@ -130,16 +130,30 @@ def compute_reconciliation(
     prices: Dict[str, float],
     equity: float,
     *,
-    tolerance: float = 0.02,
+    rel_tolerance: float = 0.25,
+    abs_floor: float = 0.005,
     as_of: str = "",
 ) -> ReconciliationReport:
-    """Compare realised portfolio weights to target; flag any |delta| > tolerance.
+    """Compare realised portfolio weights to target; flag material per-symbol drift.
 
     Pure function (no broker dependency) so it is fully unit-testable. ``equity``
     and ``prices`` come from the broker snapshot; ``positions`` is symbol->shares.
+
+    Tolerance is RELATIVE to each leg's target weight (with a small absolute
+    floor), NOT a flat absolute band. This is deliberate: the book's gross
+    exposure varies with the vol-target (it can be 14% in a defensive regime or
+    ~100% risk-on), so a single leg's target may be 2% or 25% of NAV. A flat
+    absolute band either (a) false-flags whole-share rounding on big legs or,
+    far worse, (b) lets a TOTAL zero-fill of a small leg slip through as "OK"
+    (a 1.9% target fully unfilled is only 1.9% absolute drift). A leg is flagged
+    when its drift exceeds ``max(abs_floor, rel_tolerance * |target|)`` — so a
+    missing/rejected leg (≈100% relative drift) always trips regardless of how
+    small the book is, while sub-percent fill noise never does.
+
     A mismatch means the live book drifted from intent (partial fill, rejected
-    order, stale data) and must be investigated before the next cycle — the
-    Paper→Live gate requires zero unresolved mismatches.
+    order, zero-fill from a competing/data-starved session) and must be
+    investigated before the next cycle — the Paper→Live gate requires zero
+    unresolved mismatches.
     """
     realised: Dict[str, float] = {}
     if equity > 0:
@@ -150,8 +164,10 @@ def compute_reconciliation(
     symbols = set(target_weights) | set(realised)
     mismatches: Dict[str, float] = {}
     for sym in symbols:
-        delta = abs(realised.get(sym, 0.0) - target_weights.get(sym, 0.0))
-        if delta > tolerance:
+        target = target_weights.get(sym, 0.0)
+        delta = abs(realised.get(sym, 0.0) - target)
+        band = max(abs_floor, rel_tolerance * abs(target))
+        if delta > band:
             mismatches[sym] = float(delta)
     return ReconciliationReport(
         ok=len(mismatches) == 0,
@@ -615,7 +631,7 @@ class IBKRETFBroker:
             account.positions,
             prices,
             account.equity,
-            tolerance=cfg.execution.reconciliation_tolerance,
+            rel_tolerance=cfg.execution.reconciliation_tolerance,
         )
         if report.ok:
             logger.info("Reconciliation OK (%d symbols, equity %.2f).",

@@ -456,24 +456,22 @@ class ExecutionConfig:
     # Don't trade a position if the target change is below this (avoid churn).
     min_rebalance_delta: float = 0.02  # 2% of NAV
 
-    # Post-fill reconciliation tolerance: max acceptable per-symbol drift between
-    # the realised live book and the target weights before a cycle is flagged as
-    # a MISMATCH (which hard-blocks the next cycle until reviewed).
+    # Post-fill reconciliation tolerance, expressed as a fraction of each leg's
+    # TARGET weight (with a small absolute floor inside compute_reconciliation).
+    # A leg is flagged as a MISMATCH when its realised-vs-target drift exceeds
+    # max(abs_floor, reconciliation_tolerance * |target|).
     #
-    # This is DELIBERATELY distinct from and wider than ``min_rebalance_delta``.
-    # ``min_rebalance_delta`` is a *churn* threshold (don't bother trading tiny
-    # deltas); reconciliation tolerance is about *fill realism*. After a real
-    # rebalance the realised book legitimately differs from target by a few %
-    # because of: whole-share rounding, fills executing at live prices while the
-    # book is valued on (possibly delayed) marks, and the equity basis shifting
-    # between sizing and post-fill valuation. Using the 2% churn threshold here
-    # flags a NORMAL, fully-established book as a mismatch and then permanently
-    # self-blocks every subsequent cycle — a false positive that looks like the
-    # bot "stopped trading". 5% still catches genuine failures (rejected orders,
-    # large partial fills, zero-fill from a competing session) which drift the
-    # book by far more than realistic fill noise.
+    # This is RELATIVE on purpose, not a flat absolute band, and is distinct
+    # from ``min_rebalance_delta`` (a churn threshold). The book's gross exposure
+    # floats with the vol-target (it can be ~14% in a defensive regime or ~100%
+    # risk-on), so a single leg may be 2% or 25% of NAV. A flat absolute band
+    # would let a TOTAL zero-fill of a small leg pass as "OK" (a 1.9% target left
+    # entirely unfilled is only 1.9% absolute drift) — the exact failure that
+    # must never be masked. At 0.25 a leg must fill to within 25% of its intended
+    # weight: a missing/rejected/zero-fill leg (~100% relative drift) always
+    # trips, while sub-percent whole-share rounding noise never does.
     reconciliation_tolerance: float = field(default_factory=lambda: _env_float(
-        "ETF_RECONCILIATION_TOLERANCE", 0.05))
+        "ETF_RECONCILIATION_TOLERANCE", 0.25))
 
     # Order type for live/paper execution: "MKT" or "LMT".
     order_type: str = "MKT"

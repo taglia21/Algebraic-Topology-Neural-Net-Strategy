@@ -232,6 +232,6 @@ class SimulatedPaperBroker:
             account.positions,
             prices,
             account.equity,
-            tolerance=cfg.execution.reconciliation_tolerance,
+            rel_tolerance=cfg.execution.reconciliation_tolerance,
             as_of=datetime.now(timezone.utc).isoformat(),
         )

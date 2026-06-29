@@ -21,6 +21,13 @@ UNITS=("${ETF_HEALTHCHECK_UNITS:-ibc-gateway.service etf-engine.service}")
 # shellcheck disable=SC2206
 UNITS=(${UNITS[*]})
 
+# Optional operator maintenance lock: when present, suppress liveness paging.
+# Use this before intentional service stops/manual runs to avoid alert storms.
+MAINT_FILE="${ETF_HEALTHCHECK_MAINTENANCE_FILE:-/tmp/etf-healthcheck.maintenance}"
+if [[ -f "$MAINT_FILE" ]]; then
+    exit 0
+fi
+
 problems=()
 for unit in "${UNITS[@]}"; do
     state="$(systemctl is-active "$unit" 2>/dev/null || true)"

@@ -615,7 +615,7 @@ class IBKRETFBroker:
             account.positions,
             prices,
             account.equity,
-            tolerance=cfg.execution.min_rebalance_delta,
+            tolerance=cfg.execution.reconciliation_tolerance,
         )
         if report.ok:
             logger.info("Reconciliation OK (%d symbols, equity %.2f).",

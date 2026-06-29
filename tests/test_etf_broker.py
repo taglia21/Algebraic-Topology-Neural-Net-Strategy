@@ -131,6 +131,47 @@ def test_reconciliation_ignores_missing_price_symbol():
     assert "QQQ" in rep.mismatches
 
 
+def test_reconciliation_tolerance_absorbs_realistic_postfill_drift():
+    """Regression: a successful rebalance leaves a few % of fill noise.
+
+    On 2026-06-26 the paper bot DID establish its full book, but the realised
+    weights sat ~2-3.4% off target (whole-share rounding + live-vs-mark price
+    basis + equity basis shift between sizing and post-fill valuation). The old
+    2% reconciliation tolerance (borrowed from the churn threshold) flagged this
+    NORMAL drift as a MISMATCH, which then permanently hard-blocked every later
+    cycle. The realistic 5% reconciliation tolerance must treat this as OK.
+    """
+    target = {"XLI": 0.20, "XLK": 0.20, "IWM": 0.20, "EEM": 0.20, "QQQ": 0.20}
+    # Realised weights drifted by the actual Friday magnitudes (<=3.44%).
+    realised = {"XLI": 0.2327, "XLK": 0.1774, "IWM": 0.1656,
+                "EEM": 0.2215, "QQQ": 0.2301}
+    equity = 1_000_000.0
+    prices = {s: 100.0 for s in target}
+    positions = {s: w * equity / 100.0 for s, w in realised.items()}
+
+    # Old churn-threshold tolerance: false MISMATCH (the bug).
+    bad = compute_reconciliation(target, positions, prices, equity, tolerance=0.02)
+    assert not bad.ok
+
+    # New realistic tolerance: OK, book accepted, no self-block.
+    good = compute_reconciliation(target, positions, prices, equity, tolerance=0.05)
+    assert good.ok
+    assert good.mismatches == {}
+
+
+def test_reconciliation_still_flags_material_gap_under_wider_tolerance():
+    """A genuine failure (e.g. a zero-fill / rejected leg) drifts the book by
+    far more than fill noise and must STILL trip the mismatch guard at 5%."""
+    target = {"SPY": 0.5, "QQQ": 0.5}
+    # QQQ leg never filled -> 50% gap, far beyond realistic fill noise.
+    positions = {"SPY": 50.0, "QQQ": 0.0}
+    prices = {"SPY": 100.0, "QQQ": 200.0}
+    equity = 10_000.0
+    rep = compute_reconciliation(target, positions, prices, equity, tolerance=0.05)
+    assert not rep.ok
+    assert "QQQ" in rep.mismatches
+
+
 # ---------------------------------------------------------------------------
 # _extract_price — real-time vs delayed market-data fields (B1 fix)
 # ---------------------------------------------------------------------------
